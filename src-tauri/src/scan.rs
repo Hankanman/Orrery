@@ -35,6 +35,22 @@ pub fn scan(roots: &[String], depth: usize, ignore: &[String], favorites: &HashS
     repos
 }
 
+/// Just the discovered repo paths (no metadata) — used by the watcher to decide
+/// what to watch, far cheaper than a full scan.
+pub(crate) fn repo_paths(roots: &[String], depth: usize, ignore: &[String]) -> Vec<PathBuf> {
+    let ignore_set = build_ignore(ignore);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        for path in find_repos(&expand(root), depth, &ignore_set) {
+            if seen.insert(path.clone()) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
 fn build_ignore(ignore: &[String]) -> GlobSet {
     let mut builder = GlobSetBuilder::new();
     for pattern in ignore {
@@ -103,15 +119,7 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         .or_else(|| slug.as_ref().and_then(|s| s.rsplit('/').next().map(String::from)))
         .unwrap_or_else(|| dir_name.clone());
 
-    let activity = if last_commit_unix == 0 {
-        Activity::Stale
-    } else {
-        match now - last_commit_unix {
-            d if d < SEVEN_DAYS => Activity::Active,
-            d if d < THIRTY_DAYS => Activity::Idle,
-            _ => Activity::Stale,
-        }
-    };
+    let activity = classify_activity(last_commit_unix, now);
 
     Some(Repo {
         id: path.to_string_lossy().into_owned(),
@@ -129,6 +137,18 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         favorite,
         ai_summary: None,
     })
+}
+
+/// Map last-commit recency to an activity bucket (no commit → stale).
+fn classify_activity(last_commit_unix: i64, now: i64) -> Activity {
+    if last_commit_unix == 0 {
+        return Activity::Stale;
+    }
+    match now - last_commit_unix {
+        d if d < SEVEN_DAYS => Activity::Active,
+        d if d < THIRTY_DAYS => Activity::Idle,
+        _ => Activity::Stale,
+    }
 }
 
 fn git_status(repo: &Repository) -> GitStatus {
@@ -258,18 +278,26 @@ fn read_readme(path: &Path) -> (Option<String>, Option<String>) {
 
 /// Strip the most common inline markdown so titles/descriptions read cleanly.
 fn clean_markdown(s: &str) -> String {
-    let mut out = s.replace(['*', '`', '_'], "");
-    // Collapse [text](url) → text
-    while let (Some(open), Some(close)) = (out.find("]("), out.rfind(')')) {
-        if let Some(start) = out[..open].rfind('[') {
-            if close > open {
-                let text = out[start + 1..open].to_string();
-                out.replace_range(start..=close, &text);
-                continue;
+    let stripped = s.replace(['*', '`', '_'], "");
+    // Collapse every [text](url) → text, left to right (handles multiple links).
+    let mut out = String::with_capacity(stripped.len());
+    let mut rest = stripped.as_str();
+    while let Some(bracket) = rest.find("](") {
+        let Some(open) = rest[..bracket].rfind('[') else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..bracket]);
+        let after = &rest[bracket + 2..];
+        match after.find(')') {
+            Some(close) => rest = &after[close + 1..],
+            None => {
+                rest = after;
+                break;
             }
         }
-        break;
     }
+    out.push_str(rest);
     out.trim().to_string()
 }
 
@@ -364,7 +392,7 @@ fn home() -> Option<PathBuf> {
 }
 
 /// Expand a leading `~` to the home directory.
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(h) = home() {
             return h.join(rest);
@@ -388,4 +416,136 @@ fn abbreviate(path: &Path) -> String {
         }
     }
     s.into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn parse_remote_https_and_ssh_github() {
+        assert_eq!(
+            parse_remote("https://github.com/owner/repo.git"),
+            (Some(Host::Github), Some("owner/repo".into()))
+        );
+        assert_eq!(
+            parse_remote("git@github.com:owner/repo.git"),
+            (Some(Host::Github), Some("owner/repo".into()))
+        );
+        // no trailing .git
+        assert_eq!(
+            parse_remote("https://github.com/owner/repo"),
+            (Some(Host::Github), Some("owner/repo".into()))
+        );
+    }
+
+    #[test]
+    fn parse_remote_gitlab_including_self_hosted_and_nested() {
+        assert_eq!(
+            parse_remote("https://gitlab.com/group/proj.git"),
+            (Some(Host::Gitlab), Some("group/proj".into()))
+        );
+        assert_eq!(
+            parse_remote("ssh://git@gitlab.example.com/team/app.git").0,
+            Some(Host::Gitlab)
+        );
+        // nested groups → last two path components
+        assert_eq!(
+            parse_remote("https://gitlab.com/group/sub/proj.git").1,
+            Some("sub/proj".into())
+        );
+    }
+
+    #[test]
+    fn parse_remote_unknown_host_has_no_host_but_keeps_slug() {
+        assert_eq!(
+            parse_remote("https://example.com/foo/bar.git"),
+            (None, Some("foo/bar".into()))
+        );
+    }
+
+    #[test]
+    fn clean_markdown_strips_emphasis_and_links() {
+        assert_eq!(clean_markdown("**Bold** `code` _x_"), "Bold code x");
+        assert_eq!(clean_markdown("[Orrery](https://orrery.app) rocks"), "Orrery rocks");
+        // multiple links on one line must all collapse to their text
+        assert_eq!(clean_markdown("[A](u1) and [B](u2)"), "A and B");
+    }
+
+    #[test]
+    fn truncate_adds_ellipsis_only_when_needed() {
+        assert_eq!(truncate("abc", 5), "abc");
+        assert_eq!(truncate("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn classify_activity_buckets() {
+        let now = 1_000_000_000;
+        assert_eq!(classify_activity(0, now), Activity::Stale);
+        assert_eq!(classify_activity(now - 3600, now), Activity::Active);
+        assert_eq!(classify_activity(now - 10 * 24 * 3600, now), Activity::Idle);
+        assert_eq!(classify_activity(now - 40 * 24 * 3600, now), Activity::Stale);
+        // exact boundaries: comparison is strict `<`, so 7d → Idle, 30d → Stale
+        assert_eq!(classify_activity(now - 7 * 24 * 3600, now), Activity::Idle);
+        assert_eq!(classify_activity(now - 30 * 24 * 3600, now), Activity::Stale);
+    }
+
+    #[test]
+    fn expand_and_abbreviate_round_trip_home() {
+        let home = dirs::home_dir().expect("home");
+        assert_eq!(expand("~/dev/x"), home.join("dev/x"));
+        assert_eq!(expand("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(abbreviate(&home.join("dev/x")), "~/dev/x");
+    }
+
+    #[test]
+    fn detect_language_prefers_manifests() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(detect_language(dir.path()), Some("Rust".into()));
+
+        let js = tempfile::tempdir().unwrap();
+        fs::write(js.path().join("package.json"), "{}").unwrap();
+        assert_eq!(detect_language(js.path()), Some("JavaScript".into()));
+
+        let ts = tempfile::tempdir().unwrap();
+        fs::write(ts.path().join("package.json"), "{}").unwrap();
+        fs::write(ts.path().join("tsconfig.json"), "{}").unwrap();
+        assert_eq!(detect_language(ts.path()), Some("TypeScript".into()));
+    }
+
+    #[test]
+    fn detect_language_falls_back_to_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.py"), "").unwrap();
+        fs::write(dir.path().join("b.py"), "").unwrap();
+        fs::write(dir.path().join("c.js"), "").unwrap();
+        assert_eq!(detect_language(dir.path()), Some("Python".into()));
+    }
+
+    #[test]
+    fn repo_paths_finds_repos_skips_ignored_and_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("a/.git")).unwrap();
+        fs::create_dir_all(root.join("b/.git")).unwrap();
+        // nested repo inside a found repo — must not descend into it
+        fs::create_dir_all(root.join("a/sub/.git")).unwrap();
+        // ignored directory containing a repo — must be skipped
+        fs::create_dir_all(root.join("node_modules/pkg/.git")).unwrap();
+
+        let roots = vec![root.to_string_lossy().into_owned()];
+        let found = repo_paths(&roots, 4, &["node_modules".to_string()]);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(found.len(), 2, "found: {names:?}");
+        assert!(names.contains(&"a".to_string()));
+        assert!(names.contains(&"b".to_string()));
+        assert!(!names.iter().any(|n| n == "sub"), "must not descend into a found repo");
+        assert!(!names.iter().any(|n| n == "pkg"), "must skip ignored dirs");
+    }
 }

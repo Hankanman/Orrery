@@ -79,3 +79,30 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     let text = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
     fs::write(&path, text).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_sane() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.roots.is_empty(), "must have at least one root");
+        assert_eq!(cfg.scan_depth, 3);
+        assert!(cfg.ignore.iter().any(|i| i == "node_modules"));
+        assert!(cfg.ide_command.contains("{path}"), "ide template needs {{path}}");
+        assert!(cfg.agent_command.contains("{path}"), "agent template needs {{path}}");
+    }
+
+    #[test]
+    fn toml_round_trips() {
+        let cfg = AppConfig::default();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.roots, cfg.roots);
+        assert_eq!(back.scan_depth, cfg.scan_depth);
+        assert_eq!(back.ignore, cfg.ignore);
+        assert_eq!(back.ide_command, cfg.ide_command);
+        assert_eq!(back.agent_command, cfg.agent_command);
+    }
+}

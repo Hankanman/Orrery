@@ -5,6 +5,7 @@ mod config;
 mod launch;
 mod model;
 mod scan;
+mod watcher;
 
 /// Configure display/rendering environment on Linux before GTK/WebKit init.
 /// Both vars are only set if the user hasn't already set them, so anyone can
@@ -45,6 +46,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             appearance::spawn_watcher(app.handle().clone());
+            watcher::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
