@@ -4,16 +4,67 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
-  Orrery — "mission control" theme.
-  Dark-first: a deep blue-slate void with electric-cyan as the primary
-  accent (orbit/telemetry) and a violet secondary (stars). The app is
-  dark-only for now, so :root and .dark carry the same values.
+  Orrery theme — adaptive, native-feeling.
+
+  The app mirrors the desktop: `.dark` is toggled at runtime from the XDG
+  portal color-scheme (falling back to prefers-color-scheme), and `--primary`
+  (+ ring/sidebar derivatives) is overridden at runtime with the system accent
+  colour. The values below are sensible defaults for when no accent is exposed.
+
+  Dark stays the "mission control" deep blue-slate; light is a clean, airy
+  slate that still reads as the same product.
 */
 
-:root,
-.dark {
+:root {
   --radius: 0.625rem;
 
+  /* Surfaces — light */
+  --background: oklch(0.985 0.003 256);
+  --foreground: oklch(0.22 0.02 262);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 262);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.22 0.02 262);
+
+  /* Primary — overridden by the system accent at runtime */
+  --primary: oklch(0.55 0.13 235);
+  --primary-foreground: oklch(0.985 0.01 250);
+
+  --secondary: oklch(0.955 0.005 256);
+  --secondary-foreground: oklch(0.28 0.02 262);
+  --muted: oklch(0.955 0.005 256);
+  --muted-foreground: oklch(0.5 0.02 262);
+
+  --accent: oklch(0.55 0.16 295);
+  --accent-foreground: oklch(0.985 0.01 290);
+
+  --destructive: oklch(0.58 0.22 25);
+
+  --border: oklch(0.9 0.006 262);
+  --input: oklch(0.9 0.006 262);
+  --ring: oklch(0.55 0.13 235);
+
+  --ok: oklch(0.58 0.15 155);
+  --warn: oklch(0.62 0.15 70);
+  --danger: oklch(0.58 0.22 25);
+
+  --chart-1: oklch(0.55 0.13 235);
+  --chart-2: oklch(0.55 0.16 295);
+  --chart-3: oklch(0.58 0.15 155);
+  --chart-4: oklch(0.62 0.15 70);
+  --chart-5: oklch(0.58 0.22 25);
+
+  --sidebar: oklch(0.97 0.004 256);
+  --sidebar-foreground: oklch(0.22 0.02 262);
+  --sidebar-primary: oklch(0.55 0.13 235);
+  --sidebar-primary-foreground: oklch(0.985 0.01 250);
+  --sidebar-accent: oklch(0.955 0.005 256);
+  --sidebar-accent-foreground: oklch(0.28 0.02 262);
+  --sidebar-border: oklch(0.9 0.006 262);
+  --sidebar-ring: oklch(0.55 0.13 235);
+}
+
+.dark {
   /* Surfaces — deep space blue-slate, layered */
   --background: oklch(0.16 0.022 256);
   --foreground: oklch(0.94 0.01 250);
@@ -22,40 +73,34 @@
   --popover: oklch(0.21 0.028 256);
   --popover-foreground: oklch(0.94 0.01 250);
 
-  /* Primary — electric cyan (telemetry / orbit) */
+  /* Primary — overridden by the system accent at runtime */
   --primary: oklch(0.8 0.15 196);
   --primary-foreground: oklch(0.18 0.03 230);
 
-  /* Secondary / muted — slate panels */
   --secondary: oklch(0.27 0.025 256);
   --secondary-foreground: oklch(0.92 0.01 250);
   --muted: oklch(0.25 0.022 256);
   --muted-foreground: oklch(0.68 0.02 256);
 
-  /* Accent — violet (stars) */
   --accent: oklch(0.62 0.17 295);
   --accent-foreground: oklch(0.96 0.01 290);
 
   --destructive: oklch(0.62 0.21 25);
 
-  /* Lines & focus */
   --border: oklch(0.3 0.022 256);
   --input: oklch(0.3 0.022 256);
   --ring: oklch(0.8 0.15 196);
 
-  /* Status accents used across cards */
   --ok: oklch(0.78 0.16 155);
   --warn: oklch(0.82 0.16 85);
   --danger: oklch(0.66 0.2 25);
 
-  /* Charts */
   --chart-1: oklch(0.8 0.15 196);
   --chart-2: oklch(0.62 0.17 295);
   --chart-3: oklch(0.78 0.16 155);
   --chart-4: oklch(0.82 0.16 85);
   --chart-5: oklch(0.66 0.2 25);
 
-  /* Sidebar */
   --sidebar: oklch(0.18 0.024 256);
   --sidebar-foreground: oklch(0.94 0.01 250);
   --sidebar-primary: oklch(0.8 0.15 196);
@@ -110,8 +155,9 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "Fira Code", monospace;
+  /* Lead with the desktop's UI font so the app feels native. */
+  --font-sans: system-ui, ui-sans-serif, "Inter", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
 }
 
 @layer base {
@@ -127,7 +173,7 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    /* Subtle starfield/orbital glow in the deep background */
+    /* Subtle accent glow in the deep background (visible mostly in dark). */
     background-image:
       radial-gradient(
         1200px 600px at 78% -10%,

@@ -3,9 +3,11 @@ import { Orbit, RefreshCw, Search, Settings } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useSystemAppearance } from "@/hooks/useSystemAppearance";
 import { cn } from "@/lib/utils";
 
 export function AppShell() {
+  useSystemAppearance();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   return (
