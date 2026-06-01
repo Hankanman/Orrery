@@ -1,4 +1,4 @@
-import type { Activity } from "@/types";
+import type { Activity, Repo, RepoStatus } from "@/types";
 
 /** "4h ago" style relative time from a UTC unix-seconds timestamp. */
 export function timeAgo(unixSeconds: number, nowSeconds = Math.floor(Date.now() / 1000)): string {
@@ -49,3 +49,19 @@ export const ACTIVITY_META: Record<Activity, { label: string; className: string 
   idle: { label: "idle", className: "text-warn" },
   stale: { label: "stale", className: "text-muted-foreground" },
 };
+
+/**
+ * Derive the single status that drives a card's accent, in priority order:
+ * uncommitted work > behind upstream > no recent activity > clean.
+ */
+export function repoStatus(repo: Repo): RepoStatus {
+  if (repo.git.dirty > 0) return "dirty";
+  if (repo.git.behind > 0) return "behind";
+  if (repo.activity === "stale") return "stale";
+  return "clean";
+}
+
+/** Compact star count: 842 → "842", 1284 → "1.3k". */
+export function formatStars(stars: number): string {
+  return stars >= 1000 ? `${(stars / 1000).toFixed(1)}k` : String(stars);
+}

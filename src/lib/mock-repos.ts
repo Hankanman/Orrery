@@ -17,6 +17,12 @@ export const MOCK_REPOS: Repo[] = [
     git: { branch: "main", ahead: 2, behind: 0, dirty: 7 },
     lastCommitUnix: now - 1 * HOUR,
     activity: "active",
+    root: "~/dev/personal",
+    host: "github",
+    stars: 128,
+    favorite: true,
+    aiSummary:
+      "Active Tauri + React project in early development. Phase 1 (local-first grid) is underway; recent work touches the scanner and card layout.",
   },
   {
     id: "/home/seb/dev/personal/dotfiles",
@@ -28,6 +34,11 @@ export const MOCK_REPOS: Repo[] = [
     git: { branch: "main", ahead: 0, behind: 0, dirty: 0 },
     lastCommitUnix: now - 5 * DAY,
     activity: "idle",
+    root: "~/dev/personal",
+    host: "github",
+    stars: 34,
+    favorite: false,
+    aiSummary: null,
   },
   {
     id: "/home/seb/dev/work/api-gateway",
@@ -39,6 +50,12 @@ export const MOCK_REPOS: Repo[] = [
     git: { branch: "feat/jwt-rotation", ahead: 4, behind: 1, dirty: 3 },
     lastCommitUnix: now - 3 * HOUR,
     activity: "active",
+    root: "~/dev/work",
+    host: "gitlab",
+    stars: 0,
+    favorite: false,
+    aiSummary:
+      "Heavy active development on a feature branch — JWT rotation mid-refactor, with uncommitted changes and divergence from main.",
   },
   {
     id: "/home/seb/dev/play/raymarcher",
@@ -50,6 +67,11 @@ export const MOCK_REPOS: Repo[] = [
     git: { branch: "main", ahead: 0, behind: 0, dirty: 12 },
     lastCommitUnix: now - 40 * DAY,
     activity: "stale",
+    root: "~/dev/play",
+    host: null,
+    stars: 0,
+    favorite: false,
+    aiSummary: "Dormant local experiment with a dirty tree — no commits in over a month.",
   },
   {
     id: "/home/seb/dev/work/web-dashboard",
@@ -61,6 +83,11 @@ export const MOCK_REPOS: Repo[] = [
     git: { branch: "main", ahead: 0, behind: 3, dirty: 0 },
     lastCommitUnix: now - 8 * HOUR,
     activity: "active",
+    root: "~/dev/work",
+    host: "gitlab",
+    stars: 0,
+    favorite: false,
+    aiSummary: "Behind upstream by 3 commits — a pull is due before the next build.",
   },
   {
     id: "/home/seb/dev/personal/synth",
@@ -72,5 +99,11 @@ export const MOCK_REPOS: Repo[] = [
     git: { branch: "dev", ahead: 11, behind: 0, dirty: 1 },
     lastCommitUnix: now - 2 * DAY,
     activity: "idle",
+    root: "~/dev/personal",
+    host: "github",
+    stars: 213,
+    favorite: true,
+    aiSummary:
+      "Steady solo project on a dev branch — 11 commits ahead of main, one stray change pending.",
   },
 ];

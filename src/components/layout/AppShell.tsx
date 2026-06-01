@@ -1,10 +1,11 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { Orbit, RefreshCw, Search, Settings } from "lucide-react";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Folder, Orbit, RefreshCw, Search, Settings } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useSystemAppearance } from "@/hooks/useSystemAppearance";
+import { MOCK_REPOS } from "@/lib/mock-repos";
 import { cn } from "@/lib/utils";
+
+const ROOT_COUNT = new Set(MOCK_REPOS.map((r) => r.root)).size;
 
 export function AppShell() {
   useSystemAppearance();
@@ -13,42 +14,43 @@ export function AppShell() {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-full flex-col">
-        <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-border/70 bg-background/80 px-4 backdrop-blur">
-          <Link to="/" className="flex items-center gap-2 font-semibold tracking-tight">
-            <Orbit className="size-5 text-primary" />
+        <header className="orr-header">
+          <Link to="/" className="orr-brand">
+            <Orbit className="orr-mark size-6" />
             <span>Orrery</span>
           </Link>
-
-          <div className="relative ml-4 hidden max-w-md flex-1 sm:block">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search repos…   ⌘K"
-              className="h-9 bg-secondary/40 pl-8"
-              aria-label="Search repositories"
-            />
+          <div className="orr-roots">
+            <Folder className="size-3.5" />
+            <span>
+              {ROOT_COUNT} roots · {MOCK_REPOS.length} repos
+            </span>
           </div>
 
-          <div className="ml-auto flex items-center gap-1">
-            <Button variant="ghost" size="icon" aria-label="Refresh">
-              <RefreshCw className="size-4" />
-            </Button>
-            <Button
-              asChild
-              variant="ghost"
-              size="icon"
-              aria-label="Settings"
-              className={cn(pathname === "/settings" && "bg-secondary text-foreground")}
-            >
-              <Link to="/settings">
-                <Settings className="size-4" />
-              </Link>
-            </Button>
+          <div className="ml-auto" />
+
+          {/* Command bar — wires to the ⌘K palette in a later phase. */}
+          <div className="orr-search" role="button" tabIndex={0} aria-label="Search repos, run a command">
+            <Search className="size-4" />
+            <span className="ph">Search repos, run a command…</span>
+            <span className="kbd">⌘K</span>
           </div>
+
+          <button type="button" className="orr-iconbtn" title="Rescan" aria-label="Rescan">
+            <RefreshCw className="size-4" />
+          </button>
+          <Link
+            to="/settings"
+            className={cn("orr-iconbtn", pathname === "/settings" && "active")}
+            title="Settings"
+            aria-label="Settings"
+          >
+            <Settings className="size-4" />
+          </Link>
         </header>
 
-        <main className="flex-1 overflow-y-auto">
+        <div className="flex min-h-0 flex-1">
           <Outlet />
-        </main>
+        </div>
       </div>
     </TooltipProvider>
   );

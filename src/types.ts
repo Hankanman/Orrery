@@ -4,6 +4,12 @@
 
 export type Activity = "active" | "idle" | "stale";
 
+/** Derived working-tree state, drives the card's status accent. */
+export type RepoStatus = "clean" | "dirty" | "behind" | "stale";
+
+/** Where a repo's remote lives (host stats + icon on the card). */
+export type Host = "github" | "gitlab" | null;
+
 export interface GitStatus {
   branch: string;
   ahead: number;
@@ -29,4 +35,14 @@ export interface Repo {
   /** Seconds since the last commit (UTC). UI derives "4h ago". */
   lastCommitUnix: number;
   activity: Activity;
+  /** Root grouping (the scanned parent dir, e.g. "~/dev/personal"). */
+  root: string;
+  /** Origin host, if the repo has a remote. */
+  host: Host;
+  /** Host star count (0 if none / no remote). */
+  stars: number;
+  /** User-favorited (host amber star on the card). */
+  favorite: boolean;
+  /** Local-AI synthesized blurb (Phase 3); presence lights the violet indicator. */
+  aiSummary: string | null;
 }
