@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { ArrowUp, ArrowUpDown, CircleDot, Clock, LayoutGrid, List, Star } from "lucide-react";
-import { MOCK_REPOS } from "@/lib/mock-repos";
+import { ArrowUp, ArrowUpDown, CircleDot, Clock, FolderSearch, LayoutGrid, List, RefreshCw, Star } from "lucide-react";
 import { RepoCard, type RepoView } from "@/components/RepoCard";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { useRepos } from "@/lib/repos-context";
 import { repoStatus } from "@/lib/format";
 import type { Repo } from "@/types";
 import { cn } from "@/lib/utils";
@@ -37,19 +37,13 @@ function matchesChip(repo: Repo, chip: Chip): boolean {
 }
 
 export function GridView() {
+  const { repos, loading, ready, error, refresh, toggleFavorite, openIde, openAgent } = useRepos();
+
   const [activeRoot, setActiveRoot] = useState("all");
   const [langFilter, setLangFilter] = useState<string | null>(null);
   const [chips, setChips] = useState<Set<Chip>>(new Set());
   const [sort, setSort] = useState<SortKey>("activity");
   const [view, setView] = useState<RepoView>("grid");
-  const [favorites, setFavorites] = useState<Set<string>>(
-    () => new Set(MOCK_REPOS.filter((r) => r.favorite).map((r) => r.id)),
-  );
-
-  const repos = useMemo(
-    () => MOCK_REPOS.map((r) => ({ ...r, favorite: favorites.has(r.id) })),
-    [favorites],
-  );
 
   const visible = useMemo(() => {
     const filtered = repos.filter((r) => {
@@ -80,16 +74,11 @@ export function GridView() {
       return SORTS[(i + 1) % SORTS.length].key;
     });
 
-  const toggleFavorite = (repo: Repo) =>
-    setFavorites((prev) => {
-      const next = new Set(prev);
-      next.has(repo.id) ? next.delete(repo.id) : next.add(repo.id);
-      return next;
-    });
-
-  const openRepo = (r: Repo) => console.log("[orrery] open repo:", r.path);
-  const openIde = (r: Repo) => console.log("[orrery] open in IDE:", r.path);
-  const openAgent = (r: Repo) => console.log("[orrery] start agent:", r.path);
+  const clearFilters = () => {
+    setActiveRoot("all");
+    setLangFilter(null);
+    setChips(new Set());
+  };
 
   const title = activeRoot === "all" ? "All repos" : activeRoot;
   const sortLabel = SORTS.find((s) => s.key === sort)!.label;
@@ -117,20 +106,10 @@ export function GridView() {
             {sortLabel}
           </button>
           <div className="orr-seg">
-            <button
-              type="button"
-              className={cn(view === "grid" && "on")}
-              aria-label="Grid view"
-              onClick={() => setView("grid")}
-            >
+            <button type="button" className={cn(view === "grid" && "on")} aria-label="Grid view" onClick={() => setView("grid")}>
               <LayoutGrid className="size-4" />
             </button>
-            <button
-              type="button"
-              className={cn(view === "list" && "on")}
-              aria-label="List view"
-              onClick={() => setView("list")}
-            >
+            <button type="button" className={cn(view === "list" && "on")} aria-label="List view" onClick={() => setView("list")}>
               <List className="size-4" />
             </button>
           </div>
@@ -138,31 +117,65 @@ export function GridView() {
 
         <div className="orr-chiprow">
           {CHIPS.map(({ key, label, icon: Icon }) => (
-            <button
-              type="button"
-              key={key}
-              className={cn("orr-chip", chips.has(key) && "on")}
-              onClick={() => toggleChip(key)}
-            >
+            <button type="button" key={key} className={cn("orr-chip", chips.has(key) && "on")} onClick={() => toggleChip(key)}>
               <Icon className="size-3.5" />
               {label}
             </button>
           ))}
         </div>
 
-        <div className={cn("orr-grid", view === "list" && "list")}>
-          {visible.map((repo) => (
-            <RepoCard
-              key={repo.id}
-              repo={repo}
-              view={view}
-              onOpen={openRepo}
-              onToggleFavorite={toggleFavorite}
-              onOpenIde={openIde}
-              onOpenAgent={openAgent}
-            />
-          ))}
-        </div>
+        {!ready ? (
+          <div className={cn("orr-grid", view === "list" && "list")}>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="orr-card orr-skel" aria-hidden>
+                <div className="orr-skel-line w-2/3" />
+                <div className="orr-skel-line w-1/2" />
+                <div className="orr-skel-line w-full" />
+                <div className="orr-skel-line w-3/4" />
+              </div>
+            ))}
+          </div>
+        ) : error && repos.length === 0 ? (
+          <div className="orr-empty">
+            <FolderSearch className="size-8 opacity-60" />
+            <p className="t">Couldn’t scan your repositories</p>
+            <p className="s">{error}</p>
+            <button type="button" className="orr-sortpill" onClick={refresh}>
+              <RefreshCw className="size-3.5" /> Try again
+            </button>
+          </div>
+        ) : repos.length === 0 ? (
+          <div className="orr-empty">
+            <FolderSearch className="size-8 opacity-60" />
+            <p className="t">No repositories found</p>
+            <p className="s">Add a workspace directory in settings, then rescan.</p>
+            <button type="button" className="orr-sortpill" onClick={refresh} disabled={loading}>
+              <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Rescan
+            </button>
+          </div>
+        ) : visible.length === 0 ? (
+          <div className="orr-empty">
+            <FolderSearch className="size-8 opacity-60" />
+            <p className="t">No repos match these filters</p>
+            <button type="button" className="orr-sortpill" onClick={clearFilters}>
+              Clear filters
+            </button>
+          </div>
+        ) : (
+          <div className={cn("orr-grid", view === "list" && "list")}>
+            {visible.map((repo) => (
+              <RepoCard
+                key={repo.id}
+                repo={repo}
+                view={view}
+                onOpen={openIde}
+                onToggleFavorite={toggleFavorite}
+                onOpenIde={openIde}
+                onOpenAgent={openAgent}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

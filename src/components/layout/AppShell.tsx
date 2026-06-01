@@ -1,57 +1,98 @@
+import { useEffect, useState } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { Folder, Orbit, RefreshCw, Search, Settings } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { CommandPalette } from "@/components/CommandPalette";
+import { ReposProvider, useRepos } from "@/lib/repos-context";
 import { useSystemAppearance } from "@/hooks/useSystemAppearance";
-import { MOCK_REPOS } from "@/lib/mock-repos";
 import { cn } from "@/lib/utils";
 
-const ROOT_COUNT = new Set(MOCK_REPOS.map((r) => r.root)).size;
+function Shell() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const { repos, loading, refresh } = useRepos();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  const rootCount = new Set(repos.map((r) => r.root)).size;
+
+  // Global ⌘K / Ctrl-K to open the command palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  return (
+    <div className="flex h-full flex-col">
+      <header className="orr-header">
+        <Link to="/" className="orr-brand">
+          <Orbit className="orr-mark size-6" />
+          <span>Orrery</span>
+        </Link>
+        <div className="orr-roots">
+          <Folder className="size-3.5" />
+          <span>
+            {rootCount} {rootCount === 1 ? "root" : "roots"} · {repos.length} repos
+          </span>
+        </div>
+
+        <div className="ml-auto" />
+
+        <div
+          className="orr-search"
+          role="button"
+          tabIndex={0}
+          aria-label="Search repos, run a command"
+          onClick={() => setPaletteOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") setPaletteOpen(true);
+          }}
+        >
+          <Search className="size-4" />
+          <span className="ph">Search repos, run a command…</span>
+          <span className="kbd">⌘K</span>
+        </div>
+
+        <button
+          type="button"
+          className="orr-iconbtn"
+          title="Rescan"
+          aria-label="Rescan"
+          onClick={refresh}
+          disabled={loading}
+        >
+          <RefreshCw className={cn("size-4", loading && "animate-spin")} />
+        </button>
+        <Link
+          to="/settings"
+          className={cn("orr-iconbtn", pathname === "/settings" && "active")}
+          title="Settings"
+          aria-label="Settings"
+        >
+          <Settings className="size-4" />
+        </Link>
+      </header>
+
+      <div className="flex min-h-0 flex-1">
+        <Outlet />
+      </div>
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+    </div>
+  );
+}
 
 export function AppShell() {
   useSystemAppearance();
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full flex-col">
-        <header className="orr-header">
-          <Link to="/" className="orr-brand">
-            <Orbit className="orr-mark size-6" />
-            <span>Orrery</span>
-          </Link>
-          <div className="orr-roots">
-            <Folder className="size-3.5" />
-            <span>
-              {ROOT_COUNT} roots · {MOCK_REPOS.length} repos
-            </span>
-          </div>
-
-          <div className="ml-auto" />
-
-          {/* Command bar — wires to the ⌘K palette in a later phase. */}
-          <div className="orr-search" role="button" tabIndex={0} aria-label="Search repos, run a command">
-            <Search className="size-4" />
-            <span className="ph">Search repos, run a command…</span>
-            <span className="kbd">⌘K</span>
-          </div>
-
-          <button type="button" className="orr-iconbtn" title="Rescan" aria-label="Rescan">
-            <RefreshCw className="size-4" />
-          </button>
-          <Link
-            to="/settings"
-            className={cn("orr-iconbtn", pathname === "/settings" && "active")}
-            title="Settings"
-            aria-label="Settings"
-          >
-            <Settings className="size-4" />
-          </Link>
-        </header>
-
-        <div className="flex min-h-0 flex-1">
-          <Outlet />
-        </div>
-      </div>
+      <ReposProvider>
+        <Shell />
+      </ReposProvider>
     </TooltipProvider>
   );
 }

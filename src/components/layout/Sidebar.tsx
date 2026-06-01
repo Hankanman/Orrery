@@ -1,6 +1,7 @@
 import { FolderGit2, HardDrive, LayoutGrid, Plus, Sparkles } from "lucide-react";
 import type { Repo } from "@/types";
-import { languageColor } from "@/lib/format";
+import { languageColor, timeAgo } from "@/lib/format";
+import { useRepos } from "@/lib/repos-context";
 import { cn } from "@/lib/utils";
 
 interface SidebarProps {
@@ -12,6 +13,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ repos, activeRoot, onSelectRoot, langFilter, onSelectLang }: SidebarProps) {
+  const { lastScan } = useRepos();
   // Roots, in first-seen order, with live counts.
   const roots: { path: string; count: number }[] = [];
   for (const r of repos) {
@@ -88,7 +90,8 @@ export function Sidebar({ repos, activeRoot, onSelectRoot, langFilter, onSelectL
       </div>
 
       <div className="orr-sb-foot">
-        <HardDrive className="size-3.5" /> Cache synced · 2m ago
+        <HardDrive className="size-3.5" />
+        {lastScan ? `Scanned ${timeAgo(Math.floor(lastScan / 1000))}` : "Not scanned yet"}
       </div>
     </aside>
   );
