@@ -23,6 +23,7 @@ const repo = (over: Partial<Repo> = {}): Repo => ({
 describe("timeAgo", () => {
   const now = 1_000_000_000;
   it("formats seconds", () => expect(timeAgo(now - 30, now)).toBe("30s ago"));
+  it("formats minutes", () => expect(timeAgo(now - 90, now)).toBe("1m ago"));
   it("formats hours", () => expect(timeAgo(now - 3 * 3600, now)).toBe("3h ago"));
   it("formats days", () => expect(timeAgo(now - 2 * 86400, now)).toBe("2d ago"));
   it("clamps future timestamps to 0s", () => expect(timeAgo(now + 100, now)).toBe("0s ago"));

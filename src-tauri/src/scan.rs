@@ -278,18 +278,26 @@ fn read_readme(path: &Path) -> (Option<String>, Option<String>) {
 
 /// Strip the most common inline markdown so titles/descriptions read cleanly.
 fn clean_markdown(s: &str) -> String {
-    let mut out = s.replace(['*', '`', '_'], "");
-    // Collapse [text](url) → text
-    while let (Some(open), Some(close)) = (out.find("]("), out.rfind(')')) {
-        if let Some(start) = out[..open].rfind('[') {
-            if close > open {
-                let text = out[start + 1..open].to_string();
-                out.replace_range(start..=close, &text);
-                continue;
+    let stripped = s.replace(['*', '`', '_'], "");
+    // Collapse every [text](url) → text, left to right (handles multiple links).
+    let mut out = String::with_capacity(stripped.len());
+    let mut rest = stripped.as_str();
+    while let Some(bracket) = rest.find("](") {
+        let Some(open) = rest[..bracket].rfind('[') else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..bracket]);
+        let after = &rest[bracket + 2..];
+        match after.find(')') {
+            Some(close) => rest = &after[close + 1..],
+            None => {
+                rest = after;
+                break;
             }
         }
-        break;
     }
+    out.push_str(rest);
     out.trim().to_string()
 }
 
@@ -384,7 +392,7 @@ fn home() -> Option<PathBuf> {
 }
 
 /// Expand a leading `~` to the home directory.
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(h) = home() {
             return h.join(rest);
@@ -461,6 +469,8 @@ mod tests {
     fn clean_markdown_strips_emphasis_and_links() {
         assert_eq!(clean_markdown("**Bold** `code` _x_"), "Bold code x");
         assert_eq!(clean_markdown("[Orrery](https://orrery.app) rocks"), "Orrery rocks");
+        // multiple links on one line must all collapse to their text
+        assert_eq!(clean_markdown("[A](u1) and [B](u2)"), "A and B");
     }
 
     #[test]
@@ -476,6 +486,9 @@ mod tests {
         assert_eq!(classify_activity(now - 3600, now), Activity::Active);
         assert_eq!(classify_activity(now - 10 * 24 * 3600, now), Activity::Idle);
         assert_eq!(classify_activity(now - 40 * 24 * 3600, now), Activity::Stale);
+        // exact boundaries: comparison is strict `<`, so 7d → Idle, 30d → Stale
+        assert_eq!(classify_activity(now - 7 * 24 * 3600, now), Activity::Idle);
+        assert_eq!(classify_activity(now - 30 * 24 * 3600, now), Activity::Stale);
     }
 
     #[test]

@@ -45,12 +45,12 @@ describe("applyAppearance — accent", () => {
     applyAppearance({ ...base, colorScheme: "dark", accent: { r: 61, g: 174, b: 233 } });
     const root = document.documentElement;
     expect(root.style.getPropertyValue("--primary")).toBe("rgb(61 174 233)");
-    expect(root.style.getPropertyValue("--primary-foreground")).toContain("0.98");
+    expect(root.style.getPropertyValue("--primary-foreground")).toBe("oklch(0.98 0.01 250)");
   });
 
   it("picks a dark fg on a very bright accent", () => {
     applyAppearance({ ...base, colorScheme: "light", accent: { r: 250, g: 250, b: 250 } });
-    expect(document.documentElement.style.getPropertyValue("--primary-foreground")).toContain("0.16");
+    expect(document.documentElement.style.getPropertyValue("--primary-foreground")).toBe("oklch(0.16 0.02 256)");
   });
 
   it("clears accent overrides when none is provided", () => {

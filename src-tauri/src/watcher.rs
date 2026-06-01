@@ -15,7 +15,6 @@
 //! until staged — an acceptable trade for a live-watch convenience. Degrades
 //! silently if watches can't be established.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use notify_debouncer_mini::new_debouncer;
@@ -23,16 +22,8 @@ use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::Debouncer;
 use tauri::{AppHandle, Emitter};
 
+use crate::scan::expand;
 use crate::{config, scan};
-
-fn expand(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(path)
-}
 
 fn watch_one(debouncer: &mut Debouncer<RecommendedWatcher>, path: &std::path::Path) -> bool {
     debouncer
@@ -77,8 +68,10 @@ pub fn spawn(app: AppHandle) {
             return;
         }
 
-        // Keep `debouncer` alive for the life of the thread; emit on each batch.
-        while rx.recv().is_ok() {
+        // Keep `debouncer` alive for the life of the thread; emit only on real
+        // change batches (the channel also carries notify errors, which we
+        // ignore so a degraded watch can't spam rescans). Exits on disconnect.
+        while let Ok(Ok(_events)) = rx.recv() {
             let _ = app.emit("repos-changed", ());
         }
     });
