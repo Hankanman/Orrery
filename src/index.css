@@ -951,3 +951,79 @@
   flex-direction: column;
   gap: 16px;
 }
+
+/* Active toolbar pill (e.g. the Attention toggle) */
+.orr-sortpill.on {
+  color: var(--primary);
+  border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+  background: color-mix(in oklch, var(--primary) 10%, transparent);
+}
+
+/* Rendered README markdown in the repo drawer */
+.orr-md {
+  line-height: 1.6;
+  word-break: break-word;
+}
+.orr-md h1,
+.orr-md h2,
+.orr-md h3 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1em 0 0.4em;
+}
+.orr-md h1 {
+  font-size: 1.3em;
+}
+.orr-md h2 {
+  font-size: 1.15em;
+}
+.orr-md h3 {
+  font-size: 1.05em;
+}
+.orr-md p {
+  margin: 0.6em 0;
+}
+.orr-md a {
+  color: var(--primary);
+}
+.orr-md code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+}
+.orr-md pre {
+  background: var(--background);
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.orr-md pre code {
+  background: none;
+  padding: 0;
+}
+.orr-md ul,
+.orr-md ol {
+  padding-left: 1.4em;
+  margin: 0.5em 0;
+}
+.orr-md li {
+  margin: 0.2em 0;
+}
+.orr-md img {
+  max-width: 100%;
+}
+.orr-md blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+  color: var(--muted-foreground);
+}
+.orr-md table {
+  border-collapse: collapse;
+}
+.orr-md th,
+.orr-md td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}

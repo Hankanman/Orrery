@@ -4,6 +4,7 @@ mod cache;
 mod commands;
 mod config;
 mod forge;
+mod git_ops;
 mod launch;
 mod model;
 mod oauth;
@@ -67,7 +68,18 @@ pub fn run() {
             commands::github_auth_status,
             commands::github_sign_out,
             commands::ai_status,
-            commands::summarize_repo
+            commands::summarize_repo,
+            commands::fetch_all,
+            commands::fetch_repo,
+            commands::list_branches,
+            commands::switch_branch,
+            commands::prune_branches,
+            commands::list_worktrees,
+            commands::add_worktree,
+            commands::remove_worktree,
+            commands::repo_log,
+            commands::repo_diff,
+            commands::repo_readme
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
