@@ -2,6 +2,9 @@
 //! favorites and a snapshot of scanned repos so the grid paints instantly on
 //! launch and survives offline. Connections are opened per call — these are
 //! low-frequency operations and SQLite handles the locking.
+//!
+//! The `*_on(conn)` helpers take a connection so the logic is unit-testable
+//! against an in-memory database (see the tests module).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -14,17 +17,20 @@ fn db_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("orrery").join("cache.sqlite"))
 }
 
+fn init(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);",
+    )
+}
+
 fn open() -> Result<Connection, String> {
     let path = db_path().ok_or("no data directory")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
-         CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);",
-    )
-    .map_err(|e| e.to_string())?;
+    init(&conn).map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -32,56 +38,39 @@ fn favorites_on(conn: &Connection) -> HashSet<String> {
     let Ok(mut stmt) = conn.prepare("SELECT id FROM favorites") else {
         return HashSet::new();
     };
-    match stmt.query_map([], |row| row.get::<_, String>(0)) {
+    // Bind the query result so its temporary drops before `stmt` (inlining it
+    // into the `match` would extend the borrow past `stmt`'s drop — E0597).
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0));
+    match rows {
         Ok(iter) => iter.flatten().collect(),
         Err(_) => HashSet::new(),
     }
 }
 
-/// The set of repo ids the user has favorited.
-pub fn favorites() -> HashSet<String> {
-    match open() {
-        Ok(conn) => favorites_on(&conn),
-        Err(_) => HashSet::new(),
-    }
-}
-
-/// Toggle a repo's favorite flag, returning the new state.
-pub fn set_favorite(id: &str, favorite: bool) -> Result<bool, String> {
-    let conn = open()?;
+fn set_favorite_on(conn: &Connection, id: &str, favorite: bool) -> rusqlite::Result<()> {
     if favorite {
-        conn.execute("INSERT OR IGNORE INTO favorites (id) VALUES (?1)", [id])
+        conn.execute("INSERT OR IGNORE INTO favorites (id) VALUES (?1)", [id])?;
     } else {
-        conn.execute("DELETE FROM favorites WHERE id = ?1", [id])
+        conn.execute("DELETE FROM favorites WHERE id = ?1", [id])?;
     }
-    .map_err(|e| e.to_string())?;
-    Ok(favorite)
+    Ok(())
 }
 
-/// Replace the cached repo snapshot.
-pub fn store_repos(repos: &[Repo]) -> Result<(), String> {
-    let mut conn = open()?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM repos", []).map_err(|e| e.to_string())?;
+fn store_repos_on(conn: &mut Connection, repos: &[Repo]) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM repos", [])?;
     {
-        let mut stmt = tx
-            .prepare("INSERT INTO repos (id, data) VALUES (?1, ?2)")
-            .map_err(|e| e.to_string())?;
+        let mut stmt = tx.prepare("INSERT INTO repos (id, data) VALUES (?1, ?2)")?;
         for repo in repos {
-            let json = serde_json::to_string(repo).map_err(|e| e.to_string())?;
-            stmt.execute(rusqlite::params![repo.id, json])
-                .map_err(|e| e.to_string())?;
+            let json = serde_json::to_string(repo).unwrap_or_default();
+            stmt.execute(rusqlite::params![repo.id, json])?;
         }
     }
-    tx.commit().map_err(|e| e.to_string())
+    tx.commit()
 }
 
-/// Load the cached repo snapshot (for instant paint before a fresh scan).
-pub fn load_repos() -> Vec<Repo> {
-    let Ok(conn) = open() else {
-        return Vec::new();
-    };
-    let favs = favorites_on(&conn);
+fn load_repos_on(conn: &Connection) -> Vec<Repo> {
+    let favs = favorites_on(conn);
     let Ok(mut stmt) = conn.prepare("SELECT data FROM repos") else {
         return Vec::new();
     };
@@ -96,5 +85,109 @@ pub fn load_repos() -> Vec<Repo> {
             })
             .collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+/// The set of repo ids the user has favorited.
+pub fn favorites() -> HashSet<String> {
+    match open() {
+        Ok(conn) => favorites_on(&conn),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// Toggle a repo's favorite flag, returning the new state.
+pub fn set_favorite(id: &str, favorite: bool) -> Result<bool, String> {
+    let conn = open()?;
+    set_favorite_on(&conn, id, favorite).map_err(|e| e.to_string())?;
+    Ok(favorite)
+}
+
+/// Replace the cached repo snapshot.
+pub fn store_repos(repos: &[Repo]) -> Result<(), String> {
+    let mut conn = open()?;
+    store_repos_on(&mut conn, repos).map_err(|e| e.to_string())
+}
+
+/// Load the cached repo snapshot (for instant paint before a fresh scan).
+pub fn load_repos() -> Vec<Repo> {
+    match open() {
+        Ok(conn) => load_repos_on(&conn),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Activity, GitStatus};
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        conn
+    }
+
+    fn sample(id: &str) -> Repo {
+        Repo {
+            id: id.to_string(),
+            display_name: "Test".into(),
+            slug: Some("o/test".into()),
+            path: "~/dev/test".into(),
+            description: None,
+            language: Some("Rust".into()),
+            git: GitStatus::default(),
+            last_commit_unix: 0,
+            activity: Activity::Active,
+            root: "~/dev".into(),
+            host: None,
+            stars: 0,
+            favorite: false,
+            ai_summary: None,
+        }
+    }
+
+    #[test]
+    fn favorites_roundtrip() {
+        let conn = mem();
+        assert!(favorites_on(&conn).is_empty());
+        set_favorite_on(&conn, "/a", true).unwrap();
+        set_favorite_on(&conn, "/b", true).unwrap();
+        let favs = favorites_on(&conn);
+        assert!(favs.contains("/a") && favs.contains("/b"));
+        set_favorite_on(&conn, "/a", false).unwrap();
+        assert!(!favorites_on(&conn).contains("/a"));
+    }
+
+    #[test]
+    fn favorite_insert_is_idempotent() {
+        let conn = mem();
+        set_favorite_on(&conn, "/a", true).unwrap();
+        set_favorite_on(&conn, "/a", true).unwrap();
+        assert_eq!(favorites_on(&conn).len(), 1);
+    }
+
+    #[test]
+    fn store_then_load_repos_roundtrips_and_replaces() {
+        let mut conn = mem();
+        store_repos_on(&mut conn, &[sample("/a"), sample("/b")]).unwrap();
+        assert_eq!(load_repos_on(&conn).len(), 2);
+        // store replaces the snapshot rather than appending
+        store_repos_on(&mut conn, &[sample("/c")]).unwrap();
+        let loaded = load_repos_on(&conn);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "/c");
+    }
+
+    #[test]
+    fn load_marks_favorites() {
+        let mut conn = mem();
+        store_repos_on(&mut conn, &[sample("/a"), sample("/b")]).unwrap();
+        set_favorite_on(&conn, "/b", true).unwrap();
+        let loaded = load_repos_on(&conn);
+        let fav_b = loaded.iter().find(|r| r.id == "/b").unwrap();
+        let fav_a = loaded.iter().find(|r| r.id == "/a").unwrap();
+        assert!(fav_b.favorite);
+        assert!(!fav_a.favorite);
     }
 }

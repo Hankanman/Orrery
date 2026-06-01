@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ipc, isTauri } from "@/lib/ipc";
 import { MOCK_REPOS } from "@/lib/mock-repos";
 import type { Repo } from "@/types";
@@ -84,6 +85,24 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       });
     return () => {
       cancelled = true;
+    };
+  }, [refresh]);
+
+  // Live-watch: the Rust watcher emits `repos-changed` (debounced) on disk
+  // changes; rescan when it fires. The scan guard coalesces bursts.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen("repos-changed", () => refresh())
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, [refresh]);
 
