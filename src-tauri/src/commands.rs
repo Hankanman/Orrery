@@ -188,12 +188,12 @@ pub async fn fetch_all(ids: Vec<String>) -> Vec<FetchOutcome> {
                             Ok(status) => FetchOutcome { id: id.clone(), status: Some(status), error: None },
                             Err(e) => FetchOutcome { id: id.clone(), status: None, error: Some(e) },
                         };
-                        results.lock().unwrap().push(outcome);
+                        results.lock().unwrap_or_else(|e| e.into_inner()).push(outcome);
                     });
                 }
             });
         }
-        results.into_inner().unwrap()
+        results.into_inner().unwrap_or_else(|e| e.into_inner())
     })
     .await
     .unwrap_or_default()

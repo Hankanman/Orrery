@@ -20,6 +20,7 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
   const [diff, setDiff] = useState("");
   const [readme, setReadme] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const id = repo?.id;
 
@@ -52,18 +53,23 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
 
   const reload = async () => {
     if (!id) return;
-    setBranches(await ipc.listBranches(id).catch(() => branches));
+    const snap = id;
+    const next = await ipc.listBranches(id).catch(() => branches);
+    if (repo?.id !== snap) return; // drawer moved to a different repo mid-call
+    setBranches(next);
     refresh();
   };
 
   const doSwitch = async (name: string) => {
     if (!id || busy) return;
     setBusy(true);
+    setError(null);
     try {
       await ipc.switchBranch(id, name);
       await reload();
     } catch (e) {
-      console.error("[orrery] switch branch:", e);
+      // libgit2 refuses a checkout that would clobber uncommitted work.
+      setError(`Couldn't switch branch: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -71,10 +77,16 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
 
   const doPrune = async () => {
     if (!id || busy) return;
+    const victims = branches.filter((b) => !b.isHead && (b.merged || b.gone)).map((b) => b.name);
+    if (victims.length === 0) return;
+    if (!window.confirm(`Delete ${victims.length} branch(es)?\n\n${victims.join("\n")}`)) return;
     setBusy(true);
+    setError(null);
     try {
       await ipc.pruneBranches(id);
       await reload();
+    } catch (e) {
+      setError(`Couldn't prune: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -82,7 +94,8 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
 
   const removeWt = async (name: string) => {
     if (!id) return;
-    await ipc.removeWorktree(id, name).catch(() => {});
+    if (!window.confirm(`Remove worktree "${name}"? This unlinks it from the repo.`)) return;
+    await ipc.removeWorktree(id, name).catch((e) => setError(`Couldn't remove worktree: ${String(e)}`));
     setWorktrees(await ipc.listWorktrees(id).catch(() => worktrees));
   };
 
@@ -144,6 +157,7 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
                     </button>
                   )}
                 </div>
+                {error && <p className="mb-2 text-sm text-danger">{error}</p>}
                 <div className="space-y-1">
                   {branches.map((b) => (
                     <button

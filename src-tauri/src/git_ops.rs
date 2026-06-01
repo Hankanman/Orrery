@@ -40,8 +40,15 @@ pub struct WorktreeInfo {
 /// Credentials callback: SSH agent for ssh remotes, the git credential helper
 /// (or a token via helper) for HTTPS. Best-effort — failures surface as errors.
 fn remote_callbacks() -> RemoteCallbacks<'static> {
+    // libgit2 re-invokes this after each rejected attempt; without a cap a bad
+    // credential (e.g. wrong key in the agent) loops forever and hangs fetch.
+    let mut attempts = 0u32;
     let mut cb = RemoteCallbacks::new();
-    cb.credentials(|url, username, allowed| {
+    cb.credentials(move |url, username, allowed| {
+        attempts += 1;
+        if attempts > 4 {
+            return Err(git2::Error::from_str("authentication failed"));
+        }
         if allowed.contains(CredentialType::SSH_KEY) {
             return Cred::ssh_key_from_agent(username.unwrap_or("git"));
         }
@@ -271,7 +278,12 @@ pub fn working_diff(path: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     // Cap to keep the IPC payload + UI reasonable.
     if buf.len() > 200_000 {
-        buf.truncate(200_000);
+        // Snap to a char boundary — truncating mid-codepoint would panic.
+        let mut end = 200_000;
+        while !buf.is_char_boundary(end) {
+            end -= 1;
+        }
+        buf.truncate(end);
         buf.push_str("\n… diff truncated …\n");
     }
     Ok(buf)
