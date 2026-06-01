@@ -2,8 +2,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::model::{AppConfig, Repo};
-use crate::{cache, config, launch, scan};
+use crate::model::{AppConfig, Host, HostInfo, Repo};
+use crate::{cache, config, forge, launch, oauth, scan};
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -57,4 +57,49 @@ pub fn open_in_ide(id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn open_agent(id: String) -> Result<(), String> {
     launch::launch(&config::load().agent_command, &id)
+}
+
+/// Fetch host enrichment (stars/topics/issues/release) for a repo, cached for
+/// 6h. On network failure, falls back to any stale cache (offline support).
+#[tauri::command]
+pub async fn enrich_repo(host: Host, domain: String, slug: String) -> Result<HostInfo, String> {
+    let now = now_unix();
+    if let Some(fresh) = cache::cached_host_info(&slug, 6 * 3600, now) {
+        return Ok(fresh);
+    }
+    let token = match host {
+        Host::Github => oauth::github_token(),
+        Host::Gitlab => oauth::gitlab_token(),
+    };
+    match forge::fetch(host, &domain, &slug, token.as_deref()).await {
+        Ok(info) => {
+            cache::store_host_info(&slug, &info, now);
+            Ok(info)
+        }
+        Err(e) => cache::cached_host_info(&slug, i64::MAX, now).ok_or(e),
+    }
+}
+
+#[tauri::command]
+pub async fn github_login_start() -> Result<oauth::DeviceStart, String> {
+    let client_id = config::load().github_client_id;
+    if client_id.is_empty() {
+        return Err("Set a GitHub OAuth client id in settings first.".into());
+    }
+    oauth::device_start(&client_id).await
+}
+
+#[tauri::command]
+pub async fn github_login_poll(device_code: String) -> Result<oauth::PollResult, String> {
+    oauth::device_poll(&config::load().github_client_id, &device_code).await
+}
+
+#[tauri::command]
+pub fn github_auth_status() -> bool {
+    oauth::github_authed()
+}
+
+#[tauri::command]
+pub fn github_sign_out() {
+    oauth::sign_out();
 }

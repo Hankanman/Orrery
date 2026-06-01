@@ -39,6 +39,42 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
 
+  // Fetch host enrichment (stars/topics/issues/release) in small concurrent
+  // batches, merging each result into the matching repo. Cheap to re-run: the
+  // Rust side caches for 6h and falls back to cache when offline.
+  const enrichAll = useCallback((list: Repo[]) => {
+    if (!isTauri()) return;
+    const targets = list.filter((r) => r.host && r.slug && (r.remoteHost || r.host === "github"));
+    const CHUNK = 6;
+    void (async () => {
+      for (let i = 0; i < targets.length; i += CHUNK) {
+        const chunk = targets.slice(i, i + CHUNK);
+        const results = await Promise.all(
+          chunk.map((r) =>
+            ipc
+              .enrichRepo(r.host as "github" | "gitlab", r.remoteHost ?? "github.com", r.slug!)
+              .then((info) => ({ id: r.id, info }))
+              .catch(() => null),
+          ),
+        );
+        setRepos((prev) =>
+          prev.map((r) => {
+            const hit = results.find((x) => x && x.id === r.id);
+            return hit
+              ? {
+                  ...r,
+                  stars: hit.info.stars,
+                  topics: hit.info.topics,
+                  openIssues: hit.info.openIssues,
+                  latestRelease: hit.info.latestRelease,
+                }
+              : r;
+          }),
+        );
+      }
+    })();
+  }, []);
+
   const refresh = useCallback(() => {
     if (!isTauri()) {
       setRepos(MOCK_REPOS);
@@ -54,6 +90,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       .then((next) => {
         setRepos(next);
         setLastScan(Date.now());
+        enrichAll(next);
       })
       .catch((e) => setError(String(e)))
       .finally(() => {
@@ -61,7 +98,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         setReady(true);
       });
-  }, []);
+  }, [enrichAll]);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +114,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         if (!cancelled && cached.length) {
           setRepos(cached);
           setReady(true);
+          enrichAll(cached); // populate from host cache (instant/offline)
         }
       })
       .catch(() => {})
@@ -86,7 +124,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [refresh]);
+  }, [refresh, enrichAll]);
 
   // Live-watch: the Rust watcher emits `repos-changed` (debounced) on disk
   // changes; rescan when it fires. The scan guard coalesces bursts.

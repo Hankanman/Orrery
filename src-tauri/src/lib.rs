@@ -2,8 +2,10 @@ mod appearance;
 mod cache;
 mod commands;
 mod config;
+mod forge;
 mod launch;
 mod model;
+mod oauth;
 mod scan;
 mod watcher;
 
@@ -57,7 +59,12 @@ pub fn run() {
             commands::scan_repos,
             commands::set_favorite,
             commands::open_in_ide,
-            commands::open_agent
+            commands::open_agent,
+            commands::enrich_repo,
+            commands::github_login_start,
+            commands::github_login_poll,
+            commands::github_auth_status,
+            commands::github_sign_out
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

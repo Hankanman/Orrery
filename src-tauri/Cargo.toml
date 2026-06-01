@@ -38,6 +38,10 @@ which = "6"                                                # detect IDE/terminal
 rusqlite = { version = "0.32", features = ["bundled"] }    # cache (SQLite bundled)
 notify-debouncer-mini = "0.4"                              # inotify live-watch (debounced)
 
+# Git host providers (GitHub / GitLab) — async HTTP + JSON
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+urlencoding = "2"
+
 [dev-dependencies]
 tempfile = "3"
 

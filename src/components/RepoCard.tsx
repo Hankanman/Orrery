@@ -9,6 +9,7 @@ import {
   Sparkles,
   SquareTerminal,
   Star,
+  Tag,
 } from "lucide-react";
 import type { Repo } from "@/types";
 import { formatStars, languageColor, repoStatus, timeAgo } from "@/lib/format";
@@ -141,6 +142,12 @@ export function RepoCard({
               <span className="orr-st star">
                 <Star className="size-3.5" />
                 {formatStars(repo.stars)}
+              </span>
+            )}
+            {repo.latestRelease && (
+              <span className="orr-st" title="Latest release">
+                <Tag className="size-3.5" />
+                {repo.latestRelease}
               </span>
             )}
             <span className="orr-st">

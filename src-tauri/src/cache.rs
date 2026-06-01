@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
-use crate::model::Repo;
+use crate::model::{HostInfo, Repo};
 
 fn db_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("orrery").join("cache.sqlite"))
@@ -20,7 +20,8 @@ fn db_path() -> Option<PathBuf> {
 fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
-         CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS host_cache (slug TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);",
     )
 }
 
@@ -117,6 +118,33 @@ pub fn load_repos() -> Vec<Repo> {
     }
 }
 
+/// Cached host enrichment for a slug, if newer than `max_age_secs`.
+pub fn cached_host_info(slug: &str, max_age_secs: i64, now: i64) -> Option<HostInfo> {
+    let conn = open().ok()?;
+    let mut stmt = conn
+        .prepare("SELECT data, fetched_at FROM host_cache WHERE slug = ?1")
+        .ok()?;
+    let (json, fetched_at): (String, i64) = stmt
+        .query_row([slug], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?;
+    if now.saturating_sub(fetched_at) > max_age_secs {
+        return None;
+    }
+    serde_json::from_str(&json).ok()
+}
+
+/// Persist host enrichment for a slug.
+pub fn store_host_info(slug: &str, info: &HostInfo, now: i64) {
+    if let Ok(conn) = open() {
+        if let Ok(json) = serde_json::to_string(info) {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO host_cache (slug, data, fetched_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![slug, json, now],
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,7 +169,11 @@ mod tests {
             activity: Activity::Active,
             root: "~/dev".into(),
             host: None,
+            remote_host: None,
             stars: 0,
+            topics: Vec::new(),
+            open_issues: 0,
+            latest_release: None,
             favorite: false,
             ai_summary: None,
         }

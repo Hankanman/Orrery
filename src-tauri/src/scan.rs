@@ -102,12 +102,12 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         .map(|c| c.time().seconds())
         .unwrap_or(0);
 
-    let (host, slug) = repo
+    let (host, slug, remote_host) = repo
         .find_remote("origin")
         .ok()
         .and_then(|r| r.url().map(String::from))
         .map(|url| parse_remote(&url))
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
 
     let dir_name = path
         .file_name()
@@ -133,7 +133,11 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         activity,
         root: root.to_string(),
         host,
+        remote_host,
         stars: 0,
+        topics: Vec::new(),
+        open_issues: 0,
+        latest_release: None,
         favorite,
         ai_summary: None,
     })
@@ -191,29 +195,26 @@ fn ahead_behind(repo: &Repository) -> Option<(u32, u32)> {
     Some((a as u32, b as u32))
 }
 
-/// Parse an origin remote URL into (host, "owner/repo").
-fn parse_remote(url: &str) -> (Option<Host>, Option<String>) {
-    let host = if url.contains("github.com") {
-        Some(Host::Github)
-    } else if url.contains("gitlab") {
-        Some(Host::Gitlab)
-    } else {
-        None
-    };
-
-    // Strip protocol/host prefix, then a trailing ".git".
+/// Parse an origin remote URL into (host, "owner/repo", domain).
+fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
+    // Strip protocol and any user@ prefix, then split the host from the path.
     let after_scheme = url.rsplit_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let tail = after_scheme
         .split_once('@')
         .map(|(_, rest)| rest)
         .unwrap_or(after_scheme);
     // tail is like "github.com/owner/repo.git" or "github.com:owner/repo.git"
-    let path = tail
-        .split_once(|c| c == '/' || c == ':')
-        .map(|(_, rest)| rest)
-        .unwrap_or(tail)
-        .trim_end_matches('/')
-        .trim_end_matches(".git");
+    let (domain_raw, path_part) = tail.split_once(|c| c == '/' || c == ':').unwrap_or((tail, ""));
+    let path = path_part.trim_end_matches('/').trim_end_matches(".git");
+
+    // Detect the provider from the host only (not the whole URL).
+    let host = if domain_raw.contains("github.com") {
+        Some(Host::Github)
+    } else if domain_raw.contains("gitlab") {
+        Some(Host::Gitlab)
+    } else {
+        None
+    };
 
     let slug = {
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -223,8 +224,9 @@ fn parse_remote(url: &str) -> (Option<Host>, Option<String>) {
             None
         }
     };
+    let domain = (!domain_raw.is_empty()).then(|| domain_raw.to_string());
 
-    (host, slug)
+    (host, slug, domain)
 }
 
 /// Returns (display title from first H1, first descriptive paragraph).
@@ -427,41 +429,35 @@ mod tests {
     fn parse_remote_https_and_ssh_github() {
         assert_eq!(
             parse_remote("https://github.com/owner/repo.git"),
-            (Some(Host::Github), Some("owner/repo".into()))
+            (Some(Host::Github), Some("owner/repo".into()), Some("github.com".into()))
         );
         assert_eq!(
             parse_remote("git@github.com:owner/repo.git"),
-            (Some(Host::Github), Some("owner/repo".into()))
+            (Some(Host::Github), Some("owner/repo".into()), Some("github.com".into()))
         );
         // no trailing .git
-        assert_eq!(
-            parse_remote("https://github.com/owner/repo"),
-            (Some(Host::Github), Some("owner/repo".into()))
-        );
+        assert_eq!(parse_remote("https://github.com/owner/repo").1, Some("owner/repo".into()));
     }
 
     #[test]
     fn parse_remote_gitlab_including_self_hosted_and_nested() {
         assert_eq!(
             parse_remote("https://gitlab.com/group/proj.git"),
-            (Some(Host::Gitlab), Some("group/proj".into()))
+            (Some(Host::Gitlab), Some("group/proj".into()), Some("gitlab.com".into()))
         );
-        assert_eq!(
-            parse_remote("ssh://git@gitlab.example.com/team/app.git").0,
-            Some(Host::Gitlab)
-        );
+        // self-hosted GitLab → detected by host, domain captured for API base
+        let (host, _, domain) = parse_remote("ssh://git@gitlab.example.com/team/app.git");
+        assert_eq!(host, Some(Host::Gitlab));
+        assert_eq!(domain, Some("gitlab.example.com".into()));
         // nested groups → last two path components
-        assert_eq!(
-            parse_remote("https://gitlab.com/group/sub/proj.git").1,
-            Some("sub/proj".into())
-        );
+        assert_eq!(parse_remote("https://gitlab.com/group/sub/proj.git").1, Some("sub/proj".into()));
     }
 
     #[test]
-    fn parse_remote_unknown_host_has_no_host_but_keeps_slug() {
+    fn parse_remote_unknown_host_has_no_host_but_keeps_slug_and_domain() {
         assert_eq!(
             parse_remote("https://example.com/foo/bar.git"),
-            (None, Some("foo/bar".into()))
+            (None, Some("foo/bar".into()), Some("example.com".into()))
         );
     }
 

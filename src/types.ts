@@ -39,8 +39,16 @@ export interface Repo {
   root: string;
   /** Origin host, if the repo has a remote. */
   host: Host;
+  /** Remote host domain (e.g. "github.com", "gitlab.acme.io"), if any. */
+  remoteHost?: string | null;
   /** Host star count (0 if none / no remote). */
   stars: number;
+  /** Host topics/labels (enrichment). */
+  topics?: string[];
+  /** Open issues on the host (enrichment). */
+  openIssues?: number;
+  /** Latest release tag on the host (enrichment). */
+  latestRelease?: string | null;
   /** User-favorited (host amber star on the card). */
   favorite: boolean;
   /** Local-AI synthesized blurb (Phase 3); presence lights the violet indicator. */
