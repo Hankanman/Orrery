@@ -1,6 +1,19 @@
 import { useMemo, useState } from "react";
-import { ArrowUp, ArrowUpDown, CircleDot, Clock, FolderSearch, LayoutGrid, List, RefreshCw, Star } from "lucide-react";
+import {
+  ArrowUp,
+  ArrowUpDown,
+  CircleDot,
+  Clock,
+  CloudDownload,
+  FolderSearch,
+  LayoutGrid,
+  List,
+  RefreshCw,
+  Star,
+  TriangleAlert,
+} from "lucide-react";
 import { RepoCard, type RepoView } from "@/components/RepoCard";
+import { RepoDrawer } from "@/components/RepoDrawer";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { useRepos } from "@/lib/repos-context";
 import { repoStatus } from "@/lib/format";
@@ -36,19 +49,28 @@ function matchesChip(repo: Repo, chip: Chip): boolean {
   }
 }
 
+/** A repo needs attention if it has uncommitted work, unpushed/behind commits, or is stale. */
+function needsAttention(repo: Repo): boolean {
+  return repo.git.dirty > 0 || repo.git.ahead > 0 || repo.git.behind > 0 || repoStatus(repo) === "stale";
+}
+
 export function GridView() {
-  const { repos, loading, ready, error, refresh, toggleFavorite, openIde, openAgent } = useRepos();
+  const { repos, loading, ready, error, fetching, refresh, fetchAll, toggleFavorite, openIde, openAgent } =
+    useRepos();
 
   const [activeRoot, setActiveRoot] = useState("all");
   const [langFilter, setLangFilter] = useState<string | null>(null);
   const [chips, setChips] = useState<Set<Chip>>(new Set());
+  const [attentionOnly, setAttentionOnly] = useState(false);
   const [sort, setSort] = useState<SortKey>("activity");
   const [view, setView] = useState<RepoView>("grid");
+  const [selected, setSelected] = useState<Repo | null>(null);
 
   const visible = useMemo(() => {
     const filtered = repos.filter((r) => {
       if (activeRoot !== "all" && r.root !== activeRoot) return false;
       if (langFilter && r.language !== langFilter) return false;
+      if (attentionOnly && !needsAttention(r)) return false;
       for (const chip of chips) if (!matchesChip(r, chip)) return false;
       return true;
     });
@@ -59,7 +81,9 @@ export function GridView() {
       return b.lastCommitUnix - a.lastCommitUnix;
     });
     return sorted;
-  }, [repos, activeRoot, langFilter, chips, sort]);
+  }, [repos, activeRoot, langFilter, chips, attentionOnly, sort]);
+
+  const attentionCount = useMemo(() => repos.filter(needsAttention).length, [repos]);
 
   const toggleChip = (chip: Chip) =>
     setChips((prev) => {
@@ -101,6 +125,19 @@ export function GridView() {
             {visible.length} {visible.length === 1 ? "repo" : "repos"}
           </span>
           <span className="ml-auto" />
+          <button
+            type="button"
+            className={cn("orr-sortpill", attentionOnly && "on")}
+            onClick={() => setAttentionOnly((v) => !v)}
+            title="Show only repos needing attention"
+          >
+            <TriangleAlert className="size-3.5" />
+            Attention{attentionCount > 0 ? ` ${attentionCount}` : ""}
+          </button>
+          <button type="button" className="orr-sortpill" onClick={fetchAll} disabled={fetching} title="Fetch all repos">
+            <CloudDownload className={cn("size-3.5", fetching && "animate-pulse")} />
+            {fetching ? "Fetching…" : "Fetch all"}
+          </button>
           <button type="button" className="orr-sortpill" onClick={cycleSort}>
             <ArrowUpDown className="size-3.5" />
             {sortLabel}
@@ -168,7 +205,7 @@ export function GridView() {
                 key={repo.id}
                 repo={repo}
                 view={view}
-                onOpen={openIde}
+                onOpen={setSelected}
                 onToggleFavorite={toggleFavorite}
                 onOpenIde={openIde}
                 onOpenAgent={openAgent}
@@ -177,6 +214,8 @@ export function GridView() {
           </div>
         )}
       </div>
+
+      <RepoDrawer repo={selected} onClose={() => setSelected(null)} />
     </div>
   );
 }

@@ -22,7 +22,11 @@ interface ReposContextValue {
   error: string | null;
   /** Epoch ms of the last successful scan, or null. */
   lastScan: number | null;
+  /** A fetch-all is in flight. */
+  fetching: boolean;
   refresh: () => void;
+  /** Fetch every repo's origin and merge refreshed ahead/behind into the grid. */
+  fetchAll: () => void;
   toggleFavorite: (repo: Repo) => void;
   openIde: (repo: Repo) => void;
   openAgent: (repo: Repo) => void;
@@ -36,6 +40,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<number | null>(null);
+  const [fetching, setFetching] = useState(false);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
   // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
@@ -158,6 +163,30 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       });
   }, [enrichAll, summarizeAll]);
 
+  // Latest repos, readable from stable callbacks without re-creating them.
+  const reposRef = useRef(repos);
+  reposRef.current = repos;
+
+  const fetchAll = useCallback(() => {
+    if (!isTauri() || scanning.current) return;
+    const ids = reposRef.current.map((r) => r.id);
+    if (ids.length === 0) return;
+    setFetching(true);
+    ipc
+      .fetchAll(ids)
+      .then((outcomes) => {
+        const byId = new Map(outcomes.map((o) => [o.id, o]));
+        setRepos((prev) =>
+          prev.map((r) => {
+            const o = byId.get(r.id);
+            return o?.status ? { ...r, git: o.status } : r;
+          }),
+        );
+      })
+      .catch(() => {})
+      .finally(() => setFetching(false));
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     if (!isTauri()) {
@@ -220,8 +249,20 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<ReposContextValue>(
-    () => ({ repos, loading, ready, error, lastScan, refresh, toggleFavorite, openIde, openAgent }),
-    [repos, loading, ready, error, lastScan, refresh, toggleFavorite, openIde, openAgent],
+    () => ({
+      repos,
+      loading,
+      ready,
+      error,
+      lastScan,
+      fetching,
+      refresh,
+      fetchAll,
+      toggleFavorite,
+      openIde,
+      openAgent,
+    }),
+    [repos, loading, ready, error, lastScan, fetching, refresh, fetchAll, toggleFavorite, openIde, openAgent],
   );
 
   return <ReposContext.Provider value={value}>{children}</ReposContext.Provider>;

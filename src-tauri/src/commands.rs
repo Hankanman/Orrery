@@ -2,8 +2,17 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::model::{AppConfig, Host, HostInfo, Repo};
+use crate::git_ops::{self, BranchInfo, CommitInfo, WorktreeInfo};
+use crate::model::{AppConfig, GitStatus, Host, HostInfo, Repo};
 use crate::{ai, cache, config, forge, launch, oauth, scan};
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchOutcome {
+    pub id: String,
+    pub status: Option<GitStatus>,
+    pub error: Option<String>,
+}
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -162,4 +171,86 @@ pub async fn summarize_repo(repo: Repo, refresh: bool) -> Result<String, String>
         cache::store_summary(&repo.id, &summary, repo.last_commit_unix);
     }
     Ok(summary)
+}
+
+// ── Phase 5: command center ────────────────────────────────────────────────
+
+/// Fetch many repos in parallel batches; returns refreshed status per repo.
+#[tauri::command]
+pub async fn fetch_all(ids: Vec<String>) -> Vec<FetchOutcome> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let results = std::sync::Mutex::new(Vec::with_capacity(ids.len()));
+        for group in ids.chunks(8) {
+            std::thread::scope(|scope| {
+                for id in group {
+                    scope.spawn(|| {
+                        let outcome = match git_ops::fetch(id) {
+                            Ok(status) => FetchOutcome { id: id.clone(), status: Some(status), error: None },
+                            Err(e) => FetchOutcome { id: id.clone(), status: None, error: Some(e) },
+                        };
+                        results.lock().unwrap_or_else(|e| e.into_inner()).push(outcome);
+                    });
+                }
+            });
+        }
+        results.into_inner().unwrap_or_else(|e| e.into_inner())
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn fetch_repo(id: String) -> Result<GitStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || git_ops::fetch(&id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn list_branches(id: String) -> Result<Vec<BranchInfo>, String> {
+    git_ops::branches(&id)
+}
+
+#[tauri::command]
+pub fn switch_branch(id: String, name: String) -> Result<(), String> {
+    git_ops::switch_branch(&id, &name)
+}
+
+#[tauri::command]
+pub fn prune_branches(id: String) -> Result<Vec<String>, String> {
+    git_ops::prune_branches(&id)
+}
+
+#[tauri::command]
+pub fn list_worktrees(id: String) -> Result<Vec<WorktreeInfo>, String> {
+    git_ops::worktrees(&id)
+}
+
+#[tauri::command]
+pub fn add_worktree(id: String, name: String, dest: String) -> Result<String, String> {
+    git_ops::add_worktree(&id, &name, &dest)
+}
+
+#[tauri::command]
+pub fn remove_worktree(id: String, name: String) -> Result<(), String> {
+    git_ops::remove_worktree(&id, &name)
+}
+
+#[tauri::command]
+pub fn repo_log(id: String, limit: usize) -> Result<Vec<CommitInfo>, String> {
+    git_ops::recent_log(&id, limit)
+}
+
+#[tauri::command]
+pub fn repo_diff(id: String) -> Result<String, String> {
+    git_ops::working_diff(&id)
+}
+
+/// Raw README markdown for the detail drawer.
+#[tauri::command]
+pub fn repo_readme(id: String) -> Option<String> {
+    let candidates = ["README.md", "Readme.md", "readme.md", "README.markdown", "README"];
+    candidates
+        .iter()
+        .find_map(|name| std::fs::read_to_string(std::path::Path::new(&id).join(name)).ok())
 }

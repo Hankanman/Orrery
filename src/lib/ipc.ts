@@ -1,5 +1,31 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Repo } from "@/types";
+import type { GitStatus, Repo } from "@/types";
+
+export interface FetchOutcome {
+  id: string;
+  status: GitStatus | null;
+  error: string | null;
+}
+
+export interface BranchInfo {
+  name: string;
+  isHead: boolean;
+  upstream: string | null;
+  gone: boolean;
+  merged: boolean;
+}
+
+export interface CommitInfo {
+  id: string;
+  summary: string;
+  author: string;
+  timeUnix: number;
+}
+
+export interface WorktreeInfo {
+  name: string;
+  path: string;
+}
 
 /** Mirrors the Rust `AppConfig` (see src-tauri/src/model.rs). */
 export interface AppConfig {
@@ -55,4 +81,15 @@ export const ipc = {
   githubSignOut: () => invoke<void>("github_sign_out"),
   aiStatus: () => invoke<AiStatus>("ai_status"),
   summarizeRepo: (repo: Repo, refresh = false) => invoke<string>("summarize_repo", { repo, refresh }),
+  fetchAll: (ids: string[]) => invoke<FetchOutcome[]>("fetch_all", { ids }),
+  fetchRepo: (id: string) => invoke<GitStatus>("fetch_repo", { id }),
+  listBranches: (id: string) => invoke<BranchInfo[]>("list_branches", { id }),
+  switchBranch: (id: string, name: string) => invoke<void>("switch_branch", { id, name }),
+  pruneBranches: (id: string) => invoke<string[]>("prune_branches", { id }),
+  listWorktrees: (id: string) => invoke<WorktreeInfo[]>("list_worktrees", { id }),
+  addWorktree: (id: string, name: string, dest: string) => invoke<string>("add_worktree", { id, name, dest }),
+  removeWorktree: (id: string, name: string) => invoke<void>("remove_worktree", { id, name }),
+  repoLog: (id: string, limit = 20) => invoke<CommitInfo[]>("repo_log", { id, limit }),
+  repoDiff: (id: string) => invoke<string>("repo_diff", { id }),
+  repoReadme: (id: string) => invoke<string | null>("repo_readme", { id }),
 };
