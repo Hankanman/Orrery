@@ -1027,3 +1027,22 @@
   border: 1px solid var(--border);
   padding: 4px 8px;
 }
+
+/* Daily AI briefing banner */
+.orr-briefing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--border));
+  background: color-mix(in oklch, var(--primary) 8%, var(--card));
+  border-radius: 10px;
+  font-size: 13px;
+}
+.orr-briefing button {
+  color: var(--muted-foreground);
+}
+.orr-briefing button:hover {
+  color: var(--foreground);
+}

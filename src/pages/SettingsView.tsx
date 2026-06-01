@@ -17,6 +17,7 @@ const FALLBACK: AppConfig = {
   gitlabHosts: [],
   aiModel: "llama3.2:3b",
   aiEnabled: true,
+  embedModel: "nomic-embed-text",
 };
 
 export function SettingsView() {

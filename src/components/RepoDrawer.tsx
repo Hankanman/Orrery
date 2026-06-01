@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, GitBranch, Scissors, Trash2, X } from "lucide-react";
+import { Check, GitBranch, Scissors, Sparkles, Trash2, X } from "lucide-react";
 import type { Repo } from "@/types";
 import { ipc, isTauri, type BranchInfo, type CommitInfo, type WorktreeInfo } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
@@ -21,6 +21,9 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
   const [readme, setReadme] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [commitMsg, setCommitMsg] = useState("");
+  const [changelog, setChangelog] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
 
   const id = repo?.id;
 
@@ -33,6 +36,9 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
     setLog([]);
     setDiff("");
     setReadme(null);
+    setCommitMsg("");
+    setChangelog("");
+    setError(null);
     ipc.listBranches(id).then((b) => alive && setBranches(b)).catch(() => {});
     ipc.listWorktrees(id).then((w) => alive && setWorktrees(w)).catch(() => {});
     ipc.repoLog(id, 15).then((l) => alive && setLog(l)).catch(() => {});
@@ -97,6 +103,47 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
     if (!window.confirm(`Remove worktree "${name}"? This unlinks it from the repo.`)) return;
     await ipc.removeWorktree(id, name).catch((e) => setError(`Couldn't remove worktree: ${String(e)}`));
     setWorktrees(await ipc.listWorktrees(id).catch(() => worktrees));
+  };
+
+  const genCommitMsg = async () => {
+    if (!id || aiBusy) return;
+    setAiBusy(true);
+    setError(null);
+    try {
+      setCommitMsg(await ipc.generateCommitMessage(id));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const doCommit = async () => {
+    if (!id || !commitMsg.trim() || aiBusy) return;
+    setAiBusy(true);
+    try {
+      await ipc.commitStaged(id, commitMsg);
+      setCommitMsg("");
+      setDiff(await ipc.repoDiff(id).catch(() => ""));
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const genChangelog = async () => {
+    if (!id || aiBusy) return;
+    setAiBusy(true);
+    setError(null);
+    try {
+      setChangelog(await ipc.generateChangelog(id, 20));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAiBusy(false);
+    }
   };
 
   const prunable = branches.some((b) => !b.isHead && (b.merged || b.gone));
@@ -221,14 +268,48 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
             </div>
           )}
 
-          {tab === "changes" &&
-            (diff ? (
-              <pre className="overflow-x-auto rounded-md bg-background/60 p-3 font-mono text-xs leading-relaxed">
-                {diff}
-              </pre>
-            ) : (
-              <p className="text-sm text-muted-foreground">Working tree is clean.</p>
-            ))}
+          {tab === "changes" && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="orr-cbtn" onClick={genCommitMsg} disabled={aiBusy}>
+                  <Sparkles className="size-3.5" /> {aiBusy ? "Thinking…" : "Commit message"}
+                </button>
+                <button type="button" className="orr-cbtn" onClick={genChangelog} disabled={aiBusy}>
+                  <Sparkles className="size-3.5" /> Changelog
+                </button>
+              </div>
+
+              {commitMsg && (
+                <div className="space-y-2">
+                  <textarea
+                    className="w-full rounded-md border border-border bg-background/60 p-2 font-mono text-xs"
+                    rows={4}
+                    value={commitMsg}
+                    onChange={(e) => setCommitMsg(e.target.value)}
+                  />
+                  <button type="button" className="orr-cbtn ide" onClick={doCommit} disabled={aiBusy}>
+                    <Check className="size-3.5" /> Commit staged
+                  </button>
+                </div>
+              )}
+
+              {changelog && (
+                <div className="orr-md rounded-md bg-background/60 p-3 text-sm">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{changelog}</ReactMarkdown>
+                </div>
+              )}
+
+              {error && <p className="text-sm text-danger">{error}</p>}
+
+              {diff ? (
+                <pre className="overflow-x-auto rounded-md bg-background/60 p-3 font-mono text-xs leading-relaxed">
+                  {diff}
+                </pre>
+              ) : (
+                <p className="text-sm text-muted-foreground">Working tree is clean.</p>
+              )}
+            </div>
+          )}
 
           {tab === "readme" &&
             (readme ? (

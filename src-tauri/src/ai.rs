@@ -125,6 +125,87 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
     Ok(parsed.response.trim().to_string())
 }
 
+/// Embed `text` with an embedding model via Ollama (`/api/embed`).
+pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        embeddings: Vec<Vec<f32>>,
+    }
+    let body = serde_json::json!({ "model": model, "input": text });
+    let resp = reqwest::Client::new()
+        .post(format!("{OLLAMA}/api/embed"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Ollama embed {}", resp.status()));
+    }
+    let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
+    parsed
+        .embeddings
+        .into_iter()
+        .next()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "model returned no embedding".to_string())
+}
+
+/// Cosine similarity of two equal-length vectors (0 if mismatched/empty).
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+fn clamp_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect()
+}
+
+/// Prompt to write a Conventional Commit message from a staged diff.
+pub fn commit_prompt(diff: &str) -> String {
+    format!(
+        "Write a single Conventional Commit message (e.g. `feat(scope): summary`) for these staged \
+changes. Output ONLY the message — no code fences, no explanation. Subject under 72 chars; add a \
+short body only if it genuinely helps.\n\nDiff:\n{}\n\nCommit message:",
+        clamp_chars(diff, 6000)
+    )
+}
+
+/// Prompt to summarize commits into a changelog / PR description.
+pub fn changelog_prompt(commits: &[String]) -> String {
+    format!(
+        "Summarize these commits into a concise changelog as markdown bullet points, grouping related \
+changes. No preamble.\n\nCommits:\n{}\n\nChangelog:",
+        commits.join("\n")
+    )
+}
+
+/// Prompt for a short daily briefing across recently-active repos.
+pub fn briefing_prompt(lines: &[String]) -> String {
+    format!(
+        "You are a dev's morning briefing. In 2–4 short sentences, summarize what changed across these \
+repositories. Be specific and factual, no preamble.\n\n{}\n\nBriefing:",
+        lines.join("\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +250,24 @@ mod tests {
         assert!(p.contains("Rust"));
         assert!(p.contains("7 uncommitted"));
         assert!(p.contains("branch main"));
+    }
+
+    #[test]
+    fn cosine_basics() {
+        let a = [1.0, 0.0, 0.0];
+        assert!((cosine(&a, &a) - 1.0).abs() < 1e-6); // identical
+        assert!(cosine(&a, &[0.0, 1.0, 0.0]).abs() < 1e-6); // orthogonal
+        assert_eq!(cosine(&a, &[1.0, 0.0]), 0.0); // mismatched length
+        assert_eq!(cosine(&[], &[]), 0.0); // empty
+    }
+
+    #[test]
+    fn commit_prompt_includes_diff_and_clamps() {
+        let p = commit_prompt("diff --git a/x b/x\n+hello");
+        assert!(p.contains("Conventional Commit"));
+        assert!(p.contains("+hello"));
+        // very long diffs are clamped
+        let big = "x".repeat(10_000);
+        assert!(commit_prompt(&big).len() < 8000);
     }
 }

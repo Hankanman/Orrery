@@ -154,6 +154,8 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         setLastScan(Date.now());
         enrichAll(next);
         summarizeAll(next);
+        // Refresh the semantic-search index in the background (best-effort).
+        ipc.indexRepos(next).catch(() => {});
       })
       .catch((e) => setError(String(e)))
       .finally(() => {
