@@ -50,12 +50,35 @@ pub struct Repo {
     pub root: String,
     /// Origin host, if the repo has a recognized remote.
     pub host: Option<Host>,
-    /// Host star count (filled in Phase 2; 0 for now).
+    /// Remote host domain (e.g. "github.com", "gitlab.acme.io") for routing
+    /// host-API calls, including self-hosted GitLab.
+    #[serde(default)]
+    pub remote_host: Option<String>,
+    /// Host star count (enrichment; 0 until fetched).
     pub stars: u32,
+    /// Host topics/labels (enrichment).
+    #[serde(default)]
+    pub topics: Vec<String>,
+    /// Open issues on the host (enrichment).
+    #[serde(default)]
+    pub open_issues: u32,
+    /// Latest release tag on the host (enrichment).
+    #[serde(default)]
+    pub latest_release: Option<String>,
     /// User-favorited (persisted locally).
     pub favorite: bool,
     /// Local-AI summary (Phase 3).
     pub ai_summary: Option<String>,
+}
+
+/// Host-side enrichment for a repo, fetched from GitHub/GitLab.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostInfo {
+    pub stars: u32,
+    pub topics: Vec<String>,
+    pub open_issues: u32,
+    pub latest_release: Option<String>,
 }
 
 /// User configuration, persisted as TOML.
@@ -72,4 +95,12 @@ pub struct AppConfig {
     pub ide_command: String,
     /// Command template to open a terminal coding agent in the repo.
     pub agent_command: String,
+    /// GitHub OAuth app client id for the device-flow login (optional).
+    #[serde(default)]
+    pub github_client_id: String,
+    /// Trusted self-hosted GitLab domains. A token is only ever sent to
+    /// gitlab.com or a domain on this list, so a malicious repo remote can't
+    /// exfiltrate it to an arbitrary host.
+    #[serde(default)]
+    pub gitlab_hosts: Vec<String>,
 }

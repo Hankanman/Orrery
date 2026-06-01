@@ -51,6 +51,8 @@ impl Default for AppConfig {
                 .collect(),
             ide_command,
             agent_command,
+            github_client_id: String::new(),
+            gitlab_hosts: Vec::new(),
         }
     }
 }

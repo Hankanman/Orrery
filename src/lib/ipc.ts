@@ -8,6 +8,22 @@ export interface AppConfig {
   ignore: string[];
   ideCommand: string;
   agentCommand: string;
+  githubClientId: string;
+  gitlabHosts: string[];
+}
+
+export interface HostInfo {
+  stars: number;
+  topics: string[];
+  openIssues: number;
+  latestRelease: string | null;
+}
+
+export interface DeviceStart {
+  userCode: string;
+  verificationUri: string;
+  deviceCode: string;
+  interval: number;
 }
 
 /** True when running inside the Tauri webview (vs. a plain browser preview). */
@@ -23,4 +39,10 @@ export const ipc = {
   setFavorite: (id: string, favorite: boolean) => invoke<boolean>("set_favorite", { id, favorite }),
   openInIde: (id: string) => invoke<void>("open_in_ide", { id }),
   openAgent: (id: string) => invoke<void>("open_agent", { id }),
+  enrichRepo: (host: "github" | "gitlab", domain: string, slug: string) =>
+    invoke<HostInfo>("enrich_repo", { host, domain, slug }),
+  githubLoginStart: () => invoke<DeviceStart>("github_login_start"),
+  githubLoginPoll: (deviceCode: string) => invoke<{ status: string }>("github_login_poll", { deviceCode }),
+  githubAuthStatus: () => invoke<boolean>("github_auth_status"),
+  githubSignOut: () => invoke<void>("github_sign_out"),
 };
