@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -18,6 +19,8 @@ interface ReposContextValue {
   /** First load finished (cache or scan) — distinguishes empty from not-yet-loaded. */
   ready: boolean;
   error: string | null;
+  /** Epoch ms of the last successful scan, or null. */
+  lastScan: number | null;
   refresh: () => void;
   toggleFavorite: (repo: Repo) => void;
   openIde: (repo: Repo) => void;
@@ -31,6 +34,9 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastScan, setLastScan] = useState<number | null>(null);
+  // Guards against overlapping scans (startup scan + a Rescan click racing).
+  const scanning = useRef(false);
 
   const refresh = useCallback(() => {
     if (!isTauri()) {
@@ -38,13 +44,19 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       setReady(true);
       return;
     }
+    if (scanning.current) return;
+    scanning.current = true;
     setLoading(true);
     setError(null);
     ipc
       .scanRepos()
-      .then((next) => setRepos(next))
+      .then((next) => {
+        setRepos(next);
+        setLastScan(Date.now());
+      })
       .catch((e) => setError(String(e)))
       .finally(() => {
+        scanning.current = false;
         setLoading(false);
         setReady(true);
       });
@@ -92,8 +104,8 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<ReposContextValue>(
-    () => ({ repos, loading, ready, error, refresh, toggleFavorite, openIde, openAgent }),
-    [repos, loading, ready, error, refresh, toggleFavorite, openIde, openAgent],
+    () => ({ repos, loading, ready, error, lastScan, refresh, toggleFavorite, openIde, openAgent }),
+    [repos, loading, ready, error, lastScan, refresh, toggleFavorite, openIde, openAgent],
   );
 
   return <ReposContext.Provider value={value}>{children}</ReposContext.Provider>;

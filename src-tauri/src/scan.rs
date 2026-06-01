@@ -61,8 +61,14 @@ fn find_repos(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
             it.skip_current_dir();
             continue;
         }
-        if entry.path().join(".git").exists() {
-            repos.push(entry.path().to_path_buf());
+        let dotgit = entry.path().join(".git");
+        if dotgit.exists() {
+            // A `.git` *directory* is a real working checkout. A `.git` *file* is
+            // a linked-worktree or submodule pointer — skip those so the same
+            // repository isn't listed twice. Either way, don't descend further.
+            if dotgit.is_dir() {
+                repos.push(entry.path().to_path_buf());
+            }
             it.skip_current_dir();
         }
     }
@@ -135,8 +141,10 @@ fn git_status(repo: &Repository) -> GitStatus {
     let (ahead, behind) = ahead_behind(repo).unwrap_or((0, 0));
 
     let mut opts = StatusOptions::new();
+    // Count an untracked directory as one entry (like `git status -s`) rather
+    // than recursing into it — otherwise a large untracked dir inflates "dirty".
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
+        .recurse_untracked_dirs(false)
         .include_ignored(false);
     let dirty = repo
         .statuses(Some(&mut opts))
@@ -174,13 +182,11 @@ fn parse_remote(url: &str) -> (Option<Host>, Option<String>) {
     };
 
     // Strip protocol/host prefix, then a trailing ".git".
-    let tail = url
-        .rsplit_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url)
+    let after_scheme = url.rsplit_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let tail = after_scheme
         .split_once('@')
         .map(|(_, rest)| rest)
-        .unwrap_or(url);
+        .unwrap_or(after_scheme);
     // tail is like "github.com/owner/repo.git" or "github.com:owner/repo.git"
     let path = tail
         .split_once(|c| c == '/' || c == ':')

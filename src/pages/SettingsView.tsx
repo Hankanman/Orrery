@@ -34,10 +34,19 @@ export function SettingsView() {
     setSaved(false);
   };
 
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const save = async () => {
-    if (isTauri()) await ipc.setConfig(config).catch((e) => console.error("[orrery] save config:", e));
-    setSaved(true);
-    refresh();
+    try {
+      if (isTauri()) await ipc.setConfig(config);
+      setSaveError(null);
+      setSaved(true);
+      refresh();
+    } catch (e) {
+      setSaved(false);
+      setSaveError(String(e));
+      console.error("[orrery] save config:", e);
+    }
   };
 
   return (
@@ -144,6 +153,7 @@ export function SettingsView() {
             <Check className="size-4" /> Save & rescan
           </Button>
           {saved && <span className="text-sm text-ok">Saved.</span>}
+          {saveError && <span className="text-sm text-danger">Couldn’t save: {saveError}</span>}
         </div>
       </div>
     </div>

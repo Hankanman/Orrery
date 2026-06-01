@@ -28,17 +28,20 @@ fn open() -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// The set of repo ids the user has favorited.
-pub fn favorites() -> HashSet<String> {
-    let Ok(conn) = open() else {
-        return HashSet::new();
-    };
+fn favorites_on(conn: &Connection) -> HashSet<String> {
     let Ok(mut stmt) = conn.prepare("SELECT id FROM favorites") else {
         return HashSet::new();
     };
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0));
-    match rows {
+    match stmt.query_map([], |row| row.get::<_, String>(0)) {
         Ok(iter) => iter.flatten().collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// The set of repo ids the user has favorited.
+pub fn favorites() -> HashSet<String> {
+    match open() {
+        Ok(conn) => favorites_on(&conn),
         Err(_) => HashSet::new(),
     }
 }
@@ -78,11 +81,11 @@ pub fn load_repos() -> Vec<Repo> {
     let Ok(conn) = open() else {
         return Vec::new();
     };
+    let favs = favorites_on(&conn);
     let Ok(mut stmt) = conn.prepare("SELECT data FROM repos") else {
         return Vec::new();
     };
     let rows = stmt.query_map([], |row| row.get::<_, String>(0));
-    let favs = favorites();
     match rows {
         Ok(iter) => iter
             .flatten()
