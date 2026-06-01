@@ -1,3 +1,4 @@
+mod ai;
 mod appearance;
 mod cache;
 mod commands;
@@ -64,7 +65,9 @@ pub fn run() {
             commands::github_login_start,
             commands::github_login_poll,
             commands::github_auth_status,
-            commands::github_sign_out
+            commands::github_sign_out,
+            commands::ai_status,
+            commands::summarize_repo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

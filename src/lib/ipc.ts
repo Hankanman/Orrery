@@ -10,6 +10,14 @@ export interface AppConfig {
   agentCommand: string;
   githubClientId: string;
   gitlabHosts: string[];
+  aiModel: string;
+  aiEnabled: boolean;
+}
+
+export interface AiStatus {
+  available: boolean;
+  model: string | null;
+  models: string[];
 }
 
 export interface HostInfo {
@@ -45,4 +53,6 @@ export const ipc = {
   githubLoginPoll: (deviceCode: string) => invoke<{ status: string }>("github_login_poll", { deviceCode }),
   githubAuthStatus: () => invoke<boolean>("github_auth_status"),
   githubSignOut: () => invoke<void>("github_sign_out"),
+  aiStatus: () => invoke<AiStatus>("ai_status"),
+  summarizeRepo: (repo: Repo, refresh = false) => invoke<string>("summarize_repo", { repo, refresh }),
 };

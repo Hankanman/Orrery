@@ -3,7 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::{AppConfig, Host, HostInfo, Repo};
-use crate::{cache, config, forge, launch, oauth, scan};
+use crate::{ai, cache, config, forge, launch, oauth, scan};
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -117,4 +117,49 @@ pub fn github_auth_status() -> bool {
 #[tauri::command]
 pub fn github_sign_out() {
     oauth::sign_out();
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiStatus {
+    pub available: bool,
+    pub model: Option<String>,
+    pub models: Vec<String>,
+}
+
+/// Whether local AI is available and which model would be used.
+#[tauri::command]
+pub async fn ai_status() -> AiStatus {
+    let cfg = config::load();
+    if !cfg.ai_enabled || !ai::available().await {
+        return AiStatus { available: false, model: None, models: Vec::new() };
+    }
+    let installed = ai::installed_models().await;
+    let model = ai::pick_model(&cfg.ai_model, &installed);
+    AiStatus {
+        available: true,
+        model,
+        models: installed.into_iter().map(|(name, _)| name).collect(),
+    }
+}
+
+/// Summarize a repo (cached while its last commit is unchanged).
+#[tauri::command]
+pub async fn summarize_repo(repo: Repo, refresh: bool) -> Result<String, String> {
+    if !refresh {
+        if let Some(cached) = cache::cached_summary(&repo.id, repo.last_commit_unix) {
+            return Ok(cached);
+        }
+    }
+    let cfg = config::load();
+    if !cfg.ai_enabled {
+        return Err("AI summaries are disabled".into());
+    }
+    let installed = ai::installed_models().await;
+    let model = ai::pick_model(&cfg.ai_model, &installed).ok_or("no Ollama model available")?;
+    let summary = ai::generate(&model, &ai::summary_prompt(&repo)).await?;
+    if !summary.is_empty() {
+        cache::store_summary(&repo.id, &summary, repo.last_commit_unix);
+    }
+    Ok(summary)
 }

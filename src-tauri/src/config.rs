@@ -53,6 +53,8 @@ impl Default for AppConfig {
             agent_command,
             github_client_id: String::new(),
             gitlab_hosts: Vec::new(),
+            ai_model: crate::model::default_ai_model(),
+            ai_enabled: true,
         }
     }
 }

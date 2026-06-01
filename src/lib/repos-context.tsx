@@ -38,8 +38,9 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [lastScan, setLastScan] = useState<number | null>(null);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
-  // Generation token so a superseded enrichment run can't clobber a newer one.
+  // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
   const enrichGen = useRef(0);
+  const summaryGen = useRef(0);
 
   // Fetch host enrichment (stars/topics/issues/release) in small concurrent
   // batches, merging each result into the matching repo. Cheap to re-run: the
@@ -80,6 +81,39 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
+  // Generate local AI summaries in the background (low concurrency — inference
+  // is heavier than HTTP). No-ops if Ollama isn't available; cached per repo.
+  const summarizeAll = useCallback((list: Repo[]) => {
+    if (!isTauri()) return;
+    const gen = ++summaryGen.current;
+    const targets = list.filter((r) => !r.aiSummary); // skip ones we already have
+    if (targets.length === 0) return;
+    void (async () => {
+      const status = await ipc.aiStatus().catch(() => null);
+      if (!status?.available) return;
+      const CHUNK = 2;
+      for (let i = 0; i < targets.length; i += CHUNK) {
+        if (summaryGen.current !== gen) return;
+        const chunk = targets.slice(i, i + CHUNK);
+        const results = await Promise.all(
+          chunk.map((r) =>
+            ipc
+              .summarizeRepo(r)
+              .then((summary) => ({ id: r.id, summary }))
+              .catch(() => null),
+          ),
+        );
+        setRepos((prev) => {
+          if (summaryGen.current !== gen) return prev;
+          return prev.map((r) => {
+            const hit = results.find((x) => x && x.id === r.id);
+            return hit && hit.summary ? { ...r, aiSummary: hit.summary } : r;
+          });
+        });
+      }
+    })();
+  }, []);
+
   const refresh = useCallback(() => {
     if (!isTauri()) {
       setRepos(MOCK_REPOS);
@@ -93,9 +127,28 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     ipc
       .scanRepos()
       .then((next) => {
-        setRepos(next);
+        // A fresh scan has stars/summary cleared; carry over already-known
+        // enrichment + AI summary so they don't flicker away while the
+        // (cached) enrich/summarize passes re-confirm them.
+        setRepos((prev) => {
+          const prior = new Map(prev.map((r) => [r.id, r]));
+          return next.map((r) => {
+            const old = prior.get(r.id);
+            return old
+              ? {
+                  ...r,
+                  stars: old.stars,
+                  topics: old.topics,
+                  openIssues: old.openIssues,
+                  latestRelease: old.latestRelease,
+                  aiSummary: old.aiSummary,
+                }
+              : r;
+          });
+        });
         setLastScan(Date.now());
         enrichAll(next);
+        summarizeAll(next);
       })
       .catch((e) => setError(String(e)))
       .finally(() => {
@@ -103,7 +156,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         setReady(true);
       });
-  }, [enrichAll]);
+  }, [enrichAll, summarizeAll]);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,6 +173,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
           setRepos(cached);
           setReady(true);
           enrichAll(cached); // populate from host cache (instant/offline)
+          summarizeAll(cached); // cached summaries paint instantly
         }
       })
       .catch(() => {})
@@ -129,7 +183,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [refresh, enrichAll]);
+  }, [refresh, enrichAll, summarizeAll]);
 
   // Live-watch: the Rust watcher emits `repos-changed` (debounced) on disk
   // changes; rescan when it fires. The scan guard coalesces bursts.
