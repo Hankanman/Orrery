@@ -874,4 +874,80 @@
   .orr-card::after {
     transition: none;
   }
+  .orr-skel-line {
+    animation: none;
+  }
+}
+
+/* Loading skeletons (reuse the card shell) */
+.orr-skel {
+  pointer-events: none;
+  gap: 12px;
+}
+.orr-skel-line {
+  height: 12px;
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--foreground) 10%, transparent);
+  animation: orr-pulse 1.4s ease-in-out infinite;
+}
+@keyframes orr-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+/* Empty / error states */
+.orr-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 64px 24px;
+  color: var(--muted-foreground);
+}
+.orr-empty .t {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.orr-empty .s {
+  font-size: 13px;
+  max-width: 46ch;
+}
+
+/* Settings page */
+.orr-settings {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  max-width: 760px;
+  margin: 0 auto;
+  width: 100%;
+}
+.orr-settings-head h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.orr-settings-head p {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  margin-top: 2px;
+}
+.orr-settings code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.orr-settings-body {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }

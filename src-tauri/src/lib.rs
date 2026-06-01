@@ -1,4 +1,10 @@
 mod appearance;
+mod cache;
+mod commands;
+mod config;
+mod launch;
+mod model;
+mod scan;
 
 /// Configure display/rendering environment on Linux before GTK/WebKit init.
 /// Both vars are only set if the user hasn't already set them, so anyone can
@@ -41,7 +47,16 @@ pub fn run() {
             appearance::spawn_watcher(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![appearance::get_appearance])
+        .invoke_handler(tauri::generate_handler![
+            appearance::get_appearance,
+            commands::get_config,
+            commands::set_config,
+            commands::cached_repos,
+            commands::scan_repos,
+            commands::set_favorite,
+            commands::open_in_ide,
+            commands::open_agent
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
