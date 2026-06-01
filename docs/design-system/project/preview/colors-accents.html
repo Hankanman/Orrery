@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  *{box-sizing:border-box} html,body{margin:0}
+  body{width:700px;font-family:var(--font-sans);color:var(--fg-0);background:var(--base);padding:24px 26px}
+  .row{display:flex;gap:14px}
+  .sw{flex:1;border-radius:var(--r-md);border:1px solid var(--border);padding:14px;background:var(--glass);backdrop-filter:blur(12px)}
+  .top{display:flex;align-items:center;gap:10px}
+  .chip{width:34px;height:34px;border-radius:var(--r-sm);flex:none}
+  .name{font:var(--text-body-strong);color:var(--fg-0)}
+  .hex{font:var(--text-data-sm);color:var(--fg-2)}
+  .src{font:var(--text-micro);letter-spacing:var(--tracking-micro);text-transform:uppercase;margin-top:12px;display:block}
+  .desc{font:var(--text-small);color:var(--fg-1);margin-top:5px}
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="sw">
+      <div class="top"><div class="chip" style="background:var(--accent);box-shadow:0 0 16px var(--accent-glow)"></div><div><div class="name">orbit cyan</div><div class="hex">#38DBF0</div></div></div>
+      <span class="src" style="color:var(--accent)">Local git</span>
+      <div class="desc">Primary / interactive — links, focus, primary actions, active orbits.</div>
+    </div>
+    <div class="sw">
+      <div class="top"><div class="chip" style="background:var(--star);box-shadow:0 0 16px var(--star-glow)"></div><div><div class="name">star amber</div><div class="hex">#FFC24B</div></div></div>
+      <span class="src" style="color:var(--star)">Host</span>
+      <div class="desc">Stars, favorites & releases pulled from GitHub / GitLab.</div>
+    </div>
+    <div class="sw">
+      <div class="top"><div class="chip" style="background:var(--ai);box-shadow:0 0 16px var(--ai-glow)"></div><div><div class="name">AI violet</div><div class="hex">#A78BFA</div></div></div>
+      <span class="src" style="color:var(--ai)">Local AI</span>
+      <div class="desc">On-device llama.cpp summaries & anything AI-generated.</div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  *{box-sizing:border-box} html,body{margin:0}
+  body{width:700px;height:150px;font-family:var(--font-sans);color:var(--fg-0);background:var(--base);
+    padding:0 34px;display:flex;align-items:center;gap:40px}
+  .orbit{position:relative;width:64px;height:64px;flex:none}
+  .ring{position:absolute;inset:0;border-radius:50%;border:1px solid var(--border-strong)}
+  .core{position:absolute;top:50%;left:50%;width:12px;height:12px;margin:-6px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 14px var(--accent-glow)}
+  .sat{position:absolute;top:50%;left:50%;width:64px;height:64px;margin:-32px;animation:spin 1.4s linear infinite}
+  .sat::before{content:"";position:absolute;top:-4px;left:50%;width:8px;height:8px;margin-left:-4px;border-radius:50%;
+    background:var(--accent-bright);box-shadow:0 0 10px var(--accent-glow)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.sat{animation:none}}
+  .txt h3{font:var(--text-h3);margin:0 0 5px}
+  .txt p{font:var(--text-small);color:var(--fg-2);margin:0}
+  .easings{margin-left:auto;display:flex;flex-direction:column;gap:7px;font:var(--text-data-sm);color:var(--fg-2)}
+  .easings b{color:var(--accent-bright)}
+</style>
+</head>
+<body>
+  <div class="orbit"><div class="ring"></div><div class="sat"></div><div class="core"></div></div>
+  <div class="txt"><h3>Orbital spinner</h3><p>Brand loading state — a satellite circling its core.</p></div>
+  <div class="easings">
+    <span><b>ease-out</b> · 200ms · default UI</span>
+    <span><b>ease-spring</b> · pops & scale-in</span>
+    <span>cards lift + glow · palette scales in</span>
+  </div>
+</body>
+</html>

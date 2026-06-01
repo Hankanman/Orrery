@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  *{box-sizing:border-box} html,body{margin:0}
+  body{width:700px;font-family:var(--font-sans);color:var(--fg-1);background:var(--base);padding:24px 26px}
+  .lead{font:var(--text-micro);letter-spacing:var(--tracking-micro);text-transform:uppercase;color:var(--fg-2);margin-bottom:16px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px 10px}
+  .lang{display:flex;align-items:center;gap:9px}
+  .dot{width:12px;height:12px;border-radius:50%;flex:none}
+  .nm{font:var(--text-data-sm);color:var(--fg-1)}
+</style>
+</head>
+<body>
+  <div class="lead">Language dots — GitHub-linguist palette</div>
+  <div class="grid">
+    <div class="lang"><span class="dot" style="background:var(--lang-rust)"></span><span class="nm">Rust</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-ts)"></span><span class="nm">TypeScript</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-js)"></span><span class="nm">JavaScript</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-python)"></span><span class="nm">Python</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-go)"></span><span class="nm">Go</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-cpp)"></span><span class="nm">C++</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-vue)"></span><span class="nm">Vue</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-svelte)"></span><span class="nm">Svelte</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-shell)"></span><span class="nm">Shell</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-swift)"></span><span class="nm">Swift</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-kotlin)"></span><span class="nm">Kotlin</span></div>
+    <div class="lang"><span class="dot" style="background:var(--lang-java)"></span><span class="nm">Java</span></div>
+  </div>
+</body>
+</html>

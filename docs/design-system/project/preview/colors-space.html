@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  *{box-sizing:border-box} html,body{margin:0}
+  body{width:700px;font-family:var(--font-sans);color:var(--fg-0);background:var(--base);padding:24px 26px}
+  .row{display:flex;gap:12px}
+  .sw{flex:1;border-radius:var(--r-md);border:1px solid var(--border);padding:12px;height:108px;display:flex;flex-direction:column;justify-content:flex-end}
+  .name{font:var(--text-body-strong);color:var(--fg-0)}
+  .hex{font:var(--text-data-sm);color:var(--fg-2);margin-top:2px}
+  .note{font:var(--text-data-sm);color:var(--fg-3);margin-top:8px}
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="sw" style="background:var(--void)"><div class="name">void</div><div class="hex">#06080D</div></div>
+    <div class="sw" style="background:var(--base)"><div class="name">base</div><div class="hex">#0A0E16</div></div>
+    <div class="sw" style="background:var(--raised)"><div class="name">raised</div><div class="hex">#121826</div></div>
+    <div class="sw" style="background:var(--raised-2)"><div class="name">raised-2</div><div class="hex">#182032</div></div>
+    <div class="sw" style="background:var(--glass);backdrop-filter:blur(12px);box-shadow:var(--inset-top)"><div class="name">glass</div><div class="hex">white 3.5%</div></div>
+  </div>
+  <div class="note">Deep blue-black "space" ramp · glass surfaces sit on top with backdrop-blur 16–24px</div>
+</body>
+</html>

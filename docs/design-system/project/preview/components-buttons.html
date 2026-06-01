@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  *{box-sizing:border-box} html,body{margin:0}
+  body{width:700px;font-family:var(--font-sans);color:var(--fg-0);background:var(--base);padding:26px 28px;
+    display:flex;flex-direction:column;gap:18px}
+  .grp{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:7px;font:var(--text-body-strong);
+    border-radius:var(--r-sm);padding:8px 14px;border:1px solid transparent;cursor:pointer;
+    transition:all var(--dur-fast) var(--ease-out)}
+  .btn svg{width:15px;height:15px}
+  .primary{background:var(--accent);color:var(--void);box-shadow:0 0 18px var(--accent-glow)}
+  .secondary{background:var(--glass-2);color:var(--fg-0);border-color:var(--border-strong)}
+  .ghost{background:transparent;color:var(--fg-1)}
+  .agent{background:var(--ai-glow);color:var(--ai);border-color:rgba(167,139,250,.4)}
+  .lbl{font:var(--text-micro);letter-spacing:var(--tracking-micro);text-transform:uppercase;color:var(--fg-3);width:64px;flex:none}
+</style>
+</head>
+<body>
+  <div class="grp"><span class="lbl">Primary</span>
+    <button class="btn primary"><i data-lucide="code"></i>Open in IDE</button>
+    <button class="btn primary"><i data-lucide="refresh-cw"></i>Scan</button>
+  </div>
+  <div class="grp"><span class="lbl">Secondary</span>
+    <button class="btn secondary"><i data-lucide="terminal"></i>Terminal</button>
+    <button class="btn agent"><i data-lucide="square-terminal"></i>Agent</button>
+  </div>
+  <div class="grp"><span class="lbl">Ghost</span>
+    <button class="btn ghost"><i data-lucide="sliders-horizontal"></i>Filters</button>
+    <button class="btn ghost"><i data-lucide="settings"></i>Settings</button>
+    <button class="btn ghost" style="opacity:.4"><i data-lucide="star"></i>Disabled</button>
+  </div>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>lucide.createIcons();</script>
+</body>
+</html>
