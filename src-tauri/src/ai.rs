@@ -82,22 +82,36 @@ Summary:",
     )
 }
 
-/// Generate text with a model via Ollama (non-streaming).
+/// Generate a summary via Ollama.
+///
+/// Tries normally first. If the model returns an empty response — the signature
+/// of a "thinking" model (qwen3, gemma3, …) that spent its whole token budget
+/// on hidden reasoning — it retries once with `think:false`. This way the
+/// `think` field is only ever sent to a model that actually needs it, so plain
+/// models that might reject the field are never hit with it.
 pub async fn generate(model: &str, prompt: &str) -> Result<String, String> {
+    let first = generate_once(model, prompt, false).await?;
+    if !first.is_empty() {
+        return Ok(first);
+    }
+    generate_once(model, prompt, true).await
+}
+
+async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Result<String, String> {
     #[derive(Deserialize)]
     struct GenResp {
         #[serde(default)]
         response: String,
     }
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "prompt": prompt,
         "stream": false,
-        // Disable hidden reasoning — on "thinking" models (qwen3, etc.) it would
-        // consume the whole token budget and leave an empty response.
-        "think": false,
         "options": { "temperature": 0.2, "num_predict": 120 }
     });
+    if suppress_think {
+        body["think"] = serde_json::Value::Bool(false);
+    }
     let resp = reqwest::Client::new()
         .post(format!("{OLLAMA}/api/generate"))
         .json(&body)

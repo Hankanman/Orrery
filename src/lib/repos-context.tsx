@@ -86,13 +86,15 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const summarizeAll = useCallback((list: Repo[]) => {
     if (!isTauri()) return;
     const gen = ++summaryGen.current;
+    const targets = list.filter((r) => !r.aiSummary); // skip ones we already have
+    if (targets.length === 0) return;
     void (async () => {
       const status = await ipc.aiStatus().catch(() => null);
       if (!status?.available) return;
       const CHUNK = 2;
-      for (let i = 0; i < list.length; i += CHUNK) {
+      for (let i = 0; i < targets.length; i += CHUNK) {
         if (summaryGen.current !== gen) return;
-        const chunk = list.slice(i, i + CHUNK);
+        const chunk = targets.slice(i, i + CHUNK);
         const results = await Promise.all(
           chunk.map((r) =>
             ipc
@@ -125,7 +127,25 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     ipc
       .scanRepos()
       .then((next) => {
-        setRepos(next);
+        // A fresh scan has stars/summary cleared; carry over already-known
+        // enrichment + AI summary so they don't flicker away while the
+        // (cached) enrich/summarize passes re-confirm them.
+        setRepos((prev) => {
+          const prior = new Map(prev.map((r) => [r.id, r]));
+          return next.map((r) => {
+            const old = prior.get(r.id);
+            return old
+              ? {
+                  ...r,
+                  stars: old.stars,
+                  topics: old.topics,
+                  openIssues: old.openIssues,
+                  latestRelease: old.latestRelease,
+                  aiSummary: old.aiSummary,
+                }
+              : r;
+          });
+        });
         setLastScan(Date.now());
         enrichAll(next);
         summarizeAll(next);
