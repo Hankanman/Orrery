@@ -48,7 +48,21 @@ Track progress in [the issue list](../../issues).
 
 ## Building
 
-> Nothing to build yet — scaffolding lands with Phase 1. Instructions will appear here once the project is initialized.
+Prerequisites: a recent **Rust** toolchain, **Node + pnpm**, and the Tauri Linux
+system libraries (`webkit2gtk-4.1`, `gtk3`, `libsoup-3.0`, `librsvg2`, plus a C
+toolchain and `pkg-config`).
+
+```bash
+pnpm install          # install JS deps
+pnpm tauri dev        # run the desktop app (Vite + Rust core)
+pnpm tauri build       # produce a release bundle
+pnpm build            # frontend-only build (tsc + vite)
+```
+
+> **Wayland note:** the `tauri` script sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
+> Without it, WebKitGTK can crash on some GPU/compositor combinations with
+> `Error 71 (Protocol error) dispatching to Wayland display`. If you still hit
+> rendering issues, try `GDK_BACKEND=x11 pnpm tauri dev`.
 
 ## License
 
