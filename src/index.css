@@ -1,0 +1,156 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Orrery — "mission control" theme.
+  Dark-first: a deep blue-slate void with electric-cyan as the primary
+  accent (orbit/telemetry) and a violet secondary (stars). The app is
+  dark-only for now, so :root and .dark carry the same values.
+*/
+
+:root,
+.dark {
+  --radius: 0.625rem;
+
+  /* Surfaces — deep space blue-slate, layered */
+  --background: oklch(0.16 0.022 256);
+  --foreground: oklch(0.94 0.01 250);
+  --card: oklch(0.2 0.026 256);
+  --card-foreground: oklch(0.94 0.01 250);
+  --popover: oklch(0.21 0.028 256);
+  --popover-foreground: oklch(0.94 0.01 250);
+
+  /* Primary — electric cyan (telemetry / orbit) */
+  --primary: oklch(0.8 0.15 196);
+  --primary-foreground: oklch(0.18 0.03 230);
+
+  /* Secondary / muted — slate panels */
+  --secondary: oklch(0.27 0.025 256);
+  --secondary-foreground: oklch(0.92 0.01 250);
+  --muted: oklch(0.25 0.022 256);
+  --muted-foreground: oklch(0.68 0.02 256);
+
+  /* Accent — violet (stars) */
+  --accent: oklch(0.62 0.17 295);
+  --accent-foreground: oklch(0.96 0.01 290);
+
+  --destructive: oklch(0.62 0.21 25);
+
+  /* Lines & focus */
+  --border: oklch(0.3 0.022 256);
+  --input: oklch(0.3 0.022 256);
+  --ring: oklch(0.8 0.15 196);
+
+  /* Status accents used across cards */
+  --ok: oklch(0.78 0.16 155);
+  --warn: oklch(0.82 0.16 85);
+  --danger: oklch(0.66 0.2 25);
+
+  /* Charts */
+  --chart-1: oklch(0.8 0.15 196);
+  --chart-2: oklch(0.62 0.17 295);
+  --chart-3: oklch(0.78 0.16 155);
+  --chart-4: oklch(0.82 0.16 85);
+  --chart-5: oklch(0.66 0.2 25);
+
+  /* Sidebar */
+  --sidebar: oklch(0.18 0.024 256);
+  --sidebar-foreground: oklch(0.94 0.01 250);
+  --sidebar-primary: oklch(0.8 0.15 196);
+  --sidebar-primary-foreground: oklch(0.18 0.03 230);
+  --sidebar-accent: oklch(0.27 0.025 256);
+  --sidebar-accent-foreground: oklch(0.92 0.01 250);
+  --sidebar-border: oklch(0.3 0.022 256);
+  --sidebar-ring: oklch(0.8 0.15 196);
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Fira Code", monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    /* Subtle starfield/orbital glow in the deep background */
+    background-image:
+      radial-gradient(
+        1200px 600px at 78% -10%,
+        color-mix(in oklch, var(--primary) 8%, transparent),
+        transparent 60%
+      ),
+      radial-gradient(
+        900px 500px at 12% 110%,
+        color-mix(in oklch, var(--accent) 7%, transparent),
+        transparent 60%
+      );
+    background-attachment: fixed;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+  }
+}
