@@ -24,13 +24,30 @@ pub fn stored_github_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn save_token(token: &str) {
-    if let Some(path) = token_path() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, token);
+fn save_token(token: &str) -> Result<(), String> {
+    let path = token_path().ok_or("no data directory")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    // Create owner-only from the start (no umask race) — the token is a secret.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        file.write_all(token.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, token).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn cli_token(bin: &str) -> Option<String> {
@@ -128,7 +145,11 @@ pub async fn device_poll(client_id: &str, device_code: &str) -> Result<PollResul
         .map_err(|e| e.to_string())?;
 
     if let Some(token) = resp.access_token {
-        save_token(&token);
+        let token = token.trim();
+        if token.is_empty() || !token.is_ascii() || token.len() > 255 {
+            return Err("received a malformed access token".into());
+        }
+        save_token(token)?;
         return Ok(PollResult { status: "authorized".into() });
     }
     Ok(PollResult {

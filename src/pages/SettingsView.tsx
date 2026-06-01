@@ -14,6 +14,7 @@ const FALLBACK: AppConfig = {
   ideCommand: "code {path}",
   agentCommand: "kitty --working-directory {path} -e claude",
   githubClientId: "",
+  gitlabHosts: [],
 };
 
 export function SettingsView() {
@@ -33,6 +34,42 @@ export function SettingsView() {
     ipc.getConfig().then(setConfig).catch(() => setConfig(FALLBACK));
     ipc.githubAuthStatus().then(setAuthed).catch(() => {});
   }, []);
+
+  // Device-flow polling lives in an effect so it's cancelled if the user
+  // navigates away mid-login. Honors `slow_down` by widening the interval.
+  useEffect(() => {
+    if (!device) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let intervalMs = (device.interval + 1) * 1000;
+    const poll = async () => {
+      try {
+        const { status } = await ipc.githubLoginPoll(device.deviceCode);
+        if (cancelled) return;
+        if (status === "authorized") {
+          setAuthed(true);
+          setDevice(null);
+          refresh();
+        } else if (status === "authorization_pending" || status === "slow_down") {
+          if (status === "slow_down") intervalMs += 5000;
+          timer = setTimeout(poll, intervalMs);
+        } else {
+          setLoginError(status);
+          setDevice(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setLoginError(String(e));
+          setDevice(null);
+        }
+      }
+    };
+    timer = setTimeout(poll, intervalMs);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [device, refresh]);
 
   if (!config) return <div className="orr-settings" />;
 
@@ -57,29 +94,10 @@ export function SettingsView() {
   const connectGithub = async () => {
     setLoginError(null);
     try {
-      // Persist the client id first so the backend can use it.
+      // Persist the client id first so the backend can use it, then start the
+      // flow. The polling effect (keyed on `device`) takes it from here.
       if (isTauri()) await ipc.setConfig(config);
-      const start = await ipc.githubLoginStart();
-      setDevice(start);
-      const poll = async () => {
-        try {
-          const { status } = await ipc.githubLoginPoll(start.deviceCode);
-          if (status === "authorized") {
-            setAuthed(true);
-            setDevice(null);
-            refresh();
-          } else if (status === "authorization_pending" || status === "slow_down") {
-            setTimeout(poll, (start.interval + 1) * 1000);
-          } else {
-            setLoginError(status);
-            setDevice(null);
-          }
-        } catch (e) {
-          setLoginError(String(e));
-          setDevice(null);
-        }
-      };
-      setTimeout(poll, (start.interval + 1) * 1000);
+      setDevice(await ipc.githubLoginStart());
     } catch (e) {
       setLoginError(String(e));
     }

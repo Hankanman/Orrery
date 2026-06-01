@@ -9,6 +9,7 @@ export interface AppConfig {
   ideCommand: string;
   agentCommand: string;
   githubClientId: string;
+  gitlabHosts: string[];
 }
 
 export interface HostInfo {

@@ -38,16 +38,20 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [lastScan, setLastScan] = useState<number | null>(null);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
+  // Generation token so a superseded enrichment run can't clobber a newer one.
+  const enrichGen = useRef(0);
 
   // Fetch host enrichment (stars/topics/issues/release) in small concurrent
   // batches, merging each result into the matching repo. Cheap to re-run: the
   // Rust side caches for 6h and falls back to cache when offline.
   const enrichAll = useCallback((list: Repo[]) => {
     if (!isTauri()) return;
+    const gen = ++enrichGen.current;
     const targets = list.filter((r) => r.host && r.slug && (r.remoteHost || r.host === "github"));
     const CHUNK = 6;
     void (async () => {
       for (let i = 0; i < targets.length; i += CHUNK) {
+        if (enrichGen.current !== gen) return; // superseded by a newer scan/enrich
         const chunk = targets.slice(i, i + CHUNK);
         const results = await Promise.all(
           chunk.map((r) =>
@@ -57,8 +61,9 @@ export function ReposProvider({ children }: { children: ReactNode }) {
               .catch(() => null),
           ),
         );
-        setRepos((prev) =>
-          prev.map((r) => {
+        setRepos((prev) => {
+          if (enrichGen.current !== gen) return prev; // discard stale results
+          return prev.map((r) => {
             const hit = results.find((x) => x && x.id === r.id);
             return hit
               ? {
@@ -69,8 +74,8 @@ export function ReposProvider({ children }: { children: ReactNode }) {
                   latestRelease: hit.info.latestRelease,
                 }
               : r;
-          }),
-        );
+          });
+        });
       }
     })();
   }, []);

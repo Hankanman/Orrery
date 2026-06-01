@@ -98,4 +98,9 @@ pub struct AppConfig {
     /// GitHub OAuth app client id for the device-flow login (optional).
     #[serde(default)]
     pub github_client_id: String,
+    /// Trusted self-hosted GitLab domains. A token is only ever sent to
+    /// gitlab.com or a domain on this list, so a malicious repo remote can't
+    /// exfiltrate it to an arbitrary host.
+    #[serde(default)]
+    pub gitlab_hosts: Vec<String>,
 }

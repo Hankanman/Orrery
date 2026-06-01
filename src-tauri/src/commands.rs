@@ -68,8 +68,19 @@ pub async fn enrich_repo(host: Host, domain: String, slug: String) -> Result<Hos
         return Ok(fresh);
     }
     let token = match host {
+        // GitHub requests always go to api.github.com, so the token can't leak
+        // to the repo's (untrusted) remote domain.
         Host::Github => oauth::github_token(),
-        Host::Gitlab => oauth::gitlab_token(),
+        // Only attach a GitLab token for gitlab.com or an explicitly trusted
+        // self-hosted host — never to an arbitrary domain from a repo remote.
+        Host::Gitlab => {
+            let trusted = domain == "gitlab.com" || config::load().gitlab_hosts.iter().any(|h| h == &domain);
+            if trusted {
+                oauth::gitlab_token()
+            } else {
+                None
+            }
+        }
     };
     match forge::fetch(host, &domain, &slug, token.as_deref()).await {
         Ok(info) => {
@@ -91,7 +102,11 @@ pub async fn github_login_start() -> Result<oauth::DeviceStart, String> {
 
 #[tauri::command]
 pub async fn github_login_poll(device_code: String) -> Result<oauth::PollResult, String> {
-    oauth::device_poll(&config::load().github_client_id, &device_code).await
+    let client_id = config::load().github_client_id;
+    if client_id.is_empty() {
+        return Err("Set a GitHub OAuth client id in settings first.".into());
+    }
+    oauth::device_poll(&client_id, &device_code).await
 }
 
 #[tauri::command]

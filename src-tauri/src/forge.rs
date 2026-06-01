@@ -26,6 +26,24 @@ pub async fn fetch(
     }
 }
 
+/// Guard the GitLab API host. `domain` comes from a repo's `.git/config`, so a
+/// malicious/misconfigured remote could otherwise point requests (with a bearer
+/// token attached) at an internal address or metadata endpoint (SSRF). Accept
+/// only plain DNS hostnames — no IPs, ports, schemes, paths, or credentials.
+pub(crate) fn valid_host(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.contains('.')
+        && !domain.contains('/')
+        && !domain.contains(':')
+        && !domain.contains('@')
+        && !domain.contains(' ')
+        && domain.parse::<std::net::IpAddr>().is_err()
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(UA)
@@ -92,6 +110,9 @@ async fn fetch_gitlab(domain: &str, slug: &str, token: Option<&str>) -> Result<H
         topics: Vec<String>,
     }
 
+    if !valid_host(domain) {
+        return Err(format!("refusing to query untrusted host: {domain}"));
+    }
     let base = format!("https://{}/api/v4", domain);
     let encoded = urlencoding::encode(slug);
     let client = client();
@@ -130,4 +151,23 @@ async fn fetch_gitlab(domain: &str, slug: &str, token: Option<&str>) -> Result<H
         open_issues: project.open_issues_count,
         latest_release,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_host;
+
+    #[test]
+    fn valid_host_accepts_dns_names_and_rejects_unsafe() {
+        assert!(valid_host("gitlab.com"));
+        assert!(valid_host("gitlab.acme.io"));
+        // SSRF vectors / malformed hosts
+        assert!(!valid_host("169.254.169.254"), "metadata IP");
+        assert!(!valid_host("127.0.0.1"));
+        assert!(!valid_host("localhost"), "no dot");
+        assert!(!valid_host("gitlab.com:8080"), "port");
+        assert!(!valid_host("evil.com/path"), "path");
+        assert!(!valid_host("user@evil.com"), "credentials");
+        assert!(!valid_host(""));
+    }
 }
