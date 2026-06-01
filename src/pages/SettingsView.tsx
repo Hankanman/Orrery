@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, FolderGit2, LogOut, Plus, Terminal, Trash2 } from "lucide-react";
-import { ipc, isTauri, type AppConfig, type DeviceStart } from "@/lib/ipc";
+import { Check, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2 } from "lucide-react";
+import { ipc, isTauri, type AiStatus, type AppConfig, type DeviceStart } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,6 +15,8 @@ const FALLBACK: AppConfig = {
   agentCommand: "kitty --working-directory {path} -e claude",
   githubClientId: "",
   gitlabHosts: [],
+  aiModel: "llama3.2:3b",
+  aiEnabled: true,
 };
 
 export function SettingsView() {
@@ -25,6 +27,7 @@ export function SettingsView() {
   const [authed, setAuthed] = useState(false);
   const [device, setDevice] = useState<DeviceStart | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -33,6 +36,7 @@ export function SettingsView() {
     }
     ipc.getConfig().then(setConfig).catch(() => setConfig(FALLBACK));
     ipc.githubAuthStatus().then(setAuthed).catch(() => {});
+    ipc.aiStatus().then(setAiStatus).catch(() => {});
   }, []);
 
   // Device-flow polling lives in an effect so it's cancelled if the user
@@ -252,6 +256,42 @@ export function SettingsView() {
                 {loginError && <span className="text-sm text-danger">Login failed: {loginError}</span>}
               </>
             )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Sparkles className="size-4 text-primary" /> AI summaries
+            </CardTitle>
+            <CardDescription>
+              {aiStatus?.available
+                ? `Local Ollama detected — using ${aiStatus.model ?? "the smallest installed model"}.`
+                : "Local-only via Ollama. Start Ollama and pull a model to enable summaries."}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={config.aiEnabled}
+                onChange={(e) => patch({ aiEnabled: e.target.checked })}
+              />
+              Generate summaries
+            </label>
+            <div className="space-y-1.5">
+              <label className="text-sm text-muted-foreground" htmlFor="aimodel">
+                Preferred model {aiStatus && `(installed: ${aiStatus.models.join(", ") || "none"})`}
+              </label>
+              <Input
+                id="aimodel"
+                spellCheck={false}
+                placeholder="llama3.2:3b"
+                value={config.aiModel}
+                onChange={(e) => patch({ aiModel: e.target.value })}
+                disabled={!config.aiEnabled}
+              />
+            </div>
           </CardContent>
         </Card>
 

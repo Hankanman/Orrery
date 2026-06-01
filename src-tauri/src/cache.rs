@@ -21,7 +21,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS host_cache (slug TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);",
+         CREATE TABLE IF NOT EXISTS host_cache (slug TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);",
     )
 }
 
@@ -142,6 +143,28 @@ pub fn store_host_info(slug: &str, info: &HostInfo, now: i64) {
                 rusqlite::params![slug, json, now],
             );
         }
+    }
+}
+
+/// Cached AI summary for a repo, valid only while the last commit is unchanged
+/// (so it regenerates after new work lands).
+pub fn cached_summary(id: &str, last_commit: i64) -> Option<String> {
+    let conn = open().ok()?;
+    let mut stmt = conn
+        .prepare("SELECT summary, last_commit FROM ai_cache WHERE id = ?1")
+        .ok()?;
+    let (summary, cached_commit): (String, i64) =
+        stmt.query_row([id], |row| Ok((row.get(0)?, row.get(1)?))).ok()?;
+    (cached_commit == last_commit).then_some(summary)
+}
+
+/// Persist an AI summary keyed to the repo's current last commit.
+pub fn store_summary(id: &str, summary: &str, last_commit: i64) {
+    if let Ok(conn) = open() {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO ai_cache (id, summary, last_commit) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, summary, last_commit],
+        );
     }
 }
 

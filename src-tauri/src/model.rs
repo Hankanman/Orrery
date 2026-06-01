@@ -103,4 +103,18 @@ pub struct AppConfig {
     /// exfiltrate it to an arbitrary host.
     #[serde(default)]
     pub gitlab_hosts: Vec<String>,
+    /// Preferred Ollama model for summaries (falls back to smallest installed).
+    #[serde(default = "default_ai_model")]
+    pub ai_model: String,
+    /// Whether to generate local AI summaries.
+    #[serde(default = "default_true")]
+    pub ai_enabled: bool,
+}
+
+pub(crate) fn default_ai_model() -> String {
+    "llama3.2:3b".to_string()
+}
+
+pub(crate) fn default_true() -> bool {
+    true
 }

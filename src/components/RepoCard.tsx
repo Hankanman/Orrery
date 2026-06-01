@@ -12,7 +12,7 @@ import {
   Tag,
 } from "lucide-react";
 import type { Repo } from "@/types";
-import { formatStars, languageColor, repoStatus, timeAgo } from "@/lib/format";
+import { formatStars, languageColor, timeAgo } from "@/lib/format";
 import { HostIcon } from "@/components/HostIcon";
 import { cn } from "@/lib/utils";
 
@@ -68,7 +68,6 @@ export function RepoCard({
   onOpenIde,
   onOpenAgent,
 }: RepoCardProps) {
-  const stale = repoStatus(repo) === "stale";
 
   const launchers = (
     <div className="orr-card-acts">
@@ -131,9 +130,9 @@ export function RepoCard({
           </div>
           <div className="orr-card-desc">{repo.description ?? "No README description."}</div>
           {repo.aiSummary && (
-            <div className="orr-card-ai">
-              <Sparkles className="size-3" />
-              {stale ? "Dormant" : "AI summary ready"}
+            <div className="orr-card-ai" title={repo.aiSummary}>
+              <Sparkles className="size-3 shrink-0" />
+              <span className="line-clamp-2">{repo.aiSummary}</span>
             </div>
           )}
           <StatusRow repo={repo} />

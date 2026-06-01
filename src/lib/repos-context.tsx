@@ -38,8 +38,9 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [lastScan, setLastScan] = useState<number | null>(null);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
-  // Generation token so a superseded enrichment run can't clobber a newer one.
+  // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
   const enrichGen = useRef(0);
+  const summaryGen = useRef(0);
 
   // Fetch host enrichment (stars/topics/issues/release) in small concurrent
   // batches, merging each result into the matching repo. Cheap to re-run: the
@@ -80,6 +81,37 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
+  // Generate local AI summaries in the background (low concurrency — inference
+  // is heavier than HTTP). No-ops if Ollama isn't available; cached per repo.
+  const summarizeAll = useCallback((list: Repo[]) => {
+    if (!isTauri()) return;
+    const gen = ++summaryGen.current;
+    void (async () => {
+      const status = await ipc.aiStatus().catch(() => null);
+      if (!status?.available) return;
+      const CHUNK = 2;
+      for (let i = 0; i < list.length; i += CHUNK) {
+        if (summaryGen.current !== gen) return;
+        const chunk = list.slice(i, i + CHUNK);
+        const results = await Promise.all(
+          chunk.map((r) =>
+            ipc
+              .summarizeRepo(r)
+              .then((summary) => ({ id: r.id, summary }))
+              .catch(() => null),
+          ),
+        );
+        setRepos((prev) => {
+          if (summaryGen.current !== gen) return prev;
+          return prev.map((r) => {
+            const hit = results.find((x) => x && x.id === r.id);
+            return hit && hit.summary ? { ...r, aiSummary: hit.summary } : r;
+          });
+        });
+      }
+    })();
+  }, []);
+
   const refresh = useCallback(() => {
     if (!isTauri()) {
       setRepos(MOCK_REPOS);
@@ -96,6 +128,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         setRepos(next);
         setLastScan(Date.now());
         enrichAll(next);
+        summarizeAll(next);
       })
       .catch((e) => setError(String(e)))
       .finally(() => {
@@ -103,7 +136,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         setReady(true);
       });
-  }, [enrichAll]);
+  }, [enrichAll, summarizeAll]);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,6 +153,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
           setRepos(cached);
           setReady(true);
           enrichAll(cached); // populate from host cache (instant/offline)
+          summarizeAll(cached); // cached summaries paint instantly
         }
       })
       .catch(() => {})
@@ -129,7 +163,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [refresh, enrichAll]);
+  }, [refresh, enrichAll, summarizeAll]);
 
   // Live-watch: the Rust watcher emits `repos-changed` (debounced) on disk
   // changes; rescan when it fires. The scan guard coalesces bursts.
