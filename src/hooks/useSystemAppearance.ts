@@ -19,7 +19,15 @@ export function useSystemAppearance(): void {
     const refetch = () => {
       invoke<Appearance>("get_appearance")
         .then(applyAppearance)
-        .catch(() => applyAppearance({ colorScheme: null, accent: null }));
+        .catch(() =>
+          applyAppearance({
+            colorScheme: null,
+            accent: null,
+            windowBg: null,
+            windowFg: null,
+            baseBg: null,
+          }),
+        );
     };
 
     refetch();
