@@ -59,10 +59,30 @@ pnpm tauri build       # produce a release bundle
 pnpm build            # frontend-only build (tsc + vite)
 ```
 
-> **Wayland note:** the `tauri` script sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
-> Without it, WebKitGTK can crash on some GPU/compositor combinations with
-> `Error 71 (Protocol error) dispatching to Wayland display`. If you still hit
-> rendering issues, try `GDK_BACKEND=x11 pnpm tauri dev`.
+## Linux display backend
+
+On Linux the app configures two environment variables at startup (in
+`run()`, before GTK/WebKit initialize). Both are only set if you haven't
+already set them, so either can be overridden from the environment.
+
+- **`WEBKIT_DISABLE_DMABUF_RENDERER=1`** — WebKitGTK's DMABUF renderer is
+  broken on many drivers (notably NVIDIA), producing blank/garbled webviews
+  or `Error 71 (Protocol error) dispatching to Wayland display`. It's
+  disabled by default.
+- **`GDK_BACKEND=x11` on KDE + Wayland only** — KWin only draws its
+  server-side window decoration for X11/XWayland windows; GTK refuses
+  server-side decorations on native Wayland, so a Wayland window gets a
+  foreign-looking client-side titlebar instead of the system decoration.
+  Forcing XWayland on KDE Wayland lets KWin draw the native titlebar.
+  GNOME, wlroots, and X11 sessions are left untouched (CSD is the expected
+  convention there).
+
+This is decided at **runtime**, so a single build behaves correctly across
+distros, desktops, and package formats — no per-package flags needed.
+
+**Overrides:** run with `GDK_BACKEND=wayland orrery` to force native Wayland
+(client-side decorations) on KDE, or `WEBKIT_DISABLE_DMABUF_RENDERER=0` to
+re-enable the DMABUF renderer.
 
 ## License
 

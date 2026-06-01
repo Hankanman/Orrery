@@ -1,7 +1,40 @@
 mod appearance;
 
+/// Configure display/rendering environment on Linux before GTK/WebKit init.
+/// Both vars are only set if the user hasn't already set them, so anyone can
+/// override the behavior from the environment.
+#[cfg(target_os = "linux")]
+fn configure_linux_env() {
+    // WebKitGTK's DMABUF renderer is broken on many drivers (notably NVIDIA),
+    // producing blank/garbled webviews. Disable it by default.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
+    // KWin (KDE) only draws server-side window decorations for X11/XWayland
+    // windows; GTK refuses SSD on native Wayland, so a Wayland window gets a
+    // foreign-looking client-side titlebar. Force XWayland on KDE+Wayland so
+    // the window gets the native KWin decoration. Other desktops (GNOME,
+    // wlroots) keep native Wayland, where CSD is the expected convention.
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        let is_kde = std::env::var("XDG_CURRENT_DESKTOP")
+            .map(|d| d.to_ascii_uppercase().contains("KDE"))
+            .unwrap_or(false);
+        let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var("XDG_SESSION_TYPE")
+                .map(|t| t.eq_ignore_ascii_case("wayland"))
+                .unwrap_or(false);
+        if is_kde && is_wayland {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    configure_linux_env();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
