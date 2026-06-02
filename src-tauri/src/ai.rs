@@ -151,6 +151,10 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
 pub async fn pull(model: &str, mut on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
     use futures_util::StreamExt;
 
+    // Ollama's /api/pull needs an explicit tag; default to :latest when none.
+    let model = if model.contains(':') { model.to_string() } else { format!("{model}:latest") };
+    let model = model.as_str();
+
     #[derive(Deserialize)]
     struct Line {
         #[serde(default)]

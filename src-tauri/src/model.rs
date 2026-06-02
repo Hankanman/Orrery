@@ -118,7 +118,7 @@ pub struct AppConfig {
 }
 
 pub(crate) fn default_ai_model() -> String {
-    "gemma4:e2b-mlx".to_string()
+    "granite4.1:3b-q2_K".to_string()
 }
 
 pub(crate) fn default_ollama_host() -> String {
@@ -126,7 +126,7 @@ pub(crate) fn default_ollama_host() -> String {
 }
 
 pub(crate) fn default_embed_model() -> String {
-    "nomic-embed-text".to_string()
+    "nomic-embed-text:latest".to_string()
 }
 
 pub(crate) fn default_true() -> bool {

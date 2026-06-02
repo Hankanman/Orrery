@@ -18,9 +18,9 @@ const FALLBACK: AppConfig = {
   agentCommand: "kitty --working-directory {path} -e claude",
   githubClientId: "",
   gitlabHosts: [],
-  aiModel: "gemma4:e2b-mlx",
+  aiModel: "granite4.1:3b-q2_K",
   aiEnabled: true,
-  embedModel: "nomic-embed-text",
+  embedModel: "nomic-embed-text:latest",
   ollamaHost: "http://localhost:11434",
 };
 
@@ -104,7 +104,12 @@ export function SettingsView() {
   if (!config) return <div className="orr-settings" />;
 
   const installedModels = aiStatus?.models ?? [];
-  const has = (m: string) => installedModels.includes(m.trim());
+  // Ollama reports names with tags (e.g. "…:latest"); treat a tagless value as
+  // matching its :latest variant so the installed check stays accurate.
+  const has = (m: string) => {
+    const t = m.trim();
+    return installedModels.includes(t) || (!t.includes(":") && installedModels.includes(`${t}:latest`));
+  };
 
   const doPull = async (raw: string) => {
     const model = raw.trim();
@@ -423,7 +428,7 @@ export function SettingsView() {
                 value={config.aiModel}
                 onChange={(aiModel) => patch({ aiModel })}
                 disabled={!config.aiEnabled}
-                placeholder="gemma4:e2b-mlx"
+                placeholder="granite4.1:3b-q2_K"
               />
               {modelStatus(config.aiModel)}
             </div>
@@ -438,7 +443,7 @@ export function SettingsView() {
                 models={installedModels}
                 value={config.embedModel}
                 onChange={(embedModel) => patch({ embedModel })}
-                placeholder="nomic-embed-text"
+                placeholder="nomic-embed-text:latest"
               />
               {modelStatus(config.embedModel)}
             </div>
