@@ -67,7 +67,10 @@ export function InboxView() {
       setCloned((prev) => new Set(prev).add(r.slug));
       refresh();
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      // "already exists" means it's already on disk — treat as cloned, not an error.
+      if (msg.includes("already exists")) setCloned((prev) => new Set(prev).add(r.slug));
+      else setError(msg);
     } finally {
       setCloning(null);
     }
@@ -145,7 +148,11 @@ export function InboxView() {
                 <div key={r.slug} className="orr-star-card">
                   <div className="flex items-center gap-2">
                     <HostIcon host={r.host} className="size-3.5 opacity-70" />
-                    <button type="button" className="truncate font-medium hover:underline" onClick={() => open(`https://github.com/${r.slug}`)}>
+                    <button
+                      type="button"
+                      className="truncate font-medium hover:underline"
+                      onClick={() => open(`https://${r.host === "gitlab" ? "gitlab.com" : "github.com"}/${r.slug}`)}
+                    >
                       {r.slug}
                     </button>
                   </div>

@@ -61,15 +61,16 @@ async fn github_user(token: &str) -> Result<String, String> {
     struct User {
         login: String,
     }
-    let user: User = client()
+    let resp = client()
         .get(format!("{GH}/user"))
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
         .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub auth failed ({}) — check the token scopes", resp.status()));
+    }
+    let user: User = resp.json().await.map_err(|e| e.to_string())?;
     Ok(user.login)
 }
 
@@ -104,29 +105,32 @@ mod tests {
     }
 }
 
-async fn gh_search(token: &str, query: &str, kind: &str) -> Vec<InboxItem> {
+async fn gh_search(token: &str, query: &str, kind: &str) -> Result<Vec<InboxItem>, String> {
     let url = format!("{GH}/search/issues?per_page=50&q={}", urlencoding::encode(query));
-    let resp = client().get(url).bearer_auth(token).send().await;
-    let parsed = match resp {
-        Ok(r) if r.status().is_success() => r.json::<SearchResp>().await.ok(),
-        _ => None,
-    };
-    parsed
-        .map(|p| {
-            p.items
-                .into_iter()
-                .map(|i| InboxItem {
-                    kind: kind.to_string(),
-                    title: i.title,
-                    repo: repo_from_url(&i.repository_url),
-                    url: i.html_url,
-                    number: i.number,
-                    draft: i.draft,
-                    host: Host::Github,
-                })
-                .collect()
+    let resp = client()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        // Surface auth/rate-limit failures instead of a misleading empty inbox.
+        return Err(format!("GitHub search {}", resp.status()));
+    }
+    let parsed: SearchResp = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(parsed
+        .items
+        .into_iter()
+        .map(|i| InboxItem {
+            kind: kind.to_string(),
+            title: i.title,
+            repo: repo_from_url(&i.repository_url),
+            url: i.html_url,
+            number: i.number,
+            draft: i.draft,
+            host: Host::Github,
         })
-        .unwrap_or_default()
+        .collect())
 }
 
 /// Open PRs authored by the user, PRs awaiting their review, and issues
@@ -136,9 +140,9 @@ pub async fn github_inbox() -> Result<Vec<InboxItem>, String> {
     let login = github_user(&token).await?;
 
     let mut items = Vec::new();
-    items.extend(gh_search(&token, &format!("is:open is:pr author:{login}"), "pr").await);
-    items.extend(gh_search(&token, &format!("is:open is:pr review-requested:{login}"), "review").await);
-    items.extend(gh_search(&token, &format!("is:open is:issue assignee:{login}"), "issue").await);
+    items.extend(gh_search(&token, &format!("is:open is:pr author:{login}"), "pr").await?);
+    items.extend(gh_search(&token, &format!("is:open is:pr review-requested:{login}"), "review").await?);
+    items.extend(gh_search(&token, &format!("is:open is:issue assignee:{login}"), "issue").await?);
     Ok(items)
 }
 

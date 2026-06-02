@@ -451,8 +451,9 @@ pub async fn clone_repo(url: String, dest_root: String) -> Result<String, String
         .unwrap_or("repo")
         .trim_end_matches(".git")
         .to_string();
-    if name.is_empty() {
-        return Err("could not derive a directory name from the URL".into());
+    // Guard against a name that would escape the root (path traversal).
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return Err("could not derive a safe directory name from the URL".into());
     }
     let dest = scan::expand(&dest_root).join(&name);
     if dest.exists() {

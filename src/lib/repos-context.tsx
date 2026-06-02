@@ -61,14 +61,13 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         const chunk = targets.slice(i, i + CHUNK);
         const results = await Promise.all(
           chunk.map(async (r) => {
-            const info = await ipc
-              .enrichRepo(r.host as "github" | "gitlab", r.remoteHost ?? "github.com", r.slug!)
-              .catch(() => null);
-            // CI status (GitHub Actions) alongside enrichment.
-            const ci =
+            // Enrichment and CI run in parallel per repo (independent calls).
+            const [info, ci] = await Promise.all([
+              ipc.enrichRepo(r.host as "github" | "gitlab", r.remoteHost ?? "github.com", r.slug!).catch(() => null),
               r.host === "github" && r.slug
-                ? await ipc.ciStatus(r.slug).then((c) => c.state).catch(() => null)
-                : null;
+                ? ipc.ciStatus(r.slug).then((c) => c.state).catch(() => null)
+                : Promise.resolve(null),
+            ]);
             return { id: r.id, info, ci };
           }),
         );
