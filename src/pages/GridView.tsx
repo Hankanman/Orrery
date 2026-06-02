@@ -58,7 +58,7 @@ function needsAttention(repo: Repo): boolean {
 }
 
 export function GridView() {
-  const { repos, loading, ready, error, fetching, refresh, fetchAll, toggleFavorite, openIde, openAgent } =
+  const { repos, loading, ready, error, fetching, activeAgents, refresh, fetchAll, toggleFavorite, openIde, openAgent } =
     useRepos();
 
   const [activeRoot, setActiveRoot] = useState("all");
@@ -228,6 +228,7 @@ export function GridView() {
                 key={repo.id}
                 repo={repo}
                 view={view}
+                agentActive={activeAgents.includes(repo.id)}
                 onOpen={setSelected}
                 onToggleFavorite={toggleFavorite}
                 onOpenIde={openIde}
