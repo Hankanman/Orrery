@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <!-- Deep-space surface, matching the app's --void / --base -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0E1422"/>
+      <stop offset="1" stop-color="#06080D"/>
+    </linearGradient>
+    <!-- Accent wash in the corner, echoing the in-app background glow -->
+    <radialGradient id="wash" cx="0.82" cy="0.12" r="0.9">
+      <stop offset="0" stop-color="#38DBF0" stop-opacity="0.20"/>
+      <stop offset="0.55" stop-color="#38DBF0" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Soft cyan glow around the mark -->
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="18" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Icon plate -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#wash)"/>
+  <!-- Lit top edge -->
+  <rect x="2" y="2" width="1020" height="1020" rx="230" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="2"/>
+
+  <!-- Orbit mark: original 24x24 glyph, scaled to ~560px and centered -->
+  <g transform="translate(232,232) scale(23.333)" stroke="#38DBF0" stroke-width="1.85"
+     stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <path d="M20.341 6.484A10 10 0 0 1 10.266 21.85"/>
+    <path d="M3.659 17.516A10 10 0 0 1 13.74 2.152"/>
+    <circle cx="12" cy="12" r="3" fill="#38DBF0" fill-opacity="0.14"/>
+    <circle cx="19" cy="5" r="2" fill="#0E1422"/>
+    <circle cx="5" cy="19" r="2" fill="#0E1422"/>
+  </g>
+</svg>
