@@ -779,25 +779,11 @@
   }
 
   /* ---- The grid ---- */
-  /* Virtualized grid: .orr-grid is the scroll container; rows are absolutely
-     positioned inside the sizer (see VirtualRepoGrid). */
+  /* Virtualized grid scroll container (VirtualGrid positions the rows inline). */
   .orr-grid {
     flex: 1;
     overflow-y: auto;
     padding: 16px 22px 28px;
-  }
-  .orr-grid-sizer {
-    position: relative;
-    width: 100%;
-  }
-  .orr-grid-row {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    display: grid;
-    gap: 14px;
-    align-items: start;
   }
   /* Loading skeletons keep the plain responsive grid (not virtualized). */
   .orr-grid-skel {

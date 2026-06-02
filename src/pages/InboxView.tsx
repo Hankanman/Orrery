@@ -5,6 +5,7 @@ import { ipc, isTauri, type InboxItem, type NotificationItem, type RemoteRepo } 
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
 import { Spinner } from "@/components/Spinner";
+import { VirtualGrid } from "@/components/VirtualGrid";
 import { formatStars, languageColor } from "@/lib/format";
 
 function open(url: string) {
@@ -150,8 +151,14 @@ export function InboxView() {
             <h2 className="orr-inbox-head">
               <Star className="size-4" /> Starred <span className="count">{starred.length}</span>
             </h2>
-            <div className="orr-star-grid">
-              {starred.map((r) => (
+            <VirtualGrid
+              items={starred}
+              minColWidth={260}
+              colGap={10}
+              rowGap={10}
+              estimateRow={116}
+              className="max-h-[60vh]"
+              renderItem={(r) => (
                 <div key={r.slug} className="orr-star-card">
                   <div className="flex items-center gap-2">
                     <HostIcon host={r.host} className="size-3.5 opacity-70" />
@@ -186,8 +193,8 @@ export function InboxView() {
                     </button>
                   </div>
                 </div>
-              ))}
-            </div>
+              )}
+            />
           </section>
         )}
       </div>
