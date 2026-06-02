@@ -355,6 +355,47 @@
     position: relative;
     z-index: 30;
   }
+
+  /* ---- Global activity / scan progress bar (under the header) ---- */
+  .orr-progress {
+    position: relative;
+    flex: none;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    padding: 0 22px;
+    border-bottom: 1px solid var(--orr-border);
+    background: var(--orr-glass);
+    overflow: hidden;
+  }
+  .orr-progress .bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 2px;
+    background: var(--primary);
+    box-shadow: 0 0 8px var(--orr-accent-glow);
+    transition: width var(--dur-base) var(--ease-out);
+  }
+  .orr-progress .bar.indeterminate {
+    width: 33%;
+    animation: orr-indeterminate 1.1s ease-in-out infinite;
+  }
+  @keyframes orr-indeterminate {
+    0% {
+      left: -34%;
+    }
+    100% {
+      left: 100%;
+    }
+  }
+  .orr-progress .lbl {
+    z-index: 1;
+    font: var(--text-micro);
+    letter-spacing: var(--tracking-micro);
+    text-transform: uppercase;
+    color: var(--orr-fg-2);
+  }
   .orr-brand {
     display: flex;
     align-items: center;

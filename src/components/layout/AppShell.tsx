@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { Folder, Inbox, Orbit, RefreshCw, Search, Settings } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ScanProgress } from "@/components/ScanProgress";
 import { ReposProvider, useRepos } from "@/lib/repos-context";
 import { useSystemAppearance } from "@/hooks/useSystemAppearance";
 import { cn } from "@/lib/utils";
@@ -88,6 +89,8 @@ function Shell() {
           <Settings className="size-4" />
         </Link>
       </header>
+
+      <ScanProgress />
 
       <div className="flex min-h-0 flex-1">
         <Outlet />

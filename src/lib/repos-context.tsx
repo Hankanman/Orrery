@@ -36,6 +36,21 @@ interface ReposContextValue {
 
 const ReposContext = createContext<ReposContextValue | null>(null);
 
+/** Background activity, for the global progress indicator. Kept in its own
+ *  context so per-batch progress ticks don't re-render repo grid consumers. */
+export interface ScanStatus {
+  /** A repo scan is in flight. */
+  scanning: boolean;
+  /** A fetch-all (git fetch across repos) is in flight. */
+  fetching: boolean;
+  /** Host-enrichment progress, or null when idle. */
+  enrich: { done: number; total: number } | null;
+  /** AI-summary progress, or null when idle. */
+  summarize: { done: number; total: number } | null;
+}
+
+const ScanStatusContext = createContext<ScanStatus | null>(null);
+
 export function ReposProvider({ children }: { children: ReactNode }) {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -44,6 +59,8 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [lastScan, setLastScan] = useState<number | null>(null);
   const [fetching, setFetching] = useState(false);
   const [activeAgents, setActiveAgents] = useState<string[]>([]);
+  const [enrichProgress, setEnrichProgress] = useState<{ done: number; total: number } | null>(null);
+  const [summarizeProgress, setSummarizeProgress] = useState<{ done: number; total: number } | null>(null);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
   // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
@@ -58,6 +75,11 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     const gen = ++enrichGen.current;
     const targets = list.filter((r) => r.host && r.slug && (r.remoteHost || r.host === "github"));
     const CHUNK = 6;
+    if (targets.length === 0) {
+      setEnrichProgress(null);
+      return;
+    }
+    setEnrichProgress({ done: 0, total: targets.length });
     void (async () => {
       for (let i = 0; i < targets.length; i += CHUNK) {
         if (enrichGen.current !== gen) return; // superseded by a newer scan/enrich
@@ -91,7 +113,11 @@ export function ReposProvider({ children }: { children: ReactNode }) {
               : next;
           });
         });
+        setEnrichProgress((p) =>
+          enrichGen.current === gen ? { done: Math.min(i + chunk.length, targets.length), total: targets.length } : p,
+        );
       }
+      if (enrichGen.current === gen) setEnrichProgress(null);
     })();
   }, []);
 
@@ -101,10 +127,17 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     if (!isTauri()) return;
     const gen = ++summaryGen.current;
     const targets = list.filter((r) => !r.aiSummary); // skip ones we already have
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      setSummarizeProgress(null);
+      return;
+    }
     void (async () => {
       const status = await ipc.aiStatus().catch(() => null);
-      if (!status?.available) return;
+      if (!status?.available || summaryGen.current !== gen) {
+        if (summaryGen.current === gen) setSummarizeProgress(null);
+        return;
+      }
+      setSummarizeProgress({ done: 0, total: targets.length });
       const CHUNK = 2;
       for (let i = 0; i < targets.length; i += CHUNK) {
         if (summaryGen.current !== gen) return;
@@ -124,7 +157,11 @@ export function ReposProvider({ children }: { children: ReactNode }) {
             return hit && hit.summary ? { ...r, aiSummary: hit.summary } : r;
           });
         });
+        setSummarizeProgress((p) =>
+          summaryGen.current === gen ? { done: Math.min(i + chunk.length, targets.length), total: targets.length } : p,
+        );
       }
+      if (summaryGen.current === gen) setSummarizeProgress(null);
     })();
   }, []);
 
@@ -318,11 +355,29 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     [repos, loading, ready, error, lastScan, fetching, activeAgents, refresh, fetchAll, toggleFavorite, openIde, openAgent],
   );
 
-  return <ReposContext.Provider value={value}>{children}</ReposContext.Provider>;
+  // Separate value so progress ticks (enrich/summarize batches) only re-render
+  // the progress indicator, not the repo grid. `loading` is also in the repos
+  // value, but it toggles at most twice per scan.
+  const scanStatus = useMemo<ScanStatus>(
+    () => ({ scanning: loading, fetching, enrich: enrichProgress, summarize: summarizeProgress }),
+    [loading, fetching, enrichProgress, summarizeProgress],
+  );
+
+  return (
+    <ReposContext.Provider value={value}>
+      <ScanStatusContext.Provider value={scanStatus}>{children}</ScanStatusContext.Provider>
+    </ReposContext.Provider>
+  );
 }
 
 export function useRepos(): ReposContextValue {
   const ctx = useContext(ReposContext);
   if (!ctx) throw new Error("useRepos must be used within <ReposProvider>");
+  return ctx;
+}
+
+export function useScanStatus(): ScanStatus {
+  const ctx = useContext(ScanStatusContext);
+  if (!ctx) throw new Error("useScanStatus must be used within <ReposProvider>");
   return ctx;
 }
