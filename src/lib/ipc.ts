@@ -149,6 +149,7 @@ export const ipc = {
   githubSignOut: () => invoke<void>("github_sign_out"),
   aiStatus: () => invoke<AiStatus>("ai_status"),
   aiTest: () => invoke<AiTest>("ai_test"),
+  pullModel: (model: string) => invoke<void>("pull_model", { model }),
   summarizeRepo: (repo: Repo, refresh = false) => invoke<string>("summarize_repo", { repo, refresh }),
   fetchAll: (ids: string[]) => invoke<FetchOutcome[]>("fetch_all", { ids }),
   fetchRepo: (id: string) => invoke<GitStatus>("fetch_repo", { id }),

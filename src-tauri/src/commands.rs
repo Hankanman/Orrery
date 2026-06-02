@@ -231,6 +231,22 @@ pub async fn ai_status() -> AiStatus {
     }
 }
 
+/// Pull an Ollama model, emitting `pull-progress` events ({model, status,
+/// percent}) so the UI can show a progress bar. Resolves when the pull finishes.
+#[tauri::command]
+pub async fn pull_model(app: tauri::AppHandle, model: String) -> Result<(), String> {
+    use tauri::Emitter;
+    let name = model.clone();
+    ai::pull(&model, move |status, completed, total| {
+        let percent = if total > 0 { (completed.saturating_mul(100) / total) as u32 } else { 0 };
+        let _ = app.emit(
+            "pull-progress",
+            serde_json::json!({ "model": name, "status": status, "percent": percent }),
+        );
+    })
+    .await
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiTest {

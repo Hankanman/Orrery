@@ -41,7 +41,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }    # cache (SQLite bundl
 notify-debouncer-mini = "0.4"                              # inotify live-watch (debounced)
 
 # Git host providers (GitHub / GitLab) — async HTTP + JSON
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 urlencoding = "2"
 
 [dev-dependencies]

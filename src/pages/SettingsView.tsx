@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2, Zap } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Check, DownloadCloud, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2, Zap } from "lucide-react";
 import { ipc, isTauri, type AiStatus, type AiTest, type AppConfig, type DeviceStart } from "@/lib/ipc";
 import { reduceMotionEnabled, setReduceMotion } from "@/lib/motion";
 import { useRepos } from "@/lib/repos-context";
@@ -17,11 +18,17 @@ const FALLBACK: AppConfig = {
   agentCommand: "kitty --working-directory {path} -e claude",
   githubClientId: "",
   gitlabHosts: [],
-  aiModel: "llama3.2:3b",
+  aiModel: "gemma4:e2b-mlx",
   aiEnabled: true,
   embedModel: "nomic-embed-text",
   ollamaHost: "http://localhost:11434",
 };
+
+interface PullState {
+  model: string;
+  status: string;
+  percent: number;
+}
 
 export function SettingsView() {
   const { refresh } = useRepos();
@@ -34,6 +41,8 @@ export function SettingsView() {
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
   const [aiTest, setAiTest] = useState<AiTest | null>(null);
+  const [pulling, setPulling] = useState<PullState | null>(null);
+  const [pullError, setPullError] = useState<string | null>(null);
   const [reduceMotion, setReduceMotionState] = useState(reduceMotionEnabled);
 
   useEffect(() => {
@@ -82,10 +91,64 @@ export function SettingsView() {
     };
   }, [device, refresh]);
 
+  // Live pull progress from the backend (`ollama pull` streams NDJSON).
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    listen<PullState>("pull-progress", (e) => setPulling(e.payload))
+      .then((fn) => (unlisten = fn))
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
+
   if (!config) return <div className="orr-settings" />;
 
   const installedModels = aiStatus?.models ?? [];
   const has = (m: string) => installedModels.includes(m.trim());
+
+  const doPull = async (raw: string) => {
+    const model = raw.trim();
+    if (!isTauri() || !model || pulling) return;
+    setPullError(null);
+    setPulling({ model, status: "starting", percent: 0 });
+    try {
+      await ipc.setConfig(config); // ensure the pull uses the current endpoint
+      await ipc.pullModel(model);
+      setAiStatus(await ipc.aiStatus()); // refresh the installed list
+    } catch (e) {
+      setPullError(String(e));
+    } finally {
+      setPulling(null);
+    }
+  };
+
+  // Installed ✓ / not-installed + a Pull button (live progress while pulling).
+  const modelStatus = (raw: string) => {
+    const model = raw.trim();
+    if (!aiStatus?.reachable || !model) return null;
+    if (has(model)) return <p className="text-xs text-ok">Installed ✓</p>;
+    if (pulling?.model === model) {
+      return (
+        <p className="text-xs text-muted-foreground">
+          Pulling… {pulling.status}
+          {pulling.percent > 0 ? ` ${pulling.percent}%` : ""}
+        </p>
+      );
+    }
+    return (
+      <div className="flex items-center gap-2 text-xs text-warn">
+        <span>Not installed.</span>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 text-primary hover:underline disabled:opacity-50"
+          onClick={() => doPull(model)}
+          disabled={!!pulling}
+        >
+          <DownloadCloud className="size-3.5" /> Pull {model}
+        </button>
+      </div>
+    );
+  };
 
   const patch = (p: Partial<AppConfig>) => {
     setConfig({ ...config, ...p });
@@ -360,17 +423,9 @@ export function SettingsView() {
                 value={config.aiModel}
                 onChange={(aiModel) => patch({ aiModel })}
                 disabled={!config.aiEnabled}
-                placeholder="llama3.2:3b"
+                placeholder="gemma4:e2b-mlx"
               />
-              {aiStatus?.reachable &&
-                config.aiModel.trim() &&
-                (has(config.aiModel) ? (
-                  <p className="text-xs text-ok">Installed ✓</p>
-                ) : (
-                  <p className="text-xs text-warn">
-                    Not installed — falls back to {aiStatus.model ?? "the smallest installed model"}.
-                  </p>
-                ))}
+              {modelStatus(config.aiModel)}
             </div>
 
             {/* Embedding model */}
@@ -385,20 +440,13 @@ export function SettingsView() {
                 onChange={(embedModel) => patch({ embedModel })}
                 placeholder="nomic-embed-text"
               />
-              {aiStatus?.reachable &&
-                config.embedModel.trim() &&
-                (has(config.embedModel) ? (
-                  <p className="text-xs text-ok">Installed ✓</p>
-                ) : (
-                  <p className="text-xs text-warn">
-                    Not installed — run <code>ollama pull {config.embedModel.trim()}</code>
-                  </p>
-                ))}
+              {modelStatus(config.embedModel)}
             </div>
 
             <p className="text-xs text-muted-foreground">
               Installed: {installedModels.join(", ") || "none — run `ollama pull <model>`"}
             </p>
+            {pullError && <p className="text-xs text-danger">Pull failed: {pullError}</p>}
           </CardContent>
         </Card>
 

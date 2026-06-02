@@ -118,7 +118,7 @@ pub struct AppConfig {
 }
 
 pub(crate) fn default_ai_model() -> String {
-    "llama3.2:3b".to_string()
+    "gemma4:e2b-mlx".to_string()
 }
 
 pub(crate) fn default_ollama_host() -> String {

@@ -122,6 +122,7 @@ pub fn run() {
             commands::github_sign_out,
             commands::ai_status,
             commands::ai_test,
+            commands::pull_model,
             commands::summarize_repo,
             commands::fetch_all,
             commands::fetch_repo,

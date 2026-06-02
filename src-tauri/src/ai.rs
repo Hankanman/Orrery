@@ -145,6 +145,57 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
     Ok(parsed.response.trim().to_string())
 }
 
+/// Pull a model via Ollama (`/api/pull`), streaming NDJSON progress. `on_progress`
+/// is called with (status, completed_bytes, total_bytes) for each update — kept
+/// as a callback so this module stays free of Tauri's event machinery.
+pub async fn pull(model: &str, mut on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
+    use futures_util::StreamExt;
+
+    #[derive(Deserialize)]
+    struct Line {
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        completed: u64,
+        #[serde(default)]
+        total: u64,
+        #[serde(default)]
+        error: Option<String>,
+    }
+
+    let body = serde_json::json!({ "model": model, "stream": true });
+    let resp = client()
+        .post(format!("{}/api/pull", base()))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(ollama_error(resp).await);
+    }
+
+    // Ollama streams newline-delimited JSON objects; buffer partial lines.
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(&chunk.map_err(|e| e.to_string())?);
+        while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=nl).collect();
+            let trimmed = &line[..line.len().saturating_sub(1)];
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(l) = serde_json::from_slice::<Line>(trimmed) {
+                if let Some(err) = l.error {
+                    return Err(err);
+                }
+                on_progress(&l.status, l.completed, l.total);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build a readable error from a non-2xx Ollama response, surfacing its
 /// `{"error": "..."}` body (e.g. "… does not support generate") instead of a
 /// bare status code.
