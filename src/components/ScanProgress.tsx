@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react";
+import { Spinner } from "@/components/Spinner";
 import { useScanStatus } from "@/lib/repos-context";
 
 /**
- * Thin global activity bar under the header. Indeterminate while scanning or
- * fetching, determinate (with a count) while enriching host data or generating
- * AI summaries.
+ * Header activity indicator: the brand spinner plus a label for the current
+ * background phase. Lives in the header's flexible area, so it never shifts
+ * layout — the spacer absorbs its width and the header height is fixed.
  *
- * Only revealed once activity has persisted past a short delay, so the common
- * fast warm-cache scan (≈tens of ms, fired on every file-watch tick) doesn't
- * flash the bar in and out. Genuine waits — cold scans, network fetches, AI
- * summaries — cross the threshold and show feedback.
+ * Revealed only after activity persists ~350ms, so fast warm-cache scans (now
+ * tens of ms, fired on every file-watch tick) don't flicker it; genuine waits
+ * — cold scans, network fetches, AI summaries — show it.
  */
 export function ScanProgress() {
   const { scanning, fetching, enrich, summarize } = useScanStatus();
@@ -28,28 +28,16 @@ export function ScanProgress() {
   if (!show) return null;
 
   // Priority: scanning → fetching → enrich → summarize.
-  let label: string;
-  let pct: number | null; // null = indeterminate
-  if (scanning) {
-    label = "Scanning repositories";
-    pct = null;
-  } else if (fetching) {
-    label = "Fetching from remotes";
-    pct = null;
-  } else if (enrich) {
-    label = `Refreshing host data ${enrich.done}/${enrich.total}`;
-    pct = enrich.total ? (enrich.done / enrich.total) * 100 : null;
-  } else if (summarize) {
-    label = `Generating summaries ${summarize.done}/${summarize.total}`;
-    pct = summarize.total ? (summarize.done / summarize.total) * 100 : null;
-  } else {
-    return null;
-  }
+  let label = "Working…";
+  if (scanning) label = "Scanning repositories…";
+  else if (fetching) label = "Fetching from remotes…";
+  else if (enrich) label = `Refreshing host data · ${enrich.done}/${enrich.total}`;
+  else if (summarize) label = `Generating summaries · ${summarize.done}/${summarize.total}`;
 
   return (
-    <div className="orr-progress" role="status" aria-label={label}>
-      <div className={`bar${pct === null ? " indeterminate" : ""}`} style={pct === null ? undefined : { width: `${pct}%` }} />
-      <span className="lbl">{label}</span>
+    <div className="orr-activity" role="status" aria-label={label}>
+      <Spinner size={16} />
+      <span className="t">{label}</span>
     </div>
   );
 }

@@ -45,6 +45,8 @@ function Shell() {
           </span>
         </div>
 
+        <ScanProgress />
+
         <div className="ml-auto" />
 
         <div
@@ -89,8 +91,6 @@ function Shell() {
           <Settings className="size-4" />
         </Link>
       </header>
-
-      <ScanProgress />
 
       <div className="flex min-h-0 flex-1">
         <Outlet />

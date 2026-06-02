@@ -356,45 +356,77 @@
     z-index: 30;
   }
 
-  /* ---- Global activity / scan progress bar (under the header) ---- */
-  .orr-progress {
+  /* ---- Brand spinner: a satellite circling a glowing core ---- */
+  .orr-spinner {
     position: relative;
+    display: inline-block;
     flex: none;
-    height: 22px;
-    display: flex;
-    align-items: center;
-    padding: 0 22px;
-    border-bottom: 1px solid var(--orr-border);
-    background: var(--orr-glass);
-    overflow: hidden;
+    width: var(--orr-spin-size, 24px);
+    height: var(--orr-spin-size, 24px);
+    vertical-align: middle;
   }
-  .orr-progress .bar {
+  .orr-spinner .ring {
     position: absolute;
-    left: 0;
-    top: 0;
-    height: 2px;
+    inset: 0;
+    border-radius: 50%;
+    border: 1px solid var(--orr-border-strong);
+  }
+  .orr-spinner .core {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 22%;
+    height: 22%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
     background: var(--primary);
     box-shadow: 0 0 8px var(--orr-accent-glow);
-    transition: width var(--dur-base) var(--ease-out);
   }
-  .orr-progress .bar.indeterminate {
-    width: 33%;
-    animation: orr-indeterminate 1.1s ease-in-out infinite;
+  .orr-spinner .sat {
+    position: absolute;
+    inset: 0;
+    animation: orr-orbit 1.4s linear infinite;
   }
-  @keyframes orr-indeterminate {
-    0% {
-      left: -34%;
+  .orr-spinner .sat::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: 15%;
+    height: 15%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: var(--orr-accent-bright);
+    box-shadow: 0 0 6px var(--orr-accent-glow);
+  }
+  @keyframes orr-orbit {
+    to {
+      transform: rotate(360deg);
     }
-    100% {
-      left: 100%;
-    }
   }
-  .orr-progress .lbl {
-    z-index: 1;
-    font: var(--text-micro);
-    letter-spacing: var(--tracking-micro);
-    text-transform: uppercase;
+
+  /* ---- Header activity indicator (spinner + phase label) ---- */
+  .orr-activity {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    font: var(--text-small);
     color: var(--orr-fg-2);
+    animation: orr-fade-in var(--dur-base) var(--ease-out);
+  }
+  .orr-activity .t {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @keyframes orr-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
   .orr-brand {
     display: flex;
@@ -598,6 +630,7 @@
     flex: none;
     padding: 12px 22px 14px;
     border-bottom: 1px solid var(--orr-border);
+    animation: orr-fade-in var(--dur-base) var(--ease-out);
   }
   .orr-contrib-head {
     display: flex;
@@ -806,6 +839,22 @@
   .orr-card:active {
     transform: translateY(-1px) scale(0.995);
   }
+  /* Cards arrive with a gentle rise+fade. `backwards` applies the start frame
+     before paint (no flash) and releases afterwards so :hover transforms still
+     win. Transform/opacity only — no layout shift. */
+  .orr-grid .orr-card {
+    animation: orr-rise var(--dur-base) var(--ease-out) backwards;
+  }
+  @keyframes orr-rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
   .orr-card-head {
     display: flex;
     align-items: flex-start;
@@ -1012,7 +1061,12 @@
   .orr-card::after {
     transition: none;
   }
-  .orr-skel-line {
+  .orr-skel-line,
+  .orr-grid .orr-card,
+  .orr-contrib,
+  .orr-briefing,
+  .orr-activity,
+  .orr-spinner .sat {
     animation: none;
   }
 }
@@ -1177,6 +1231,7 @@
   background: color-mix(in oklch, var(--primary) 8%, var(--card));
   border-radius: 10px;
   font-size: 13px;
+  animation: orr-fade-in var(--dur-base) var(--ease-out);
 }
 .orr-briefing button {
   color: var(--muted-foreground);

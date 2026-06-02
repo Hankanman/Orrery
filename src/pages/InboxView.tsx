@@ -4,6 +4,7 @@ import { Bell, CircleDot, DownloadCloud, Eye, GitPullRequest, Inbox, Star } from
 import { ipc, isTauri, type InboxItem, type NotificationItem, type RemoteRepo } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
+import { Spinner } from "@/components/Spinner";
 import { formatStars, languageColor } from "@/lib/format";
 
 function open(url: string) {
@@ -139,7 +140,7 @@ export function InboxView() {
 
         {inbox === null && (
           <div className="orr-empty">
-            <Inbox className="size-8 opacity-60" />
+            <Spinner size={32} />
             <p className="s">Loading… (connect GitHub in settings if this stays empty)</p>
           </div>
         )}
