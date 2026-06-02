@@ -51,6 +51,36 @@ export interface Briefing {
   repoCount: number;
 }
 
+export interface InboxItem {
+  kind: "pr" | "review" | "issue";
+  title: string;
+  repo: string;
+  url: string;
+  number: number;
+  draft: boolean;
+  host: "github" | "gitlab";
+}
+
+export interface NotificationItem {
+  title: string;
+  repo: string;
+  reason: string;
+  kind: string;
+}
+
+export interface RemoteRepo {
+  slug: string;
+  description: string | null;
+  stars: number;
+  language: string | null;
+  cloneUrl: string;
+  host: "github" | "gitlab";
+}
+
+export interface CiStatus {
+  state: "success" | "failure" | "pending" | "none";
+}
+
 export interface AiStatus {
   available: boolean;
   model: string | null;
@@ -110,4 +140,9 @@ export const ipc = {
   indexRepos: (repos: Repo[]) => invoke<number>("index_repos", { repos }),
   semanticSearch: (query: string) => invoke<SearchHit[]>("semantic_search", { query }),
   dailyBriefing: (repos: Repo[]) => invoke<Briefing>("daily_briefing", { repos }),
+  getInbox: () => invoke<InboxItem[]>("get_inbox"),
+  getNotifications: () => invoke<NotificationItem[]>("get_notifications"),
+  ciStatus: (slug: string) => invoke<CiStatus>("ci_status", { slug }),
+  listStarred: () => invoke<RemoteRepo[]>("list_starred"),
+  cloneRepo: (url: string, destRoot: string) => invoke<string>("clone_repo", { url, destRoot }),
 };

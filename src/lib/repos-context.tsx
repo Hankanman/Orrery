@@ -60,26 +60,32 @@ export function ReposProvider({ children }: { children: ReactNode }) {
         if (enrichGen.current !== gen) return; // superseded by a newer scan/enrich
         const chunk = targets.slice(i, i + CHUNK);
         const results = await Promise.all(
-          chunk.map((r) =>
-            ipc
-              .enrichRepo(r.host as "github" | "gitlab", r.remoteHost ?? "github.com", r.slug!)
-              .then((info) => ({ id: r.id, info }))
-              .catch(() => null),
-          ),
+          chunk.map(async (r) => {
+            // Enrichment and CI run in parallel per repo (independent calls).
+            const [info, ci] = await Promise.all([
+              ipc.enrichRepo(r.host as "github" | "gitlab", r.remoteHost ?? "github.com", r.slug!).catch(() => null),
+              r.host === "github" && r.slug
+                ? ipc.ciStatus(r.slug).then((c) => c.state).catch(() => null)
+                : Promise.resolve(null),
+            ]);
+            return { id: r.id, info, ci };
+          }),
         );
         setRepos((prev) => {
           if (enrichGen.current !== gen) return prev; // discard stale results
           return prev.map((r) => {
             const hit = results.find((x) => x && x.id === r.id);
-            return hit
+            if (!hit) return r;
+            const next = { ...r, ci: hit.ci ?? r.ci };
+            return hit.info
               ? {
-                  ...r,
+                  ...next,
                   stars: hit.info.stars,
                   topics: hit.info.topics,
                   openIssues: hit.info.openIssues,
                   latestRelease: hit.info.latestRelease,
                 }
-              : r;
+              : next;
           });
         });
       }
@@ -146,6 +152,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
                   topics: old.topics,
                   openIssues: old.openIssues,
                   latestRelease: old.latestRelease,
+                  ci: old.ci,
                   aiSummary: old.aiSummary,
                 }
               : r;

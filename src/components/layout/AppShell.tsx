@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { Folder, Orbit, RefreshCw, Search, Settings } from "lucide-react";
+import { Folder, Inbox, Orbit, RefreshCw, Search, Settings } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ReposProvider, useRepos } from "@/lib/repos-context";
@@ -67,6 +67,14 @@ function Shell() {
         >
           <RefreshCw className={cn("size-4", loading && "animate-spin")} />
         </button>
+        <Link
+          to="/inbox"
+          className={cn("orr-iconbtn", pathname === "/inbox" && "active")}
+          title="Inbox"
+          aria-label="Inbox"
+        >
+          <Inbox className="size-4" />
+        </Link>
         <Link
           to="/settings"
           className={cn("orr-iconbtn", pathname === "/settings" && "active")}
