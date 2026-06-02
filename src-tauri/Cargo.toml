@@ -32,16 +32,25 @@ zbus = "5"
 futures-util = "0.3"
 
 # Repo discovery + metadata
+# Held at 0.20: 0.21 reworks the API (Cred::credential_helper moved, several
+# &str→owned return-type changes across git_ops) — a deliberate migration.
 git2 = "0.20"                                              # libgit2 (vendored)
 walkdir = "2"                                              # repo scanning
 globset = "0.4"                                            # ignore-glob matching
-toml = "0.8"                                               # config file
-dirs = "5"                                                 # XDG config/data paths
-which = "6"                                                # detect IDE/terminal on PATH
+toml = "1"                                                 # config file
+dirs = "6"                                                 # XDG config/data paths
+which = "8"                                                # detect IDE/terminal on PATH
+# Held at 0.32: rusqlite 0.40's libsqlite3-sys build script uses the unstable
+# `cfg_select` feature, which needs a newer Rust than our pinned toolchain.
 rusqlite = { version = "0.32", features = ["bundled"] }    # cache (SQLite bundled)
+# Held at 0.4: 0.7 pulls notify 6→8 with a changed debouncer API (watcher.rs).
 notify-debouncer-mini = "0.4"                              # inotify live-watch (debounced)
 
-# Git host providers (GitHub / GitLab) — async HTTP + JSON
+# Git host providers (GitHub / GitLab) — async HTTP + JSON.
+# Held at 0.12: reqwest 0.13 drops the `rustls-tls` feature, switching the
+# rustls backend to aws-lc-rs (C toolchain) + the platform cert verifier instead
+# of ring + bundled webpki-roots — a crypto/trust-store change to evaluate
+# deliberately against the release/AUR builds, not a blind bump.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 urlencoding = "2"
 
