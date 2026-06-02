@@ -16,23 +16,40 @@ const THIRTY_DAYS: i64 = 30 * 24 * 3600;
 
 /// Scan all roots and return the discovered repos, marking favorites.
 pub fn scan(roots: &[String], depth: usize, ignore: &[String], favorites: &HashSet<String>, now: i64) -> Vec<Repo> {
-    let ignore_set = build_ignore(ignore);
-    let mut seen = HashSet::new();
-    let mut repos = Vec::new();
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    let ignore_set = build_ignore(ignore);
+
+    // Discover unique repo paths first (cheap directory walk), then build the
+    // per-repo metadata (libgit2 status + README + language) in parallel — each
+    // repo is independent and this is the bulk of scan time.
+    let mut seen = HashSet::new();
+    let mut targets: Vec<(PathBuf, &str, bool)> = Vec::new();
     for root in roots {
-        let root_path = expand(root);
-        for repo_path in find_repos(&root_path, depth, &ignore_set) {
+        for repo_path in find_repos(&expand(root), depth, &ignore_set) {
             let id = repo_path.to_string_lossy().into_owned();
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            if let Some(repo) = build_repo(&repo_path, root, favorites.contains(&id), now) {
-                repos.push(repo);
+            if seen.insert(id.clone()) {
+                targets.push((repo_path, root.as_str(), favorites.contains(&id)));
             }
         }
     }
-    repos
+
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(targets.len().max(1));
+    let out = std::sync::Mutex::new(Vec::with_capacity(targets.len()));
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let (out, next, targets) = (&out, &next, &targets);
+        for _ in 0..threads {
+            scope.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((path, root, fav)) = targets.get(i) else { break };
+                if let Some(repo) = build_repo(path, root, *fav, now) {
+                    out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
+                }
+            });
+        }
+    });
+    out.into_inner().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Just the discovered repo paths (no metadata) — used by the watcher to decide
