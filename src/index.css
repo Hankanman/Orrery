@@ -1401,3 +1401,42 @@
   padding: 12px;
   background: var(--card);
 }
+
+/* ============================================================================
+   WEBKITGTK (Tauri webview) PERFORMANCE
+   Chromium GPU-composites these; WebKitGTK does them on the CPU, so with ~20
+   glass cards they judder badly on scroll/animation. In the wrapper we drop
+   the blur and fixed-attachment — over the uniform dark base the glass reads
+   almost identically (cards are defined by their border + shadow), and the UI
+   becomes as smooth as the browser. The plain `pnpm dev` browser build is
+   untouched and keeps the full glass.
+   ========================================================================== */
+.tauri body {
+  background-attachment: scroll;
+}
+.tauri .orr-card {
+  backdrop-filter: none;
+}
+.tauri .orr-search {
+  backdrop-filter: none;
+}
+.tauri .orr-header {
+  backdrop-filter: none;
+  /* Slightly more opaque so the header stays legible without the blur. */
+  background: color-mix(in oklch, var(--background) 92%, transparent);
+}
+/* Large-radius box-shadows repaint expensively on the CPU. On hover, only the
+   transform (cheap, composited) animates; the shadow swaps without a 30px glow
+   to blur each frame, and the radial hover-glow overlay is dropped. */
+.tauri .orr-card {
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
+}
+.tauri .orr-card:hover {
+  box-shadow: var(--orr-shadow-3), var(--orr-inset-top);
+}
+.tauri .orr-card::after {
+  display: none;
+}
