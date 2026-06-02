@@ -24,28 +24,25 @@ import { GridFacets } from "@/components/layout/GridFacets";
 import { ipc, isTauri, type Briefing } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import { useSidebarSlot } from "@/lib/sidebar-slot";
-import { repoStatus } from "@/lib/format";
+import {
+  matchesChip,
+  matchesVisibility,
+  needsAttention,
+  type Chip,
+  type SortKey,
+  type Visibility,
+} from "@/lib/repo-filter";
 import type { Repo } from "@/types";
 import { cn } from "@/lib/utils";
 
 // Defer the drawer (and its react-markdown/remark-gfm deps) until a repo opens.
 const RepoDrawer = lazy(() => import("@/components/RepoDrawer").then((m) => ({ default: m.RepoDrawer })));
 
-type SortKey = "activity" | "name" | "stars";
-type Chip = "dirty" | "ahead" | "starred" | "stale";
-type Visibility = "all" | "public" | "private";
-
 const VIS_OPTIONS: { key: Visibility; label: string; icon: typeof Globe | null }[] = [
   { key: "all", label: "All", icon: null },
   { key: "public", label: "Public", icon: Globe },
   { key: "private", label: "Private", icon: Lock },
 ];
-
-/** A repo is public only if it has a remote that isn't private; private covers
- *  private remotes and local-only repos (which aren't published anywhere). */
-function isPublic(repo: Repo): boolean {
-  return repo.host != null && !repo.private;
-}
 
 const SORTS: { key: SortKey; label: string }[] = [
   { key: "activity", label: "Activity" },
@@ -59,24 +56,6 @@ const CHIPS: { key: Chip; label: string; icon: typeof CircleDot }[] = [
   { key: "starred", label: "Starred", icon: Star },
   { key: "stale", label: "Stale", icon: Clock },
 ];
-
-function matchesChip(repo: Repo, chip: Chip): boolean {
-  switch (chip) {
-    case "dirty":
-      return repo.git.dirty > 0;
-    case "ahead":
-      return repo.git.ahead > 0;
-    case "starred":
-      return repo.favorite;
-    case "stale":
-      return repoStatus(repo) === "stale";
-  }
-}
-
-/** A repo needs attention if it has uncommitted work, unpushed/behind commits, or is stale. */
-function needsAttention(repo: Repo): boolean {
-  return repo.git.dirty > 0 || repo.git.ahead > 0 || repo.git.behind > 0 || repoStatus(repo) === "stale";
-}
 
 export function GridView() {
   const {
@@ -137,8 +116,7 @@ export function GridView() {
     const filtered = repos.filter((r) => {
       if (activeRoot !== "all" && r.root !== activeRoot) return false;
       if (langFilter && r.language !== langFilter) return false;
-      if (visibility === "public" && !isPublic(r)) return false;
-      if (visibility === "private" && isPublic(r)) return false;
+      if (!matchesVisibility(r, visibility)) return false;
       if (attentionOnly && !needsAttention(r)) return false;
       for (const chip of chips) if (!matchesChip(r, chip)) return false;
       return true;

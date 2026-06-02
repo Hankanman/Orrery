@@ -222,7 +222,7 @@ fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
         .map(|(_, rest)| rest)
         .unwrap_or(after_scheme);
     // tail is like "github.com/owner/repo.git" or "github.com:owner/repo.git"
-    let (domain_raw, path_part) = tail.split_once(|c| c == '/' || c == ':').unwrap_or((tail, ""));
+    let (domain_raw, path_part) = tail.split_once(['/', ':']).unwrap_or((tail, ""));
     let path = path_part.trim_end_matches('/').trim_end_matches(".git");
 
     // Detect the provider from the host only (not the whole URL).
