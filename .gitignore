@@ -12,6 +12,10 @@ dist-ssr
 .vite
 *.local
 
+# VitePress
+docs/.vitepress/dist
+docs/.vitepress/cache
+
 # Logs
 *.log
 npm-debug.log*
