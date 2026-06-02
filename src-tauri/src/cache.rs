@@ -198,11 +198,6 @@ fn apply_host_info_on(conn: &Connection, repos: &mut [Repo]) {
     }
 }
 
-/// All persisted host enrichment, keyed by slug (any age).
-pub fn all_host_info() -> HashMap<String, HostInfo> {
-    open().map(|c| all_host_info_on(&c)).unwrap_or_default()
-}
-
 /// Rehydrate `private`/`stars`/etc. on a repo snapshot from the host cache.
 pub fn apply_host_info(repos: &mut [Repo]) {
     if let Ok(conn) = open() {

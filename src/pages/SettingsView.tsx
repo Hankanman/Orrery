@@ -422,8 +422,8 @@ export function SettingsView() {
               <HostIcon host="github" className="size-4" /> GitHub
             </CardTitle>
             <CardDescription>
-              Optional — connect for higher rate limits and private-repo enrichment. Public repos enrich
-              without signing in (and an authenticated <code>gh</code> CLI is used automatically).
+              Connect to enrich private repos and raise rate limits. Public repos enrich without signing in
+              (and an authenticated <code>gh</code> CLI is used automatically).
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -436,29 +436,32 @@ export function SettingsView() {
               </div>
             ) : (
               <>
-                <div className="space-y-1.5">
-                  <label className="text-sm text-muted-foreground" htmlFor="ghclient">
-                    OAuth app client id (for device-flow login)
-                  </label>
-                  <Input
-                    id="ghclient"
-                    spellCheck={false}
-                    placeholder="Iv1.xxxxxxxx"
-                    value={config.githubClientId}
-                    onChange={(e) => patch({ githubClientId: e.target.value })}
-                  />
-                </div>
                 {device ? (
                   <p className="text-sm text-muted-foreground">
                     Open <code className="text-foreground">{device.verificationUri}</code> and enter code{" "}
                     <code className="text-foreground">{device.userCode}</code> — waiting…
                   </p>
                 ) : (
-                  <Button size="sm" onClick={connectGithub} disabled={!config.githubClientId}>
-                    Connect GitHub
+                  <Button size="sm" onClick={connectGithub}>
+                    <HostIcon host="github" className="size-4" /> Connect GitHub
                   </Button>
                 )}
                 {loginError && <span className="text-sm text-danger">Login failed: {loginError}</span>}
+                <details className="text-sm text-muted-foreground">
+                  <summary className="cursor-pointer select-none">Advanced: use your own OAuth app</summary>
+                  <div className="mt-2 space-y-1.5">
+                    <label className="text-muted-foreground" htmlFor="ghclient">
+                      OAuth app client id (device-flow; leave blank to use the built-in app)
+                    </label>
+                    <Input
+                      id="ghclient"
+                      spellCheck={false}
+                      placeholder="Ov23li…"
+                      value={config.githubClientId}
+                      onChange={(e) => patch({ githubClientId: e.target.value })}
+                    />
+                  </div>
+                </details>
               </>
             )}
           </CardContent>

@@ -158,20 +158,12 @@ pub async fn enrich_repo(host: Host, domain: String, slug: String, refresh: bool
 
 #[tauri::command]
 pub async fn github_login_start() -> Result<oauth::DeviceStart, String> {
-    let client_id = config::load().github_client_id;
-    if client_id.is_empty() {
-        return Err("Set a GitHub OAuth client id in settings first.".into());
-    }
-    oauth::device_start(&client_id).await
+    oauth::device_start(&oauth::github_client_id()).await
 }
 
 #[tauri::command]
 pub async fn github_login_poll(device_code: String) -> Result<oauth::PollResult, String> {
-    let client_id = config::load().github_client_id;
-    if client_id.is_empty() {
-        return Err("Set a GitHub OAuth client id in settings first.".into());
-    }
-    oauth::device_poll(&client_id, &device_code).await
+    oauth::device_poll(&oauth::github_client_id(), &device_code).await
 }
 
 #[tauri::command]

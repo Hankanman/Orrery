@@ -11,7 +11,25 @@ use serde::{Deserialize, Serialize};
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const SCOPE: &str = "read:user public_repo";
+// `repo` (not just `public_repo`) so enrichment can read private repos — needed
+// for the public/private filter and the lock badge to work on private repos.
+const SCOPE: &str = "read:user repo";
+
+/// Built-in OAuth app client id for the device flow, so sign-in works out of the
+/// box with no configuration. The device flow has no client secret, so a client
+/// id is not sensitive. A non-empty `github_client_id` in config overrides it
+/// (e.g. to point at your own OAuth app).
+const DEFAULT_GITHUB_CLIENT_ID: &str = "Ov23liQZt2ALfwxZbINW";
+
+/// The client id to use: the configured one if set, otherwise the built-in default.
+pub fn github_client_id() -> String {
+    let configured = crate::config::load().github_client_id;
+    if configured.trim().is_empty() {
+        DEFAULT_GITHUB_CLIENT_ID.to_string()
+    } else {
+        configured
+    }
+}
 
 fn token_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("orrery").join("github_token"))
