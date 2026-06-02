@@ -161,8 +161,8 @@ export const ipc = {
   openInIde: (id: string) => invoke<void>("open_in_ide", { id }),
   openFolder: (id: string) => invoke<void>("open_folder", { id }),
   openAgent: (id: string) => invoke<void>("open_agent", { id }),
-  enrichRepo: (host: "github" | "gitlab", domain: string, slug: string) =>
-    invoke<HostInfo>("enrich_repo", { host, domain, slug }),
+  enrichRepo: (host: "github" | "gitlab", domain: string, slug: string, refresh = false) =>
+    invoke<HostInfo>("enrich_repo", { host, domain, slug, refresh }),
   githubLoginStart: () => invoke<DeviceStart>("github_login_start"),
   githubLoginPoll: (deviceCode: string) => invoke<{ status: string }>("github_login_poll", { deviceCode }),
   githubAuthStatus: () => invoke<boolean>("github_auth_status"),

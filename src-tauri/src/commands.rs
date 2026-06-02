@@ -121,13 +121,16 @@ pub fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
-/// Fetch host enrichment (stars/topics/issues/release) for a repo, cached for
-/// 6h. On network failure, falls back to any stale cache (offline support).
+/// Fetch host enrichment (stars/topics/issues/release/visibility) for a repo,
+/// cached for 6h. `refresh` bypasses the cache (used by an explicit Rescan) to
+/// force a fresh fetch. On network failure, falls back to any stale cache.
 #[tauri::command]
-pub async fn enrich_repo(host: Host, domain: String, slug: String) -> Result<HostInfo, String> {
+pub async fn enrich_repo(host: Host, domain: String, slug: String, refresh: bool) -> Result<HostInfo, String> {
     let now = now_unix();
-    if let Some(fresh) = cache::cached_host_info(&slug, 6 * 3600, now) {
-        return Ok(fresh);
+    if !refresh {
+        if let Some(fresh) = cache::cached_host_info(&slug, 6 * 3600, now) {
+            return Ok(fresh);
+        }
     }
     let token = match host {
         // GitHub requests always go to api.github.com, so the token can't leak

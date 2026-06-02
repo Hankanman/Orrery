@@ -93,7 +93,7 @@ export function SettingsView() {
         if (status === "authorized") {
           setAuthed(true);
           setDevice(null);
-          refresh();
+          refresh(true); // now authenticated — re-enrich so private repos resolve
         } else if (status === "authorization_pending" || status === "slow_down") {
           if (status === "slow_down") intervalMs += 5000;
           timer = setTimeout(poll, intervalMs);
@@ -211,7 +211,7 @@ export function SettingsView() {
       if (isTauri()) await ipc.setConfig(config);
       setSaveError(null);
       setSaved(true);
-      refresh();
+      refresh(true); // "Save & rescan" → re-scan and re-fetch host data
       refreshAiStatus(); // app-wide AI availability may have changed
       refreshLaunchers(); // card buttons reflect the new IDE/agent logos
 

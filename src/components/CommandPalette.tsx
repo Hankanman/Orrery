@@ -82,7 +82,7 @@ export function CommandPalette({
         )}
 
         <CommandGroup heading="Actions">
-          <CommandItem value="rescan refresh repos" onSelect={() => run(refresh)}>
+          <CommandItem value="rescan refresh repos" onSelect={() => run(() => refresh(true))}>
             <RefreshCw />
             <span>Rescan repositories</span>
             <CommandShortcut>R</CommandShortcut>

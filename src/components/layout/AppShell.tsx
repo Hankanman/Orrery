@@ -79,7 +79,7 @@ function Shell() {
           className="orr-iconbtn"
           title="Rescan"
           aria-label="Rescan"
-          onClick={refresh}
+          onClick={() => refresh(true)}
           disabled={loading}
         >
           <RefreshCw className={cn("size-4", loading && "animate-spin")} />

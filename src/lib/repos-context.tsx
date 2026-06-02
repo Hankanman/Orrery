@@ -35,7 +35,9 @@ interface ReposContextValue {
   aiReady: boolean;
   /** Re-query Ollama status (call after changing AI settings). */
   refreshAiStatus: () => void;
-  refresh: () => void;
+  /** Re-scan repos. `force` (an explicit Rescan) also re-fetches host
+   *  enrichment, bypassing the 6h cache. */
+  refresh: (force?: boolean) => void;
   /** Fetch every repo's origin and merge refreshed ahead/behind into the grid. */
   fetchAll: () => void;
   /** Regenerate one repo's AI summary on demand. */
@@ -106,7 +108,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   // Fetch host enrichment (stars/topics/issues/release) in small concurrent
   // batches, merging each result into the matching repo. Cheap to re-run: the
   // Rust side caches for 6h and falls back to cache when offline.
-  const enrichAll = useCallback((list: Repo[]) => {
+  const enrichAll = useCallback((list: Repo[], refresh = false) => {
     if (!isTauri()) return;
     const gen = ++enrichGen.current;
     const targets = list.filter((r) => r.host && r.slug && (r.remoteHost || r.host === "github"));
@@ -124,7 +126,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
           chunk.map(async (r) => {
             // Enrichment and CI run in parallel per repo (independent calls).
             const [info, ci] = await Promise.all([
-              ipc.enrichRepo(r.host as "github" | "gitlab", r.remoteHost ?? "github.com", r.slug!).catch(() => null),
+              ipc.enrichRepo(r.host as "github" | "gitlab", r.remoteHost ?? "github.com", r.slug!, refresh).catch(() => null),
               r.host === "github" && r.slug
                 ? ipc.ciStatus(r.slug).then((c) => c.state).catch(() => null)
                 : Promise.resolve(null),
@@ -202,7 +204,10 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
-  const refresh = useCallback(() => {
+  // `force` (an explicit Rescan) bypasses the 6h host-enrichment cache so
+  // stars/issues/releases/visibility re-fetch; the automatic launch scan and
+  // side-effect refreshes leave it false to respect the cache and rate limits.
+  const refresh = useCallback((force = false) => {
     if (!isTauri()) {
       setRepos(MOCK_REPOS);
       setReady(true);
@@ -237,7 +242,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
           });
         });
         setLastScan(Date.now());
-        enrichAll(next);
+        enrichAll(next, force); // explicit Rescan forces fresh host enrichment
         summarizeAll(next);
         // Refresh the semantic-search index in the background (best-effort).
         ipc.indexRepos(next).catch(() => {});

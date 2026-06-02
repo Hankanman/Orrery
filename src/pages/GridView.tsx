@@ -314,7 +314,7 @@ export function GridView() {
             <FolderSearch className="size-8 opacity-60" />
             <p className="t">Couldn’t scan your repositories</p>
             <p className="s">{error}</p>
-            <button type="button" className="orr-sortpill" onClick={refresh}>
+            <button type="button" className="orr-sortpill" onClick={() => refresh(true)}>
               <RefreshCw className="size-3.5" /> Try again
             </button>
           </div>
@@ -323,7 +323,7 @@ export function GridView() {
             <FolderSearch className="size-8 opacity-60" />
             <p className="t">No repositories found</p>
             <p className="s">Add a workspace directory in settings, then rescan.</p>
-            <button type="button" className="orr-sortpill" onClick={refresh} disabled={loading}>
+            <button type="button" className="orr-sortpill" onClick={() => refresh(true)} disabled={loading}>
               <RefreshCw className={cn("size-3.5", loading && "animate-spin")} /> Rescan
             </button>
           </div>
