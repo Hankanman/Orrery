@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod forge;
 mod git_ops;
+mod inbox;
 mod launch;
 mod model;
 mod oauth;
@@ -86,7 +87,12 @@ pub fn run() {
             commands::generate_changelog,
             commands::index_repos,
             commands::semantic_search,
-            commands::daily_briefing
+            commands::daily_briefing,
+            commands::get_inbox,
+            commands::get_notifications,
+            commands::ci_status,
+            commands::list_starred,
+            commands::clone_repo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

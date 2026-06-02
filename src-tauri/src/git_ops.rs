@@ -256,6 +256,20 @@ pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
     Ok(out)
 }
 
+/// Clone `url` into `dest` (full destination path). Returns the working dir.
+pub fn clone(url: &str, dest: &str) -> Result<String, String> {
+    let mut fo = FetchOptions::new();
+    fo.remote_callbacks(remote_callbacks());
+    let repo = git2::build::RepoBuilder::new()
+        .fetch_options(fo)
+        .clone(url, std::path::Path::new(dest))
+        .map_err(|e| e.to_string())?;
+    Ok(repo
+        .workdir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dest.to_string()))
+}
+
 fn diff_to_string(diff: &git2::Diff) -> String {
     let mut buf = String::new();
     let _ = diff.print(git2::DiffFormat::Patch, |_, _, line| {

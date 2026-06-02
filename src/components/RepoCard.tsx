@@ -137,6 +137,16 @@ export function RepoCard({
           )}
           <StatusRow repo={repo} />
           <div className="orr-card-host">
+            {repo.ci && repo.ci !== "none" && (
+              <span className="orr-st" title={`CI: ${repo.ci}`}>
+                <span
+                  className={cn(
+                    "size-2 rounded-full",
+                    repo.ci === "success" ? "bg-ok" : repo.ci === "failure" ? "bg-danger" : "bg-warn",
+                  )}
+                />
+              </span>
+            )}
             {repo.host && (
               <span className="orr-st star">
                 <Star className="size-3.5" />

@@ -49,6 +49,8 @@ export interface Repo {
   openIssues?: number;
   /** Latest release tag on the host (enrichment). */
   latestRelease?: string | null;
+  /** Latest CI state (enrichment): "success" | "failure" | "pending" | "none". */
+  ci?: string | null;
   /** User-favorited (host amber star on the card). */
   favorite: boolean;
   /** Local-AI synthesized blurb (Phase 3); presence lights the violet indicator. */

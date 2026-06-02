@@ -3,6 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::git_ops::{self, BranchInfo, CommitInfo, WorktreeInfo};
+use crate::inbox::{self, CiStatus, InboxItem, Notification, RemoteRepo};
 use crate::model::{AppConfig, GitStatus, Host, HostInfo, Repo};
 use crate::{ai, cache, config, forge, launch, oauth, scan};
 
@@ -413,4 +414,52 @@ pub async fn daily_briefing(repos: Vec<Repo>) -> Result<Briefing, String> {
     // Only advance the window once we've actually produced a briefing.
     cache::set_meta("last_open", &now.to_string());
     Ok(Briefing { text, repo_count: count })
+}
+
+// ── Phase 7: cross-host dev inbox ──────────────────────────────────────────
+
+/// Open PRs / review requests / assigned issues across hosts (#43, #44).
+#[tauri::command]
+pub async fn get_inbox() -> Result<Vec<InboxItem>, String> {
+    inbox::github_inbox().await
+}
+
+/// Host notifications (#46).
+#[tauri::command]
+pub async fn get_notifications() -> Result<Vec<Notification>, String> {
+    inbox::github_notifications().await
+}
+
+/// CI status for a repo's default branch (#45).
+#[tauri::command]
+pub async fn ci_status(slug: String) -> Result<CiStatus, String> {
+    inbox::github_ci(&slug).await
+}
+
+/// Starred repos to browse (#25).
+#[tauri::command]
+pub async fn list_starred() -> Result<Vec<RemoteRepo>, String> {
+    inbox::github_starred().await
+}
+
+/// Clone a repo into a configured root and return its working dir (#26).
+#[tauri::command]
+pub async fn clone_repo(url: String, dest_root: String) -> Result<String, String> {
+    let name = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("repo")
+        .trim_end_matches(".git")
+        .to_string();
+    if name.is_empty() {
+        return Err("could not derive a directory name from the URL".into());
+    }
+    let dest = scan::expand(&dest_root).join(&name);
+    if dest.exists() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    let dest_str = dest.to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || git_ops::clone(&url, &dest_str))
+        .await
+        .map_err(|e| e.to_string())?
 }
