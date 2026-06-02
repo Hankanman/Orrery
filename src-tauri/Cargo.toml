@@ -47,6 +47,11 @@ urlencoding = "2"
 [dev-dependencies]
 tempfile = "3"
 
+# Linux-only: reach the underlying WebKitGTK view to force the accelerated
+# compositor to stay engaged. Pinned to the version wry links so the types unify.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+
 
 # Release profile tuned for size (these bundles ship to users). strip drops
 # symbols (~the unstripped 28M binary), LTO + a single codegen unit shrink and

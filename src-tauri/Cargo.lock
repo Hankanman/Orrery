@@ -2766,6 +2766,7 @@ dependencies = [
  "toml 0.8.2",
  "urlencoding",
  "walkdir",
+ "webkit2gtk",
  "which",
  "zbus",
 ]

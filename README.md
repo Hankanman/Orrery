@@ -89,6 +89,29 @@ distros, desktops, and package formats — no per-package flags needed.
 (client-side decorations) on KDE, or `WEBKIT_DISABLE_DMABUF_RENDERER=0` to
 re-enable the DMABUF renderer.
 
+### Rendering smoothness on NVIDIA
+
+WebKitGTK GPU-accelerates far less than Chromium, so the webview can feel
+juddery where a browser is smooth — worst on NVIDIA, where we disable the
+DMABUF renderer (above) and thereby give up accelerated compositing. Two things
+help:
+
+- **The app keeps WebKitGTK's accelerated compositor pinned on**
+  (`hardware-acceleration-policy: ALWAYS`). By default it's on-demand and tears
+  down between layers, which on NVIDIA shows as judder that disappears the
+  instant you open the web inspector ([tauri#10566](https://github.com/tauri-apps/tauri/issues/10566)).
+- **`ORRERY_WEBKIT_ACCEL=1`** keeps the DMABUF renderer *enabled* (skips the
+  disable). On a modern stack — NVIDIA **open** kernel module + recent
+  WebKitGTK, non-transparent window — DMABUF often works and is dramatically
+  smoother. Try `ORRERY_WEBKIT_ACCEL=1 pnpm tauri dev`; if the window renders
+  normally (not blank/garbled), this is the real fix and worth making default
+  for your setup. If you're on a hybrid/Wayland NVIDIA box, also ensure
+  `nvidia_drm.modeset=1` is set as a kernel parameter.
+
+The CSS also drops CPU-bound effects (backdrop-filter blur, fixed backgrounds,
+large shadow repaints) inside the webview only — the `pnpm dev` browser build
+keeps the full glass.
+
 ## License
 
 TBD.

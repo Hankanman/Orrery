@@ -20,9 +20,16 @@ mod watcher;
 /// override the behavior from the environment.
 #[cfg(target_os = "linux")]
 fn configure_linux_env() {
-    // WebKitGTK's DMABUF renderer is broken on many drivers (notably NVIDIA),
-    // producing blank/garbled webviews. Disable it by default.
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    // WebKitGTK's DMABUF renderer historically rendered blank/garbled on NVIDIA
+    // (proprietary driver + older WebKitGTK), so we disable it by default — but
+    // that also gives up GPU-accelerated compositing, which makes the UI judder.
+    //
+    // On modern stacks (NVIDIA *open* kernel module + recent WebKitGTK, with a
+    // non-transparent window) the DMABUF renderer often works AND is far
+    // smoother. Set ORRERY_WEBKIT_ACCEL=1 to keep it enabled and test that on
+    // your machine; if the window renders fine, it's the real fix.
+    let force_accel = std::env::var("ORRERY_WEBKIT_ACCEL").map(|v| v == "1").unwrap_or(false);
+    if !force_accel && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
@@ -82,6 +89,21 @@ pub fn run() {
             // on native Wayland without a portal).
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
             let _ = app.global_shortcut().register("CommandOrControl+Alt+O");
+
+            // Keep WebKitGTK's accelerated compositor always on. By default it's
+            // on-demand and tears down when no layer needs it, which on NVIDIA
+            // shows as judder that vanishes the moment you open the inspector
+            // (tauri-apps/tauri#10566). Forcing ALWAYS keeps it engaged.
+            #[cfg(target_os = "linux")]
+            if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                let _ = window.with_webview(|webview| {
+                    use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
+                    let wv = webview.inner();
+                    if let Some(settings) = WebViewExt::settings(&wv) {
+                        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
