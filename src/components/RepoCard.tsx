@@ -14,9 +14,10 @@ import {
   Tag,
 } from "lucide-react";
 import type { Repo } from "@/types";
-import { formatStars, languageColor, timeAgo } from "@/lib/format";
+import { formatStars, timeAgo } from "@/lib/format";
 import { BrandIcon } from "@/components/BrandIcon";
 import { HostIcon } from "@/components/HostIcon";
+import { LangIcon } from "@/components/LangIcon";
 import { cn } from "@/lib/utils";
 
 export type RepoView = "grid" | "list";
@@ -149,10 +150,7 @@ function RepoCardImpl({
     <button type="button" className="orr-card" onClick={() => onOpen?.(repo)}>
       <div className="orr-card-head">
         <div className="orr-card-name">
-          <span
-            className="ldot"
-            style={{ background: languageColor(repo.language), color: languageColor(repo.language) }}
-          />
+          <LangIcon language={repo.language} />
           <span className="nm">{repo.displayName}</span>
           {agentActive && (
             <SquareTerminal className="size-3.5 shrink-0 animate-pulse text-primary" aria-label="Agent session running" />

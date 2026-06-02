@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { FolderGit2, Plus } from "lucide-react";
 import type { Repo } from "@/types";
-import { languageColor } from "@/lib/format";
+import { LangIcon } from "@/components/LangIcon";
 import { cn } from "@/lib/utils";
 
 interface GridFacetsProps {
@@ -80,7 +80,7 @@ export function GridFacets({ repos, activeRoot, onSelectRoot, langFilter, onSele
               className={cn("orr-sb-item", langFilter === lang && "active")}
               onClick={() => onSelectLang(langFilter === lang ? null : lang)}
             >
-              <span className="dot" style={{ background: languageColor(lang) }} />
+              <LangIcon language={lang} className="size-3.5" />
               <span className="nm">{lang}</span>
               <span className="count">{count}</span>
             </button>

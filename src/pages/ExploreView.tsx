@@ -4,9 +4,10 @@ import { Compass, DownloadCloud, Star } from "lucide-react";
 import { ipc, isTauri, type RemoteRepo } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
+import { LangIcon } from "@/components/LangIcon";
 import { Spinner } from "@/components/Spinner";
 import { VirtualGrid } from "@/components/VirtualGrid";
-import { formatStars, languageColor } from "@/lib/format";
+import { formatStars } from "@/lib/format";
 
 function open(url: string) {
   if (isTauri()) openUrl(url).catch(() => {});
@@ -100,7 +101,7 @@ export function ExploreView() {
               <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
                 {r.language && (
                   <span className="flex items-center gap-1">
-                    <span className="size-2 rounded-full" style={{ background: languageColor(r.language) }} />
+                    <LangIcon language={r.language} className="size-3" />
                     {r.language}
                   </span>
                 )}
