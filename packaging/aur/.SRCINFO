@@ -1,0 +1,26 @@
+pkgbase = orrery-git
+	pkgdesc = every repo in orbit — a Linux-native command center for your git repos
+	pkgver = 0.1.0.r87.gcaa0807
+	pkgrel = 1
+	url = https://github.com/Hankanman/Orrery
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = git
+	makedepends = rust
+	makedepends = cargo
+	makedepends = pnpm
+	makedepends = nodejs
+	makedepends = cmake
+	makedepends = pkgconf
+	depends = webkit2gtk-4.1
+	depends = gtk3
+	depends = hicolor-icon-theme
+	depends = libayatana-appindicator
+	provides = orrery
+	conflicts = orrery
+	options = !lto
+	source = orrery::git+https://github.com/Hankanman/Orrery.git
+	sha256sums = SKIP
+
+pkgname = orrery-git
