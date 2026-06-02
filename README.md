@@ -141,4 +141,4 @@ Next up and ongoing work lives in [the issue list](../../issues).
 
 ## License
 
-Not yet decided — see [the issues](../../issues).
+Released under the [MIT License](LICENSE).
