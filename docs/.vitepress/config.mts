@@ -66,7 +66,7 @@ export default defineConfig({
       text: "Edit this page on GitHub",
     },
     footer: {
-      message: "Released under the MIT License.",
+      message: "Early development — built from source.",
       copyright: "© 2026 Orrery",
     },
   },
