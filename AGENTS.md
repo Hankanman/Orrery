@@ -94,6 +94,12 @@ in published images. Put new screenshots in `docs/public/shots/`.
 
 ## Commits & PRs
 
+- **`main` is protected — never push to it directly. All changes go through a pull request.**
+  Branch (`git checkout -b ...`), push the branch, open a PR (`gh pr create`), let CI go green,
+  then merge.
+- **Linear history is enforced** — merge with **squash or rebase**, not a merge commit
+  (`gh pr merge --squash --delete-branch`). No force-pushes to `main`.
+- The ruleset requires a PR but **0 approving reviews**, so a solo contributor can self-merge once
+  CI passes. Wait for CI (build + tests + clippy) to be green before merging.
 - Small, focused commits; imperative subject line; explain the *why* in the body.
-- Branch off `main` for non-trivial work; commit/push only when asked.
 - Don't commit secrets, tokens, or anything under `~/.config/orrery` / `~/.local/share/orrery`.
