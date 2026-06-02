@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Check, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2 } from "lucide-react";
+import { Check, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2, Zap } from "lucide-react";
 import { ipc, isTauri, type AiStatus, type AppConfig, type DeviceStart } from "@/lib/ipc";
+import { reduceMotionEnabled, setReduceMotion } from "@/lib/motion";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +30,7 @@ export function SettingsView() {
   const [device, setDevice] = useState<DeviceStart | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [reduceMotion, setReduceMotionState] = useState(reduceMotionEnabled);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -293,6 +295,31 @@ export function SettingsView() {
                 disabled={!config.aiEnabled}
               />
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Zap className="size-4 text-primary" /> Motion
+            </CardTitle>
+            <CardDescription>
+              Disable UI animations. Helps smoothness in the desktop webview, where some GPUs
+              (notably NVIDIA on Linux) can’t accelerate them. Applies instantly — no rescan.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={reduceMotion}
+                onChange={(e) => {
+                  setReduceMotion(e.target.checked);
+                  setReduceMotionState(e.target.checked);
+                }}
+              />
+              Reduce motion
+            </label>
           </CardContent>
         </Card>
 

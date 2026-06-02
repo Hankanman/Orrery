@@ -1146,6 +1146,19 @@
   animation: orr-enter-up var(--dur-base) var(--ease-out) 210ms backwards;
 }
 
+/* User-toggled reduce-motion (Settings → Motion). Nukes all animation and
+   transition globally so the UI is perfectly still — the pragmatic smoothness
+   escape hatch where the webview can't accelerate motion. */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-delay: 0ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  transition-delay: 0ms !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .orr-card,
   .orr-card::after {

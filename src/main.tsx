@@ -8,6 +8,7 @@ import "@fontsource/geist-sans/600.css";
 import "@fontsource/geist-mono";
 import "@fontsource/geist-mono/500.css";
 import { isTauri } from "@/lib/ipc";
+import { initReduceMotion } from "@/lib/motion";
 import { router } from "@/router";
 import "@/index.css";
 
@@ -16,6 +17,9 @@ import "@/index.css";
 // backgrounds) that judder there but are free in a Chromium browser. Set before
 // first paint to avoid a glass→solid flash.
 if (isTauri()) document.documentElement.classList.add("tauri");
+
+// Apply the saved reduce-motion preference before first paint.
+initReduceMotion();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
