@@ -133,7 +133,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     }
     void (async () => {
       const status = await ipc.aiStatus().catch(() => null);
-      if (!status?.available || summaryGen.current !== gen) {
+      if (!status?.reachable || !status.enabled || summaryGen.current !== gen) {
         if (summaryGen.current === gen) setSummarizeProgress(null);
         return;
       }

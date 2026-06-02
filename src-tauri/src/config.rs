@@ -63,6 +63,7 @@ impl Default for AppConfig {
             ai_model: crate::model::default_ai_model(),
             ai_enabled: true,
             embed_model: crate::model::default_embed_model(),
+            ollama_host: crate::model::default_ollama_host(),
         }
     }
 }

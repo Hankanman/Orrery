@@ -9,7 +9,11 @@ use serde::Deserialize;
 
 use crate::model::Repo;
 
-const OLLAMA: &str = "http://localhost:11434";
+/// Base URL of the Ollama server, from config (default http://localhost:11434).
+/// config::load() is cached, so this is cheap to call per request.
+fn base() -> String {
+    crate::config::load().ollama_host
+}
 
 /// Shared HTTP client so the many Ollama calls (status, per-repo summaries and
 /// embeddings) reuse one connection pool. reqwest::Client is Arc-backed.
@@ -21,7 +25,7 @@ fn client() -> reqwest::Client {
 /// Is a local Ollama server reachable?
 pub async fn available() -> bool {
     client()
-        .get(format!("{OLLAMA}/api/version"))
+        .get(format!("{}/api/version", base()))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -41,7 +45,7 @@ pub async fn installed_models() -> Vec<(String, u64)> {
         #[serde(default)]
         size: u64,
     }
-    let resp = client().get(format!("{OLLAMA}/api/tags")).send().await;
+    let resp = client().get(format!("{}/api/tags", base())).send().await;
     match resp {
         Ok(r) => match r.json::<Tags>().await {
             Ok(t) => t.models.into_iter().map(|m| (m.name, m.size)).collect(),
@@ -120,7 +124,7 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
         body["think"] = serde_json::Value::Bool(false);
     }
     let resp = client()
-        .post(format!("{OLLAMA}/api/generate"))
+        .post(format!("{}/api/generate", base()))
         .json(&body)
         .send()
         .await
@@ -141,7 +145,7 @@ pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
     }
     let body = serde_json::json!({ "model": model, "input": text });
     let resp = client()
-        .post(format!("{OLLAMA}/api/embed"))
+        .post(format!("{}/api/embed", base()))
         .json(&body)
         .send()
         .await

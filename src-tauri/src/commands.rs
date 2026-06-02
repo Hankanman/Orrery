@@ -172,25 +172,112 @@ pub fn github_sign_out() {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiStatus {
-    pub available: bool,
+    /// Ollama server is reachable at `endpoint`.
+    pub reachable: bool,
+    /// AI summaries are turned on in config.
+    pub enabled: bool,
+    /// The Ollama base URL in use.
+    pub endpoint: String,
+    /// Chat model that would actually be used (preferred if installed, else
+    /// the smallest installed model).
     pub model: Option<String>,
+    /// Configured embedding model.
+    pub embed_model: String,
+    /// Whether the configured embedding model is installed.
+    pub embed_installed: bool,
+    /// Installed model names.
     pub models: Vec<String>,
+    /// Reason it's not usable (unreachable / no models), for the UI.
+    pub error: Option<String>,
 }
 
-/// Whether local AI is available and which model would be used.
+/// Connection + model status for the AI settings panel. Reports reachability
+/// independently of the summaries toggle, so the user can verify Ollama is
+/// connected even with summaries off.
 #[tauri::command]
 pub async fn ai_status() -> AiStatus {
     let cfg = config::load();
-    if !cfg.ai_enabled || !ai::available().await {
-        return AiStatus { available: false, model: None, models: Vec::new() };
+    let endpoint = cfg.ollama_host.clone();
+    if !ai::available().await {
+        return AiStatus {
+            reachable: false,
+            enabled: cfg.ai_enabled,
+            endpoint: endpoint.clone(),
+            model: None,
+            embed_model: cfg.embed_model,
+            embed_installed: false,
+            models: Vec::new(),
+            error: Some(format!("Ollama not reachable at {endpoint}")),
+        };
     }
     let installed = ai::installed_models().await;
+    let names: Vec<String> = installed.iter().map(|(name, _)| name.clone()).collect();
     let model = ai::pick_model(&cfg.ai_model, &installed);
+    let embed_installed = names.iter().any(|n| n == &cfg.embed_model);
+    let error = if names.is_empty() {
+        Some("Connected, but no models are installed (run `ollama pull …`)".into())
+    } else {
+        None
+    };
     AiStatus {
-        available: true,
+        reachable: true,
+        enabled: cfg.ai_enabled,
+        endpoint,
         model,
-        models: installed.into_iter().map(|(name, _)| name).collect(),
+        embed_model: cfg.embed_model,
+        embed_installed,
+        models: names,
+        error,
     }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTest {
+    pub chat_ok: bool,
+    pub embed_ok: bool,
+    pub ms: u64,
+    pub error: Option<String>,
+}
+
+/// End-to-end check: actually run a tiny generation and an embedding against
+/// the configured models, so the user can confirm AI is *working*, not just
+/// reachable. Returns which legs passed and the round-trip time.
+#[tauri::command]
+pub async fn ai_test() -> AiTest {
+    let cfg = config::load();
+    let start = std::time::Instant::now();
+
+    let installed = ai::installed_models().await;
+    if installed.is_empty() {
+        return AiTest {
+            chat_ok: false,
+            embed_ok: false,
+            ms: 0,
+            error: Some(format!("Ollama not reachable at {} (or no models)", cfg.ollama_host)),
+        };
+    }
+
+    let mut error = None;
+    let chat_ok = match ai::pick_model(&cfg.ai_model, &installed) {
+        Some(model) => match ai::generate(&model, "Reply with the single word: ok").await {
+            Ok(_) => true,
+            Err(e) => {
+                error = Some(format!("chat: {e}"));
+                false
+            }
+        },
+        None => false,
+    };
+    let embed_ok = match ai::embed(&cfg.embed_model, "orrery connectivity test").await {
+        Ok(_) => true,
+        Err(e) => {
+            error.get_or_insert(format!("embed: {e}"));
+            false
+        }
+    };
+
+    AiTest { chat_ok, embed_ok, ms: start.elapsed().as_millis() as u64, error }
 }
 
 /// Summarize a repo (cached while its last commit is unchanged).

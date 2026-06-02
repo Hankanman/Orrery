@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2, Zap } from "lucide-react";
-import { ipc, isTauri, type AiStatus, type AppConfig, type DeviceStart } from "@/lib/ipc";
+import { ipc, isTauri, type AiStatus, type AiTest, type AppConfig, type DeviceStart } from "@/lib/ipc";
 import { reduceMotionEnabled, setReduceMotion } from "@/lib/motion";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
@@ -19,6 +19,7 @@ const FALLBACK: AppConfig = {
   aiModel: "llama3.2:3b",
   aiEnabled: true,
   embedModel: "nomic-embed-text",
+  ollamaHost: "http://localhost:11434",
 };
 
 export function SettingsView() {
@@ -30,6 +31,8 @@ export function SettingsView() {
   const [device, setDevice] = useState<DeviceStart | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [aiTesting, setAiTesting] = useState(false);
+  const [aiTest, setAiTest] = useState<AiTest | null>(null);
   const [reduceMotion, setReduceMotionState] = useState(reduceMotionEnabled);
 
   useEffect(() => {
@@ -80,6 +83,9 @@ export function SettingsView() {
 
   if (!config) return <div className="orr-settings" />;
 
+  const installedModels = aiStatus?.models ?? [];
+  const has = (m: string) => installedModels.includes(m.trim());
+
   const patch = (p: Partial<AppConfig>) => {
     setConfig({ ...config, ...p });
     setSaved(false);
@@ -95,6 +101,23 @@ export function SettingsView() {
       setSaved(false);
       setSaveError(String(e));
       console.error("[orrery] save config:", e);
+    }
+  };
+
+  // Persist the current AI settings, then probe status + run a live generate/
+  // embed so "Test" reflects exactly what's typed (not the last-saved values).
+  const testAi = async () => {
+    setAiTesting(true);
+    setAiTest(null);
+    try {
+      if (isTauri()) await ipc.setConfig(config);
+      const [status, test] = await Promise.all([ipc.aiStatus(), ipc.aiTest()]);
+      setAiStatus(status);
+      setAiTest(test);
+    } catch (e) {
+      setAiTest({ chatOk: false, embedOk: false, ms: 0, error: String(e) });
+    } finally {
+      setAiTesting(false);
     }
   };
 
@@ -265,36 +288,125 @@ export function SettingsView() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Sparkles className="size-4 text-primary" /> AI summaries
+              <Sparkles className="size-4 text-primary" /> AI &amp; semantic search
             </CardTitle>
             <CardDescription>
-              {aiStatus?.available
-                ? `Local Ollama detected — using ${aiStatus.model ?? "the smallest installed model"}.`
-                : "Local-only via Ollama. Start Ollama and pull a model to enable summaries."}
+              Local-only via Ollama — powers repo summaries, commit messages, the daily briefing, and
+              semantic search.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-4">
+            {/* Connection status + live test */}
+            <div className="flex items-center gap-2 rounded-md border border-border bg-background/40 px-3 py-2 text-sm">
+              <span
+                className={`size-2 shrink-0 rounded-full ${aiStatus?.reachable ? "bg-ok" : "bg-danger"}`}
+              />
+              <span className="min-w-0 flex-1 truncate">
+                {!aiStatus ? (
+                  "Checking…"
+                ) : aiStatus.reachable ? (
+                  <>
+                    Connected to <code className="text-foreground">{aiStatus.endpoint}</code>
+                  </>
+                ) : (
+                  aiStatus.error ?? "Not reachable"
+                )}
+              </span>
+              <Button variant="outline" size="sm" onClick={testAi} disabled={aiTesting}>
+                {aiTesting ? "Testing…" : "Test"}
+              </Button>
+            </div>
+            {aiTest &&
+              (aiTest.error ? (
+                <p className="text-sm text-danger">Test failed: {aiTest.error}</p>
+              ) : (
+                <p className="text-sm text-ok">
+                  Chat {aiTest.chatOk ? "✓" : "✗"} · Embeddings {aiTest.embedOk ? "✓" : "✗"} · {aiTest.ms} ms
+                </p>
+              ))}
+
+            {/* Endpoint */}
+            <div className="space-y-1.5">
+              <label className="text-sm text-muted-foreground" htmlFor="ollama">
+                Ollama endpoint
+              </label>
+              <Input
+                id="ollama"
+                spellCheck={false}
+                placeholder="http://localhost:11434"
+                value={config.ollamaHost}
+                onChange={(e) => patch({ ollamaHost: e.target.value })}
+              />
+            </div>
+
+            {/* Installed-model suggestions, shared by both pickers */}
+            <datalist id="ollama-models">
+              {installedModels.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
                 checked={config.aiEnabled}
                 onChange={(e) => patch({ aiEnabled: e.target.checked })}
               />
-              Generate summaries
+              Generate summaries, commit messages &amp; briefing
             </label>
+
+            {/* Chat model */}
             <div className="space-y-1.5">
               <label className="text-sm text-muted-foreground" htmlFor="aimodel">
-                Preferred model {aiStatus && `(installed: ${aiStatus.models.join(", ") || "none"})`}
+                Chat model
               </label>
               <Input
                 id="aimodel"
+                list="ollama-models"
                 spellCheck={false}
                 placeholder="llama3.2:3b"
                 value={config.aiModel}
                 onChange={(e) => patch({ aiModel: e.target.value })}
                 disabled={!config.aiEnabled}
               />
+              {aiStatus?.reachable &&
+                config.aiModel.trim() &&
+                (has(config.aiModel) ? (
+                  <p className="text-xs text-ok">Installed ✓</p>
+                ) : (
+                  <p className="text-xs text-warn">
+                    Not installed — falls back to {aiStatus.model ?? "the smallest installed model"}.
+                  </p>
+                ))}
             </div>
+
+            {/* Embedding model */}
+            <div className="space-y-1.5">
+              <label className="text-sm text-muted-foreground" htmlFor="embedmodel">
+                Embedding model (semantic search)
+              </label>
+              <Input
+                id="embedmodel"
+                list="ollama-models"
+                spellCheck={false}
+                placeholder="nomic-embed-text"
+                value={config.embedModel}
+                onChange={(e) => patch({ embedModel: e.target.value })}
+              />
+              {aiStatus?.reachable &&
+                config.embedModel.trim() &&
+                (has(config.embedModel) ? (
+                  <p className="text-xs text-ok">Installed ✓</p>
+                ) : (
+                  <p className="text-xs text-warn">
+                    Not installed — run <code>ollama pull {config.embedModel.trim()}</code>
+                  </p>
+                ))}
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              Installed: {installedModels.join(", ") || "none — run `ollama pull <model>`"}
+            </p>
           </CardContent>
         </Card>
 

@@ -45,6 +45,7 @@ export interface AppConfig {
   aiModel: string;
   aiEnabled: boolean;
   embedModel: string;
+  ollamaHost: string;
 }
 
 export interface SearchHit {
@@ -88,9 +89,29 @@ export interface CiStatus {
 }
 
 export interface AiStatus {
-  available: boolean;
+  /** Ollama server reachable at `endpoint`. */
+  reachable: boolean;
+  /** Summaries enabled in config. */
+  enabled: boolean;
+  /** Ollama base URL in use. */
+  endpoint: string;
+  /** Chat model that would actually be used. */
   model: string | null;
+  /** Configured embedding model. */
+  embedModel: string;
+  /** Whether the embedding model is installed. */
+  embedInstalled: boolean;
+  /** Installed model names. */
   models: string[];
+  /** Reason it's unusable, if any. */
+  error: string | null;
+}
+
+export interface AiTest {
+  chatOk: boolean;
+  embedOk: boolean;
+  ms: number;
+  error: string | null;
 }
 
 export interface HostInfo {
@@ -127,6 +148,7 @@ export const ipc = {
   githubAuthStatus: () => invoke<boolean>("github_auth_status"),
   githubSignOut: () => invoke<void>("github_sign_out"),
   aiStatus: () => invoke<AiStatus>("ai_status"),
+  aiTest: () => invoke<AiTest>("ai_test"),
   summarizeRepo: (repo: Repo, refresh = false) => invoke<string>("summarize_repo", { repo, refresh }),
   fetchAll: (ids: string[]) => invoke<FetchOutcome[]>("fetch_all", { ids }),
   fetchRepo: (id: string) => invoke<GitStatus>("fetch_repo", { id }),

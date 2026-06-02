@@ -112,10 +112,17 @@ pub struct AppConfig {
     /// Ollama embedding model for semantic search.
     #[serde(default = "default_embed_model")]
     pub embed_model: String,
+    /// Base URL of the Ollama server (supports a remote/non-default host).
+    #[serde(default = "default_ollama_host")]
+    pub ollama_host: String,
 }
 
 pub(crate) fn default_ai_model() -> String {
     "llama3.2:3b".to_string()
+}
+
+pub(crate) fn default_ollama_host() -> String {
+    "http://localhost:11434".to_string()
 }
 
 pub(crate) fn default_embed_model() -> String {
