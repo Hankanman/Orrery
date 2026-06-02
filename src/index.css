@@ -1105,6 +1105,47 @@
   }
 }
 
+/* ============================================================================
+   APP-LAUNCH ENTRANCE — the UI "builds itself" once on open. Scoped under
+   .orr-booting (removed after ~1.2s) so it never replays on navigation.
+   Sequenced top→down, left→in; transform/opacity only, so no layout shift.
+   `backwards` fill applies the start frame before paint (no flash) and releases
+   afterwards so hover/other transforms still win.
+   ========================================================================== */
+@keyframes orr-enter-down {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+@keyframes orr-enter-left {
+  from {
+    opacity: 0;
+    transform: translateX(-26px);
+  }
+}
+@keyframes orr-enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+.orr-booting .orr-header {
+  animation: orr-enter-down var(--dur-base) var(--ease-out) backwards;
+}
+.orr-booting .orr-sidebar {
+  animation: orr-enter-left var(--dur-base) var(--ease-out) 70ms backwards;
+}
+.orr-booting .orr-contrib {
+  animation: orr-enter-up var(--dur-base) var(--ease-out) 130ms backwards;
+}
+.orr-booting .orr-toolbar {
+  animation: orr-enter-up var(--dur-base) var(--ease-out) 170ms backwards;
+}
+.orr-booting .orr-chiprow {
+  animation: orr-enter-up var(--dur-base) var(--ease-out) 210ms backwards;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .orr-card,
   .orr-card::after {
@@ -1117,7 +1158,12 @@
   .orr-activity,
   .orr-drawer-scrim,
   .orr-drawer-panel,
-  .orr-spinner .sat {
+  .orr-spinner .sat,
+  .orr-booting .orr-header,
+  .orr-booting .orr-sidebar,
+  .orr-booting .orr-toolbar,
+  .orr-booting .orr-contrib,
+  .orr-booting .orr-chiprow {
     animation: none;
   }
 }

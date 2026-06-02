@@ -19,6 +19,15 @@ function Shell() {
 
   const rootCount = useMemo(() => new Set(repos.map((r) => r.root)).size, [repos]);
 
+  // App-launch choreography: the frame "builds itself" once. The class is on
+  // from first paint and removed after the sequence, so navigating back to a
+  // view later doesn't replay the entrance.
+  const [booting, setBooting] = useState(true);
+  useEffect(() => {
+    const t = setTimeout(() => setBooting(false), 1200);
+    return () => clearTimeout(t);
+  }, []);
+
   // Global ⌘K / Ctrl-K to open the command palette.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -32,7 +41,7 @@ function Shell() {
   }, []);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className={cn("flex h-full flex-col", booting && "orr-booting")}>
       <header className="orr-header">
         <Link to="/" className="orr-brand">
           <Orbit className="orr-mark size-6" />
