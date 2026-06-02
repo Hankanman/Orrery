@@ -6,6 +6,7 @@ import type { Repo } from "@/types";
 import { ipc, isTauri, type BranchInfo, type CommitInfo, type WorktreeInfo } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
+import { VirtualList } from "@/components/VirtualList";
 import { timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -205,27 +206,34 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
                   )}
                 </div>
                 {error && <p className="mb-2 text-sm text-danger">{error}</p>}
-                <div className="space-y-1">
-                  {branches.map((b) => (
-                    <button
-                      key={b.name}
-                      type="button"
-                      disabled={b.isHead || busy}
-                      onClick={() => doSwitch(b.name)}
-                      className={cn(
-                        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm",
-                        b.isHead ? "bg-secondary/60" : "hover:bg-secondary/40",
-                      )}
-                    >
-                      <GitBranch className="size-3.5 text-muted-foreground" />
-                      <span className={cn("font-mono", b.isHead && "font-semibold")}>{b.name}</span>
-                      {b.isHead && <Check className="size-3.5 text-ok" />}
-                      {b.merged && !b.isHead && <span className="ml-auto text-xs text-muted-foreground">merged</span>}
-                      {b.gone && <span className="ml-auto text-xs text-warn">gone</span>}
-                    </button>
-                  ))}
-                  {branches.length === 0 && <p className="text-sm text-muted-foreground">No branches.</p>}
-                </div>
+                {branches.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No branches.</p>
+                ) : (
+                  <VirtualList
+                    items={branches}
+                    getKey={(b) => b.name}
+                    estimateSize={34}
+                    gap={4}
+                    className="max-h-80"
+                    renderItem={(b) => (
+                      <button
+                        type="button"
+                        disabled={b.isHead || busy}
+                        onClick={() => doSwitch(b.name)}
+                        className={cn(
+                          "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm",
+                          b.isHead ? "bg-secondary/60" : "hover:bg-secondary/40",
+                        )}
+                      >
+                        <GitBranch className="size-3.5 text-muted-foreground" />
+                        <span className={cn("font-mono", b.isHead && "font-semibold")}>{b.name}</span>
+                        {b.isHead && <Check className="size-3.5 text-ok" />}
+                        {b.merged && !b.isHead && <span className="ml-auto text-xs text-muted-foreground">merged</span>}
+                        {b.gone && <span className="ml-auto text-xs text-warn">gone</span>}
+                      </button>
+                    )}
+                  />
+                )}
               </section>
 
               {/* Worktrees */}
