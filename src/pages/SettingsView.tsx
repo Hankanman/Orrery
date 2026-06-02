@@ -4,6 +4,7 @@ import { ipc, isTauri, type AiStatus, type AiTest, type AppConfig, type DeviceSt
 import { reduceMotionEnabled, setReduceMotion } from "@/lib/motion";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
+import { ModelSelect } from "@/components/ModelSelect";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -339,13 +340,6 @@ export function SettingsView() {
               />
             </div>
 
-            {/* Installed-model suggestions, shared by both pickers */}
-            <datalist id="ollama-models">
-              {installedModels.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -360,14 +354,13 @@ export function SettingsView() {
               <label className="text-sm text-muted-foreground" htmlFor="aimodel">
                 Chat model
               </label>
-              <Input
+              <ModelSelect
                 id="aimodel"
-                list="ollama-models"
-                spellCheck={false}
-                placeholder="llama3.2:3b"
+                models={installedModels}
                 value={config.aiModel}
-                onChange={(e) => patch({ aiModel: e.target.value })}
+                onChange={(aiModel) => patch({ aiModel })}
                 disabled={!config.aiEnabled}
+                placeholder="llama3.2:3b"
               />
               {aiStatus?.reachable &&
                 config.aiModel.trim() &&
@@ -385,13 +378,12 @@ export function SettingsView() {
               <label className="text-sm text-muted-foreground" htmlFor="embedmodel">
                 Embedding model (semantic search)
               </label>
-              <Input
+              <ModelSelect
                 id="embedmodel"
-                list="ollama-models"
-                spellCheck={false}
-                placeholder="nomic-embed-text"
+                models={installedModels}
                 value={config.embedModel}
-                onChange={(e) => patch({ embedModel: e.target.value })}
+                onChange={(embedModel) => patch({ embedModel })}
+                placeholder="nomic-embed-text"
               />
               {aiStatus?.reachable &&
                 config.embedModel.trim() &&
