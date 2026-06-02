@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Orrery
+GenericName=Repo Dashboard
+Comment=every repo in orbit — a Linux-native command center for your git repos
+Exec=orrery
+Icon=orrery
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;repos;dashboard;developer;
+StartupNotify=true
+StartupWMClass=Orrery
