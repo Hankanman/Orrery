@@ -8,6 +8,8 @@ export interface IdePreset {
   id: string;
   name: string;
   command: string;
+  /** Brand-logo id (into BRAND_PATHS); defaults to `id` when omitted. */
+  brand?: string;
 }
 
 export interface TerminalPreset {
@@ -30,7 +32,7 @@ export const IDE_PRESETS: IdePreset[] = [
   { id: "windsurf", name: "Windsurf", command: "windsurf {path}" },
   { id: "zed", name: "Zed", command: "zed {path}" },
   { id: "sublime", name: "Sublime Text", command: "subl {path}" },
-  { id: "fleet", name: "Fleet", command: "fleet {path}" },
+  { id: "fleet", name: "Fleet", command: "fleet {path}", brand: "jetbrains" },
   { id: "lapce", name: "Lapce", command: "lapce {path}" },
   { id: "intellij", name: "IntelliJ IDEA", command: "idea {path}" },
   { id: "webstorm", name: "WebStorm", command: "webstorm {path}" },
@@ -38,7 +40,7 @@ export const IDE_PRESETS: IdePreset[] = [
   { id: "goland", name: "GoLand", command: "goland {path}" },
   { id: "clion", name: "CLion", command: "clion {path}" },
   { id: "rider", name: "Rider", command: "rider {path}" },
-  { id: "rustrover", name: "RustRover", command: "rustrover {path}" },
+  { id: "rustrover", name: "RustRover", command: "rustrover {path}", brand: "jetbrains" },
   { id: "phpstorm", name: "PhpStorm", command: "phpstorm {path}" },
   { id: "emacs", name: "Emacs", command: "emacs {path}" },
   { id: "builder", name: "GNOME Builder", command: "gnome-builder {path}" },

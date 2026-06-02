@@ -1053,6 +1053,7 @@
   .orr-preset {
     display: inline-flex;
     align-items: center;
+    gap: 6px;
     font: var(--text-data-sm);
     line-height: 1;
     padding: 6px 10px;

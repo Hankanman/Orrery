@@ -7,6 +7,7 @@ import { useRepos } from "@/lib/repos-context";
 import { useSidebarSlot } from "@/lib/sidebar-slot";
 import { cn } from "@/lib/utils";
 import { HostIcon } from "@/components/HostIcon";
+import { BrandIcon } from "@/components/BrandIcon";
 import { ModelSelect } from "@/components/ModelSelect";
 import {
   AGENT_PRESETS,
@@ -364,6 +365,7 @@ export function SettingsView() {
                     className={cn("orr-preset ide", detectIde(config.ideCommand)?.id === p.id && "active")}
                     onClick={() => patch({ ideCommand: p.command })}
                   >
+                    <BrandIcon brand={p.brand ?? p.id} category="ide" />
                     {p.name}
                   </button>
                 ))}
@@ -385,6 +387,7 @@ export function SettingsView() {
                       patch({ agentCommand: composeAgentCommand(t, detectAgent(config.agentCommand)?.bin ?? "claude") })
                     }
                   >
+                    <BrandIcon brand={t.id} category="terminal" />
                     {t.name}
                   </button>
                 ))}
@@ -402,6 +405,7 @@ export function SettingsView() {
                       })
                     }
                   >
+                    <BrandIcon brand={a.id} category="agent" />
                     {a.name}
                   </button>
                 ))}
