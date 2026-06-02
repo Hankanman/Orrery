@@ -17,6 +17,12 @@ fn db_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("orrery").join("cache.sqlite"))
 }
 
+// Bump when a cached payload's shape changes so stale rows are dropped rather
+// than silently deserialized with defaulted fields. v2 added HostInfo.private —
+// older rows lack the key and would otherwise read back as `private: false`,
+// making private repos look public until the 6h TTL lapsed.
+const CACHE_SCHEMA: i64 = 2;
+
 fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
@@ -25,7 +31,25 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS embeddings (id TEXT PRIMARY KEY, vec TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-    )
+    )?;
+    migrate(conn)
+}
+
+/// Drop schema-sensitive cached payloads when CACHE_SCHEMA changes. Only
+/// host enrichment is version-sensitive today; favorites/AI cache are untouched.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let current: Option<i64> = conn
+        .query_row("SELECT value FROM meta WHERE key = 'cache_schema'", [], |r| r.get::<_, String>(0))
+        .ok()
+        .and_then(|s| s.parse().ok());
+    if current != Some(CACHE_SCHEMA) {
+        conn.execute("DELETE FROM host_cache", [])?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', ?1)",
+            [CACHE_SCHEMA.to_string()],
+        )?;
+    }
+    Ok(())
 }
 
 fn open() -> Result<Connection, String> {
@@ -332,6 +356,22 @@ mod tests {
     }
 
     #[test]
+    fn schema_bump_clears_host_cache() {
+        let conn = mem(); // init() sets cache_schema to the current version
+        store_host_info_on(&conn, "o/test", &HostInfo::default(), 1_000);
+        // Simulate an older schema, then migrate.
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', '1')", []).unwrap();
+        migrate(&conn).unwrap();
+        let rows: i64 = conn.query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "stale host_cache should be cleared on schema bump");
+        // Re-running is a no-op now that the version matches.
+        store_host_info_on(&conn, "o/test", &HostInfo::default(), 1_000);
+        migrate(&conn).unwrap();
+        let rows: i64 = conn.query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "matching schema must not clear the cache");
+    }
+
+    #[test]
     fn apply_host_info_rehydrates_repo_from_cache() {
         let conn = mem();
         let info = HostInfo {
@@ -368,8 +408,10 @@ mod tests {
         assert_eq!((summaries, embeddings), (1, 1));
         assert_eq!(conn.query_row("SELECT count(*) FROM ai_cache", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(conn.query_row("SELECT count(*) FROM embeddings", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        // unrelated meta is preserved
-        assert_eq!(conn.query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        // unrelated meta is preserved; embed_sig is removed
+        let keep: i64 = conn.query_row("SELECT count(*) FROM meta WHERE key = 'keep'", [], |r| r.get(0)).unwrap();
+        let sig: i64 = conn.query_row("SELECT count(*) FROM meta WHERE key = 'embed_sig:/a'", [], |r| r.get(0)).unwrap();
+        assert_eq!((keep, sig), (1, 0));
     }
 
     #[test]
