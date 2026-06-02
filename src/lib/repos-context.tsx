@@ -40,6 +40,8 @@ interface ReposContextValue {
   summarizeRepo: (repo: Repo) => void;
   /** Generate summaries for every repo that lacks one. */
   summarizeMissing: () => void;
+  /** Drop in-memory AI summaries (after clearing the cache) so the grid reflects it. */
+  clearSummaries: () => void;
   toggleFavorite: (repo: Repo) => void;
   openIde: (repo: Repo) => void;
   openAgent: (repo: Repo) => void;
@@ -270,6 +272,12 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   // Fill in summaries for every repo that lacks one (toolbar "Summarize all").
   const summarizeMissing = useCallback(() => summarizeAll(reposRef.current), [summarizeAll]);
 
+  // Drop in-memory summaries (paired with clearing the on-disk AI cache).
+  const clearSummaries = useCallback(() => {
+    summaryGen.current += 1; // cancel any in-flight batch so it can't repopulate
+    setRepos((prev) => prev.map((r) => (r.aiSummary ? { ...r, aiSummary: null } : r)));
+  }, []);
+
   const refreshAiStatus = useCallback(() => {
     if (isTauri()) ipc.aiStatus().then(setAiStatus).catch(() => {});
   }, []);
@@ -395,11 +403,12 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       fetchAll,
       summarizeRepo,
       summarizeMissing,
+      clearSummaries,
       toggleFavorite,
       openIde,
       openAgent,
     }),
-    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, toggleFavorite, openIde, openAgent],
+    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, clearSummaries, toggleFavorite, openIde, openAgent],
   );
 
   // Separate value so progress ticks (enrich/summarize batches) only re-render

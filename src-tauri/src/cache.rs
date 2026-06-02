@@ -215,6 +215,21 @@ pub fn set_meta(key: &str, value: &str) {
     }
 }
 
+fn clear_ai_on(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
+    let summaries = conn.execute("DELETE FROM ai_cache", [])?;
+    let embeddings = conn.execute("DELETE FROM embeddings", [])?;
+    // The per-repo embedding signatures that drive index-skip (see index_repos).
+    conn.execute("DELETE FROM meta WHERE key LIKE 'embed_sig:%'", [])?;
+    Ok((summaries, embeddings))
+}
+
+/// Clear cached AI summaries and embeddings (and their index-skip signatures).
+/// Returns the number of summaries and embeddings removed.
+pub fn clear_ai() -> Result<(usize, usize), String> {
+    let conn = open()?;
+    clear_ai_on(&conn).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +274,22 @@ mod tests {
         assert!(favs.contains("/a") && favs.contains("/b"));
         set_favorite_on(&conn, "/a", false).unwrap();
         assert!(!favorites_on(&conn).contains("/a"));
+    }
+
+    #[test]
+    fn clear_ai_removes_summaries_embeddings_and_sigs() {
+        let conn = mem();
+        conn.execute("INSERT INTO ai_cache (id, summary, last_commit) VALUES ('/a', 's', 1)", []).unwrap();
+        conn.execute("INSERT INTO embeddings (id, vec) VALUES ('/a', '[0.1]')", []).unwrap();
+        conn.execute("INSERT INTO meta (key, value) VALUES ('embed_sig:/a', 'x')", []).unwrap();
+        conn.execute("INSERT INTO meta (key, value) VALUES ('keep', 'me')", []).unwrap();
+
+        let (summaries, embeddings) = clear_ai_on(&conn).unwrap();
+        assert_eq!((summaries, embeddings), (1, 1));
+        assert_eq!(conn.query_row("SELECT count(*) FROM ai_cache", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(conn.query_row("SELECT count(*) FROM embeddings", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        // unrelated meta is preserved
+        assert_eq!(conn.query_row("SELECT count(*) FROM meta", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]

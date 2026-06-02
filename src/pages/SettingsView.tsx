@@ -31,7 +31,7 @@ interface PullState {
 }
 
 export function SettingsView() {
-  const { refresh, refreshAiStatus } = useRepos();
+  const { refresh, refreshAiStatus, clearSummaries } = useRepos();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -43,6 +43,7 @@ export function SettingsView() {
   const [aiTest, setAiTest] = useState<AiTest | null>(null);
   const [pulling, setPulling] = useState<PullState | null>(null);
   const [pullError, setPullError] = useState<string | null>(null);
+  const [cleared, setCleared] = useState<string | null>(null);
   const [reduceMotion, setReduceMotionState] = useState(reduceMotionEnabled);
 
   useEffect(() => {
@@ -190,6 +191,17 @@ export function SettingsView() {
       setAiTest({ chatOk: false, embedOk: false, ms: 0, error: String(e) });
     } finally {
       setAiTesting(false);
+    }
+  };
+
+  const clearAi = async () => {
+    setCleared(null);
+    try {
+      const r = await ipc.clearAiCache();
+      clearSummaries(); // drop in-memory summaries so the grid updates
+      setCleared(`Cleared ${r.summaries} summaries and ${r.embeddings} embeddings.`);
+    } catch (e) {
+      setCleared(`Couldn’t clear: ${e}`);
     }
   };
 
@@ -455,6 +467,16 @@ export function SettingsView() {
               Installed: {installedModels.join(", ") || "none — run `ollama pull <model>`"}
             </p>
             {pullError && <p className="text-xs text-danger">Pull failed: {pullError}</p>}
+
+            <div className="flex items-center gap-3 border-t border-border pt-3">
+              <Button variant="outline" size="sm" onClick={clearAi}>
+                <Trash2 className="size-4" /> Clear AI cache
+              </Button>
+              {cleared && <span className="text-xs text-muted-foreground">{cleared}</span>}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Summaries &amp; embeddings are cached in <code>~/.local/share/orrery/cache.sqlite</code>.
+            </p>
           </CardContent>
         </Card>
 

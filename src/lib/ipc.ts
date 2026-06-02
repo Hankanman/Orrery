@@ -114,6 +114,11 @@ export interface AiTest {
   error: string | null;
 }
 
+export interface ClearResult {
+  summaries: number;
+  embeddings: number;
+}
+
 export interface HostInfo {
   stars: number;
   topics: string[];
@@ -150,6 +155,7 @@ export const ipc = {
   aiStatus: () => invoke<AiStatus>("ai_status"),
   aiTest: () => invoke<AiTest>("ai_test"),
   pullModel: (model: string) => invoke<void>("pull_model", { model }),
+  clearAiCache: () => invoke<ClearResult>("clear_ai_cache"),
   summarizeRepo: (repo: Repo, refresh = false) => invoke<string>("summarize_repo", { repo, refresh }),
   fetchAll: (ids: string[]) => invoke<FetchOutcome[]>("fetch_all", { ids }),
   fetchRepo: (id: string) => invoke<GitStatus>("fetch_repo", { id }),

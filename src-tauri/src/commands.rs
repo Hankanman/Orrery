@@ -231,6 +231,20 @@ pub async fn ai_status() -> AiStatus {
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearResult {
+    pub summaries: usize,
+    pub embeddings: usize,
+}
+
+/// Clear cached AI summaries and embeddings from the SQLite cache.
+#[tauri::command]
+pub fn clear_ai_cache() -> Result<ClearResult, String> {
+    let (summaries, embeddings) = cache::clear_ai()?;
+    Ok(ClearResult { summaries, embeddings })
+}
+
 /// Pull an Ollama model, emitting `pull-progress` events ({model, status,
 /// percent}) so the UI can show a progress bar. Resolves when the pull finishes.
 #[tauri::command]

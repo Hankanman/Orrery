@@ -123,6 +123,7 @@ pub fn run() {
             commands::ai_status,
             commands::ai_test,
             commands::pull_model,
+            commands::clear_ai_cache,
             commands::summarize_repo,
             commands::fetch_all,
             commands::fetch_repo,
