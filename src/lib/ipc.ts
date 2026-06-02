@@ -145,4 +145,6 @@ export const ipc = {
   ciStatus: (slug: string) => invoke<CiStatus>("ci_status", { slug }),
   listStarred: () => invoke<RemoteRepo[]>("list_starred"),
   cloneRepo: (url: string, destRoot: string) => invoke<string>("clone_repo", { url, destRoot }),
+  activeAgents: () => invoke<string[]>("active_agents"),
+  notify: (title: string, body: string) => invoke<void>("notify", { title, body }),
 };

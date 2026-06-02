@@ -24,6 +24,8 @@ interface ReposContextValue {
   lastScan: number | null;
   /** A fetch-all is in flight. */
   fetching: boolean;
+  /** Repo ids with a running terminal-agent session. */
+  activeAgents: string[];
   refresh: () => void;
   /** Fetch every repo's origin and merge refreshed ahead/behind into the grid. */
   fetchAll: () => void;
@@ -41,6 +43,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<number | null>(null);
   const [fetching, setFetching] = useState(false);
+  const [activeAgents, setActiveAgents] = useState<string[]>([]);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
   // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
@@ -191,6 +194,10 @@ export function ReposProvider({ children }: { children: ReactNode }) {
             return o?.status ? { ...r, git: o.status } : r;
           }),
         );
+        const behind = outcomes.filter((o) => o.status && o.status.behind > 0).length;
+        if (behind > 0) {
+          ipc.notify("Orrery", `${behind} repo${behind === 1 ? "" : "s"} behind upstream after fetch`).catch(() => {});
+        }
       })
       .catch(() => {})
       .finally(() => setFetching(false));
@@ -252,10 +259,31 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     else console.log("[orrery] open in IDE:", repo.path);
   }, []);
 
-  const openAgent = useCallback((repo: Repo) => {
-    if (isTauri()) ipc.openAgent(repo.id).catch((e) => console.error("[orrery] open agent failed:", e));
-    else console.log("[orrery] start agent:", repo.path);
+  const refreshAgents = useCallback(() => {
+    if (isTauri()) ipc.activeAgents().then(setActiveAgents).catch(() => {});
   }, []);
+
+  const openAgent = useCallback(
+    (repo: Repo) => {
+      if (!isTauri()) {
+        console.log("[orrery] start agent:", repo.path);
+        return;
+      }
+      ipc
+        .openAgent(repo.id)
+        .then(() => refreshAgents())
+        .catch((e) => console.error("[orrery] open agent failed:", e));
+    },
+    [refreshAgents],
+  );
+
+  // Poll active agent sessions so badges clear when an agent exits.
+  useEffect(() => {
+    if (!isTauri()) return;
+    refreshAgents();
+    const handle = setInterval(refreshAgents, 10_000);
+    return () => clearInterval(handle);
+  }, [refreshAgents]);
 
   const value = useMemo<ReposContextValue>(
     () => ({
@@ -265,13 +293,14 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       error,
       lastScan,
       fetching,
+      activeAgents,
       refresh,
       fetchAll,
       toggleFavorite,
       openIde,
       openAgent,
     }),
-    [repos, loading, ready, error, lastScan, fetching, refresh, fetchAll, toggleFavorite, openIde, openAgent],
+    [repos, loading, ready, error, lastScan, fetching, activeAgents, refresh, fetchAll, toggleFavorite, openIde, openAgent],
   );
 
   return <ReposContext.Provider value={value}>{children}</ReposContext.Provider>;

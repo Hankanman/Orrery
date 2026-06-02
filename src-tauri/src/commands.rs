@@ -64,9 +64,46 @@ pub fn open_in_ide(id: String) -> Result<(), String> {
     launch::launch(&config::load().ide_command, &id)
 }
 
+/// Tracks live terminal-agent child processes, keyed by repo id (#51).
+#[derive(Default)]
+pub struct AgentSessions(pub std::sync::Mutex<std::collections::HashMap<String, std::process::Child>>);
+
 #[tauri::command]
-pub fn open_agent(id: String) -> Result<(), String> {
-    launch::launch(&config::load().agent_command, &id)
+pub fn open_agent(id: String, sessions: tauri::State<AgentSessions>) -> Result<(), String> {
+    let child = launch::spawn(&config::load().agent_command, &id)?;
+    if let Ok(mut map) = sessions.0.lock() {
+        map.insert(id, child); // replaces any prior (finished) session for this repo
+    }
+    Ok(())
+}
+
+/// Repo ids with a currently-running agent session (reaps exited ones).
+#[tauri::command]
+pub fn active_agents(sessions: tauri::State<AgentSessions>) -> Vec<String> {
+    let Ok(mut map) = sessions.0.lock() else {
+        return Vec::new();
+    };
+    let mut alive = Vec::new();
+    map.retain(|id, child| match child.try_wait() {
+        Ok(None) => {
+            alive.push(id.clone());
+            true
+        }
+        _ => false, // exited or unwaitable → forget it
+    });
+    alive
+}
+
+/// Send a native desktop notification (#50).
+#[tauri::command]
+pub fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 /// Fetch host enrichment (stars/topics/issues/release) for a repo, cached for

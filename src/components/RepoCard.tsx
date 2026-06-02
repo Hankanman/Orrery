@@ -21,6 +21,7 @@ export type RepoView = "grid" | "list";
 interface RepoCardProps {
   repo: Repo;
   view?: RepoView;
+  agentActive?: boolean;
   onOpen?: (repo: Repo) => void;
   onToggleFavorite?: (repo: Repo) => void;
   onOpenIde?: (repo: Repo) => void;
@@ -63,6 +64,7 @@ function StatusRow({ repo }: { repo: Repo }) {
 export function RepoCard({
   repo,
   view = "grid",
+  agentActive,
   onOpen,
   onToggleFavorite,
   onOpenIde,
@@ -105,6 +107,9 @@ export function RepoCard({
             style={{ background: languageColor(repo.language), color: languageColor(repo.language) }}
           />
           <span className="nm">{repo.displayName}</span>
+          {agentActive && (
+            <SquareTerminal className="size-3.5 shrink-0 animate-pulse text-primary" aria-label="Agent session running" />
+          )}
         </div>
         {view === "grid" ? (
           <button

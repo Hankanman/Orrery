@@ -1,16 +1,13 @@
 //! Spawn external programs from `{path}`-templated command strings (IDE /
 //! terminal coding agent). Children are launched detached from the UI.
 
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
-/// Substitute `{path}` into the template, spawn the program in `path`, and
-/// return immediately. Each whitespace-separated token is substituted, so both
-/// `code {path}` and `term --working-directory={path} -- claude` work.
-pub fn launch(template: &str, path: &str) -> Result<(), String> {
-    let mut tokens = template
-        .split_whitespace()
-        .map(|t| t.replace("{path}", path));
-
+/// Substitute `{path}` into the template and spawn the program detached in
+/// `path`, returning the child handle. Each whitespace-separated token is
+/// substituted, so both `code {path}` and `term --cwd={path} -- claude` work.
+pub fn spawn(template: &str, path: &str) -> Result<Child, String> {
+    let mut tokens = template.split_whitespace().map(|t| t.replace("{path}", path));
     let program = tokens.next().ok_or("empty command template")?;
     let args: Vec<String> = tokens.collect();
 
@@ -21,6 +18,10 @@ pub fn launch(template: &str, path: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("failed to launch `{program}`: {e}"))?;
-    Ok(())
+        .map_err(|e| format!("failed to launch `{program}`: {e}"))
+}
+
+/// Fire-and-forget launch (IDE etc.).
+pub fn launch(template: &str, path: &str) -> Result<(), String> {
+    spawn(template, path).map(|_| ())
 }

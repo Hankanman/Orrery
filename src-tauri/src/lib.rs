@@ -1,15 +1,18 @@
 mod ai;
 mod appearance;
 mod cache;
+mod cli;
 mod commands;
 mod config;
 mod forge;
 mod git_ops;
 mod inbox;
+mod krunner;
 mod launch;
 mod model;
 mod oauth;
 mod scan;
+mod tray;
 mod watcher;
 
 /// Configure display/rendering environment on Linux before GTK/WebKit init.
@@ -47,11 +50,37 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     configure_linux_env();
 
+    // Headless CLI subcommands (orrery list/open/…) — handle and exit.
+    if cli::maybe_run() {
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        if let Some(w) = tauri::Manager::get_webview_window(app, "main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                })
+                .build(),
+        )
+        .manage(commands::AgentSessions::default())
         .setup(|app| {
             appearance::spawn_watcher(app.handle().clone());
             watcher::spawn(app.handle().clone());
+            krunner::spawn();
+            let _ = tray::build(app.handle());
+            // Global hotkey to summon Orrery (best-effort — may be unavailable
+            // on native Wayland without a portal).
+            use tauri_plugin_global_shortcut::GlobalShortcutExt;
+            let _ = app.global_shortcut().register("CommandOrControl+Alt+O");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -92,7 +121,9 @@ pub fn run() {
             commands::get_notifications,
             commands::ci_status,
             commands::list_starred,
-            commands::clone_repo
+            commands::clone_repo,
+            commands::active_agents,
+            commands::notify
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
