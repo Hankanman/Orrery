@@ -428,6 +428,22 @@
       opacity: 1;
     }
   }
+
+  /* ---- Repo detail drawer: slide in from the right, scrim fades ---- */
+  .orr-drawer-scrim {
+    animation: orr-fade-in var(--dur-base) var(--ease-out);
+  }
+  .orr-drawer-panel {
+    animation: orr-drawer-in var(--dur-base) var(--ease-out);
+  }
+  @keyframes orr-drawer-in {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
   .orr-brand {
     display: flex;
     align-items: center;
@@ -1099,6 +1115,8 @@
   .orr-contrib,
   .orr-briefing,
   .orr-activity,
+  .orr-drawer-scrim,
+  .orr-drawer-panel,
   .orr-spinner .sat {
     animation: none;
   }

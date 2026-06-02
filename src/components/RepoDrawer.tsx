@@ -150,11 +150,8 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
 
   return (
     <div className="fixed inset-0 z-30" role="dialog" aria-modal="true">
-      <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-[1px] animate-in fade-in-0 duration-200"
-        onClick={onClose}
-      />
-      <aside className="absolute right-0 top-0 flex h-full w-full max-w-[560px] flex-col border-l border-border bg-card shadow-2xl animate-in slide-in-from-right-4 fade-in-0 duration-200 ease-out">
+      <div className="orr-drawer-scrim absolute inset-0 bg-black/40 backdrop-blur-[1px]" onClick={onClose} />
+      <aside className="orr-drawer-panel absolute right-0 top-0 flex h-full w-full max-w-[560px] flex-col border-l border-border bg-card shadow-2xl">
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-border/70 p-4">
           <div className="min-w-0 flex-1">
