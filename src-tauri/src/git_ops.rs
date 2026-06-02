@@ -303,13 +303,29 @@ pub fn staged_diff(path: &str) -> Result<String, String> {
 /// Commit the currently-staged changes with `message`. Returns the short hash.
 pub fn commit(path: &str, message: &str) -> Result<String, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
+
+    // Refuse to commit on a detached HEAD — it would orphan the commit.
+    if let Ok(head) = repo.head() {
+        if !head.is_branch() {
+            return Err("HEAD is detached — check out a branch before committing".into());
+        }
+    }
+
     let mut index = repo.index().map_err(|e| e.to_string())?;
     let tree_id = index.write_tree().map_err(|e| e.to_string())?;
     let tree = repo.find_tree(tree_id).map_err(|e| e.to_string())?;
+    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+
+    // Nothing staged → the tree equals the parent's; don't create an empty commit.
+    if let Some(p) = &parent {
+        if p.tree_id() == tree_id {
+            return Err("no staged changes to commit".into());
+        }
+    }
+
     let sig = repo
         .signature()
         .map_err(|_| "set git user.name and user.email first".to_string())?;
-    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
     let parents: Vec<&git2::Commit> = parent.iter().collect();
     let oid = repo
         .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)

@@ -79,6 +79,7 @@ pub fn run() {
             commands::remove_worktree,
             commands::repo_log,
             commands::repo_diff,
+            commands::repo_staged_diff,
             commands::repo_readme,
             commands::generate_commit_message,
             commands::commit_staged,

@@ -35,16 +35,21 @@ export function CommandPalette({
       setMatches([]);
       return;
     }
+    let cancelled = false;
     const handle = setTimeout(async () => {
       try {
         const hits = await ipc.semanticSearch(query);
+        if (cancelled) return; // a newer query superseded this one
         const byId = new Map(repos.map((r) => [r.id, r]));
         setMatches(hits.map((h) => byId.get(h.id)).filter((r): r is Repo => Boolean(r)).slice(0, 5));
       } catch {
-        setMatches([]);
+        if (!cancelled) setMatches([]);
       }
     }, 250);
-    return () => clearTimeout(handle);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
   }, [query, repos]);
 
   const run = (fn: () => void) => {

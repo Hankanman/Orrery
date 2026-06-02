@@ -102,6 +102,7 @@ export const ipc = {
   removeWorktree: (id: string, name: string) => invoke<void>("remove_worktree", { id, name }),
   repoLog: (id: string, limit = 20) => invoke<CommitInfo[]>("repo_log", { id, limit }),
   repoDiff: (id: string) => invoke<string>("repo_diff", { id }),
+  repoStagedDiff: (id: string) => invoke<string>("repo_staged_diff", { id }),
   repoReadme: (id: string) => invoke<string | null>("repo_readme", { id }),
   generateCommitMessage: (id: string) => invoke<string>("generate_commit_message", { id }),
   commitStaged: (id: string, message: string) => invoke<string>("commit_staged", { id, message }),

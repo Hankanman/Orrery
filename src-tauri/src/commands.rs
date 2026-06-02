@@ -246,6 +246,12 @@ pub fn repo_diff(id: String) -> Result<String, String> {
     git_ops::working_diff(&id)
 }
 
+/// Staged diff (index vs HEAD) — exactly what a commit would record.
+#[tauri::command]
+pub fn repo_staged_diff(id: String) -> Result<String, String> {
+    git_ops::staged_diff(&id)
+}
+
 /// Raw README markdown for the detail drawer.
 #[tauri::command]
 pub fn repo_readme(id: String) -> Option<String> {
@@ -309,18 +315,30 @@ pub async fn generate_changelog(id: String, limit: usize) -> Result<String, Stri
 pub async fn index_repos(repos: Vec<Repo>) -> usize {
     let model = config::load().embed_model;
     let mut count = 0usize;
-    for repo in &repos {
-        let text = format!(
-            "{} {} {} {}",
-            repo.display_name,
-            repo.slug.as_deref().unwrap_or(""),
-            repo.language.as_deref().unwrap_or(""),
-            repo.description.as_deref().unwrap_or("")
-        );
-        if let Ok(vec) = ai::embed(&model, &text).await {
-            cache::store_embedding(&repo.id, &vec);
-            count += 1;
-        }
+    // Embed in small concurrent batches rather than one-at-a-time.
+    for chunk in repos.chunks(6) {
+        let done = futures_util::future::join_all(chunk.iter().map(|repo| {
+            let model = model.clone();
+            let id = repo.id.clone();
+            let text = format!(
+                "{} {} {} {}",
+                repo.display_name,
+                repo.slug.as_deref().unwrap_or(""),
+                repo.language.as_deref().unwrap_or(""),
+                repo.description.as_deref().unwrap_or("")
+            );
+            async move {
+                match ai::embed(&model, &text).await {
+                    Ok(vec) => {
+                        cache::store_embedding(&id, &vec);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+        }))
+        .await;
+        count += done.into_iter().filter(|x| *x).count();
     }
     count
 }
@@ -360,19 +378,19 @@ pub struct Briefing {
 /// A short AI digest of what changed across repos since the last visit (#40).
 #[tauri::command]
 pub async fn daily_briefing(repos: Vec<Repo>) -> Result<Briefing, String> {
-    let since: i64 = cache::get_meta("last_open").and_then(|s| s.parse().ok()).unwrap_or(0);
     let now = now_unix();
+    // First run (no stored timestamp): look back a week rather than dumping
+    // every repo ever touched.
+    let since = cache::get_meta("last_open")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(now - 7 * 24 * 3600);
 
-    let mut recent: Vec<&Repo> = repos
-        .iter()
-        .filter(|r| since == 0 || r.last_commit_unix > since)
-        .collect();
+    let mut recent: Vec<&Repo> = repos.iter().filter(|r| r.last_commit_unix > since).collect();
     recent.sort_by(|a, b| b.last_commit_unix.cmp(&a.last_commit_unix));
     recent.truncate(12);
 
-    cache::set_meta("last_open", &now.to_string());
-
     if recent.is_empty() {
+        cache::set_meta("last_open", &now.to_string());
         return Ok(Briefing { text: "Nothing new since your last visit.".into(), repo_count: 0 });
     }
 
@@ -392,5 +410,7 @@ pub async fn daily_briefing(repos: Vec<Repo>) -> Result<Briefing, String> {
     let count = lines.len();
     let model = resolve_ai_model().await?;
     let text = ai::generate(&model, &ai::briefing_prompt(&lines)).await?;
+    // Only advance the window once we've actually produced a briefing.
+    cache::set_meta("last_open", &now.to_string());
     Ok(Briefing { text, repo_count: count })
 }

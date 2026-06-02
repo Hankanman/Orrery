@@ -42,7 +42,7 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
     ipc.listBranches(id).then((b) => alive && setBranches(b)).catch(() => {});
     ipc.listWorktrees(id).then((w) => alive && setWorktrees(w)).catch(() => {});
     ipc.repoLog(id, 15).then((l) => alive && setLog(l)).catch(() => {});
-    ipc.repoDiff(id).then((d) => alive && setDiff(d)).catch(() => {});
+    ipc.repoStagedDiff(id).then((d) => alive && setDiff(d)).catch(() => {});
     ipc.repoReadme(id).then((r) => alive && setReadme(r)).catch(() => {});
     return () => {
       alive = false;
@@ -124,7 +124,7 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
     try {
       await ipc.commitStaged(id, commitMsg);
       setCommitMsg("");
-      setDiff(await ipc.repoDiff(id).catch(() => ""));
+      setDiff(await ipc.repoStagedDiff(id).catch(() => ""));
       await reload();
     } catch (e) {
       setError(String(e));
@@ -306,7 +306,7 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
                   {diff}
                 </pre>
               ) : (
-                <p className="text-sm text-muted-foreground">Working tree is clean.</p>
+                <p className="text-sm text-muted-foreground">Nothing staged — `git add` changes to stage them.</p>
               )}
             </div>
           )}
