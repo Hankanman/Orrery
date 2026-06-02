@@ -110,7 +110,12 @@ help:
 
 The CSS also drops CPU-bound effects (backdrop-filter blur, fixed backgrounds,
 large shadow repaints) inside the webview only — the `pnpm dev` browser build
-keeps the full glass.
+keeps the full glass. There's also a **Settings → Motion → Reduce motion**
+toggle to disable animations entirely.
+
+The full investigation — every acceleration path we tried, what failed and why,
+what ships, and a re-test matrix for when WebKitGTK/NVIDIA update — is in
+[docs/rendering-performance.md](docs/rendering-performance.md).
 
 ## License
 
