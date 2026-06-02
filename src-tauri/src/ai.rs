@@ -55,14 +55,23 @@ pub async fn installed_models() -> Vec<(String, u64)> {
     }
 }
 
-/// Choose the model to use: the preferred one if installed, otherwise the
-/// smallest installed model (fastest for short summaries). Pure for testing.
+/// Heuristic: is this an embedding-only model? Such models reject `/api/generate`
+/// (Ollama 400), so they must never be picked as a chat fallback.
+pub fn is_embedding_model(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("embed") || n.contains("minilm") || n.starts_with("bge") || n.contains("/bge")
+}
+
+/// Choose the chat model: the preferred one if installed, otherwise the smallest
+/// installed model that can actually generate (embedding models are excluded —
+/// picking one would 400 on /api/generate). Pure for testing.
 pub fn pick_model(preferred: &str, available: &[(String, u64)]) -> Option<String> {
     if available.iter().any(|(name, _)| name == preferred) {
         return Some(preferred.to_string());
     }
     available
         .iter()
+        .filter(|(name, _)| !is_embedding_model(name))
         .min_by_key(|(_, size)| *size)
         .map(|(name, _)| name.clone())
 }
@@ -130,10 +139,27 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Ollama API {}", resp.status()));
+        return Err(ollama_error(resp).await);
     }
     let parsed: GenResp = resp.json().await.map_err(|e| e.to_string())?;
     Ok(parsed.response.trim().to_string())
+}
+
+/// Build a readable error from a non-2xx Ollama response, surfacing its
+/// `{"error": "..."}` body (e.g. "… does not support generate") instead of a
+/// bare status code.
+async fn ollama_error(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_else(|| body.trim().to_string());
+    if detail.is_empty() {
+        format!("Ollama API {status}")
+    } else {
+        format!("Ollama API {status}: {detail}")
+    }
 }
 
 /// Embed `text` with an embedding model via Ollama (`/api/embed`).
@@ -151,7 +177,7 @@ pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Ollama embed {}", resp.status()));
+        return Err(ollama_error(resp).await);
     }
     let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
     parsed
@@ -252,6 +278,24 @@ mod tests {
         // preferred absent → smallest
         assert_eq!(pick_model("missing", &avail).as_deref(), Some("small:1b"));
         assert_eq!(pick_model("x", &[]), None);
+    }
+
+    #[test]
+    fn pick_model_skips_embedding_models_in_fallback() {
+        // nomic-embed-text is the smallest, but it can't generate — must be
+        // skipped so the chat fallback never 400s on /api/generate.
+        let avail = vec![
+            ("nomic-embed-text".to_string(), 270),
+            ("gemma:2b".to_string(), 1_600),
+            ("qwen:9b".to_string(), 9_000),
+        ];
+        assert_eq!(pick_model("missing", &avail).as_deref(), Some("gemma:2b"));
+        // A preferred embedding model is still honoured if explicitly chosen.
+        assert_eq!(pick_model("nomic-embed-text", &avail).as_deref(), Some("nomic-embed-text"));
+        // Only embedding models installed → no chat model.
+        assert_eq!(pick_model("x", &[("all-minilm".to_string(), 50)]), None);
+        assert!(is_embedding_model("nomic-embed-text"));
+        assert!(!is_embedding_model("gemma:2b"));
     }
 
     #[test]
