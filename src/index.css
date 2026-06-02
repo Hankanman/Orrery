@@ -191,11 +191,13 @@
 
 /* ============================================================================
    ORRERY DESIGN SYSTEM
-   Structure & anatomy from the Claude Design "Orrery" system (mission-control,
-   glass + blur, tight radii, neon accent). Adapted to the app's ADAPTIVE theme:
-   the primary/orbit accent follows the system accent (--primary); amber (host
-   stars), violet (AI) and the status/language hues are fixed semantics. Tokens
-   are namespaced --orr-* so they coexist with the shadcn tokens above.
+   Mission-control look, but FLAT: solid surfaces, hairline borders, subtle
+   elevation shadows — no backdrop blur, gradients, or glows (a hard perf
+   constraint for CPU-bound WebKitGTK; see docs/design-system/README.md §1).
+   Adapted to the app's ADAPTIVE theme: the primary/orbit accent follows the
+   system accent (--primary); amber (host stars), violet (AI) and the
+   status/language hues are fixed semantics. Tokens are namespaced --orr-* so
+   they coexist with the shadcn tokens above.
    ========================================================================== */
 :root {
   /* Fixed semantic hues — meaning-bearing, identical in light & dark */

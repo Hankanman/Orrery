@@ -14,20 +14,28 @@ The brand mark lives at [`assets/orbit-mark.svg`](assets/orbit-mark.svg).
 
 ## 1. Philosophy
 
-Orrery looks like a piece of instrumentation: deep surfaces, glass panels, tight
-radii, a single bright accent, and meaning-bearing colour for git/host/AI state.
-But it is **adaptive, not dark-only** — the app mirrors the desktop it runs on.
+Orrery looks like a piece of instrumentation: deep flat surfaces, hairline
+borders, tight radii, a single bright accent, and meaning-bearing colour for
+git/host/AI state. It is **adaptive, not dark-only** — the app mirrors the
+desktop it runs on.
 
-Three principles, in priority order:
+Four principles, in priority order:
 
 1. **Native first.** Light or dark, accent colour, and (on KDE) the actual window
    surface colours come from the OS. The app should never look out of place next
    to Dolphin or Discover.
-2. **Structure is branded, colour adapts.** The layout, glass/elevation ramp,
-   radii, motion and the *semantic* hues (git status, host star, AI) are
-   Orrery's identity and stay constant. The neutral palette and the primary
-   accent follow the system.
-3. **Dense but legible.** 4–5 cards per row, a fixed-width type scale, mono for
+2. **Flat by design — performance is a feature.** No `backdrop-filter` blur, no
+   gradient washes, no glows. Surfaces are solid (or a flat translucent fill) and
+   separated by borders + a subtle elevation shadow. This isn't only an
+   aesthetic: the app ships in **WebKitGTK**, which composites blur/gradients on
+   the **CPU** (badly, especially on NVIDIA — see
+   [docs/rendering-performance.md](../rendering-performance.md)). A flat UI is
+   *much* smoother in the webview, and looks identical in a browser. **Do not
+   reintroduce glassmorphism.**
+3. **Structure is branded, colour adapts.** The layout, elevation, radii, motion
+   and the *semantic* hues (git status, host star, AI) are Orrery's identity and
+   stay constant. The neutral palette and the primary accent follow the system.
+4. **Dense but legible.** 4–5 cards per row, a fixed-width type scale, mono for
    data. Information per pixel is high; nothing is cramped.
 
 ---
@@ -123,17 +131,22 @@ A four-step text ramp, used for primary text → captions → disabled.
 | `--orr-fg-2` | `#6c778c` | captions, metadata |
 | `--orr-fg-3` | `#434e63` | disabled, faint icons |
 
-### 3.3 Glass & elevation (`--orr-*`)
-The mission-control look: translucent panels over the deep background, lifted
-with blur + shadow rather than hard fills.
+### 3.3 Surfaces & elevation (`--orr-*`)
+Flat panels separated by hairline borders and a subtle elevation shadow — **no
+blur**. The `--orr-glass*` fills are now just flat (slightly translucent) tints
+over a solid background, not backdrop-blurred glass.
 
 - `--orr-glass` / `--orr-glass-hover` / `--orr-glass-2` — panel fills (dark: low
   white alphas `0.035 / 0.06 / 0.085`).
 - `--orr-border` / `--orr-border-strong` — hairlines (white alphas `0.075 / 0.14`).
-- `--orr-shadow-2/3/-pop` — elevation ramp (card → drawer → popover).
-- `--orr-blur: 18px` — backdrop blur for glass.
+- `--orr-shadow-2/3/-pop` — elevation ramp (card → drawer → popover). This is the
+  *only* form of depth we use.
 - `--orr-inset-top` — 1px top highlight that gives panels a "lit edge".
-- `--orr-scrim` — modal/drawer backdrop.
+- `--orr-scrim` — modal/drawer backdrop (a flat dark wash, no blur).
+
+> Header and sidebar use **solid** `--background`. `--orr-blur` and the `*-glow`
+> tokens still exist but are **unused** — kept only so the values are documented;
+> don't wire them back into `backdrop-filter`, gradients, or shadows.
 
 ### 3.4 Semantic hues — **fixed, meaning-bearing**
 These do **not** follow the OS; their meaning is the point. Values are tuned per
@@ -147,7 +160,9 @@ mode (richer in light, neon in dark).
 | `--orr-star` | host stars / favourites | `#ffc24b` | `#f5a623` |
 | `--orr-ai` | AI features | `#a78bfa` | `#8b5cf6` |
 
-Each star/ai token has a matching `*-glow` for soft halos.
+The matching `*-glow` tokens are retained but no longer painted as halos (flat
+design). Use the solid hue for icons/text; the only remaining use of a `*-glow`
+value is a flat low-alpha hover *tint* on a couple of buttons.
 
 ### 3.5 Language dots (`--lang-*`)
 GitHub-linguist colours for ~17 common languages, plus `--lang-default`. Resolved
@@ -190,8 +205,12 @@ slugs) is **mono**. Prose is sans.
 - `--ease-out cubic-bezier(.16,1,.3,1)` for entrances/hovers
 - `--ease-spring cubic-bezier(.34,1.56,.64,1)` for lifts/pops
 
-Cards lift slightly and gain an accent glow on hover; the background carries two
-faint radial accent washes (`--primary` / `--accent`, fixed-attachment) for depth.
+Cards lift slightly on hover (transform only) and brighten their border + fill —
+no glow. Backgrounds are flat: no radial washes, no starfield. Entrance
+animations (the launch "build", card stagger, drawer slide) use transform +
+opacity only, so there's no layout shift and nothing for the CPU compositor to
+choke on. All motion respects `prefers-reduced-motion` and the in-app
+**Settings → Motion → Reduce motion** toggle.
 
 ---
 
@@ -201,8 +220,10 @@ Implemented as `.orr-*` classes in the `@layer components` block of
 `src/index.css`. Catalog (class → what it is):
 
 **Layout**
-- `.orr-body` — sidebar + main split
-- `.orr-sidebar`, `.orr-sb-sec`, `.orr-sb-lead`, `.orr-sb-item`, `.orr-sb-foot` — nav rail
+- `.orr-body` — persistent sidebar + main split (lives in `AppShell`)
+- `.orr-sidebar` — persistent rail: fixed primary nav (`.orr-sb-sec` of
+  `.orr-sb-item`) on top, a per-screen `.orr-sb-slot` below (filled via
+  `useSidebarSlot`, see `src/lib/sidebar-slot.tsx`), `.orr-sb-foot` at the bottom
 - `.orr-main`, `.orr-header`, `.orr-toolbar`, `.orr-brand`, `.orr-mark` — top chrome
 - `.orr-grid` — responsive repo grid
 
@@ -225,7 +246,8 @@ Implemented as `.orr-*` classes in the `@layer components` block of
 - `.orr-briefing` — AI daily briefing banner
 - `.orr-md` — rendered markdown (READMEs, AI output)
 - `.orr-empty`, `.orr-skel` / `.orr-skel-line` — empty & loading states
-- `.orr-starfield` — ambient background
+- `.orr-spinner` — brand loading spinner (flat orbit mark)
+- `.orr-progress` / `.orr-activity` — scan/activity indicator (header)
 - `.orr-card-ai`, `.orr-mark` — AI/brand accents
 
 shadcn/ui primitives (new-york) are used for dialogs, drawers, command palette
@@ -240,12 +262,14 @@ shadcn/ui primitives (new-york) are used for dialogs, drawers, command palette
 - **Both themes, always.** Every new surface must look right in light *and* dark —
   test by toggling the OS theme (the app follows live).
 - **Mono for data, sans for prose.**
+- **Flat, always.** No `backdrop-filter`, no `radial`/`linear-gradient`
+  backgrounds, no glow `box-shadow`/`drop-shadow`. Define surfaces with borders +
+  a subtle elevation shadow. This is both the look and a hard performance
+  constraint (CPU-bound WebKitGTK) — see Philosophy #2.
 - **Density over decoration.** Prefer a tighter radius and a hairline border to a
-  heavy fill. Lift with glass + shadow, not with bright backgrounds.
+  heavy fill. Lift with a transform on hover, not with bright backgrounds.
 - **Semantics are sacred.** Green = clean, amber = dirty/ahead, red = behind,
   gold = stars, violet = AI. Don't repurpose them.
-- **Glow sparingly.** Accent glow signals interactivity (hover) or AI; it is not
-  decoration.
 
 ---
 
