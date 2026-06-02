@@ -6,6 +6,8 @@
 
 A Linux-native command center that puts every repo in your dev directories into orbit — live git status at a glance, one-click launch into your IDE or a terminal coding agent, enriched with multi-host data and local-AI summaries.
 
+📖 **[Documentation & feature tour →](https://hankanman.github.io/Orrery/)**
+
 </div>
 
 ---
