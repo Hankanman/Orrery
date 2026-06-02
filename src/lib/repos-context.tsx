@@ -11,6 +11,7 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc, isTauri, type AiStatus } from "@/lib/ipc";
+import { detectAgent, detectIde } from "@/lib/launchers";
 import { MOCK_REPOS } from "@/lib/mock-repos";
 import type { Repo } from "@/types";
 
@@ -46,6 +47,12 @@ interface ReposContextValue {
   toggleFavorite: (repo: Repo) => void;
   openIde: (repo: Repo) => void;
   openAgent: (repo: Repo) => void;
+  /** Brand id of the configured IDE (for the card button logo), or "". */
+  ideBrand: string;
+  /** Brand id of the configured terminal agent, or "". */
+  agentBrand: string;
+  /** Re-read launcher config (call after saving settings). */
+  refreshLaunchers: () => void;
   /** Reveal the repo's folder in the system file manager. */
   openFolder: (repo: Repo) => void;
   /** Open the repo on its remote host (GitHub/GitLab) in the browser. */
@@ -82,6 +89,8 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   // Repo ids with an on-demand summary in flight (drives the per-card spinner).
   const [summarizing, setSummarizing] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [ideBrand, setIdeBrand] = useState("");
+  const [agentBrand, setAgentBrand] = useState("");
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
   // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
@@ -287,6 +296,23 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     if (isTauri()) ipc.aiStatus().then(setAiStatus).catch(() => {});
   }, []);
 
+  // Resolve the configured IDE/agent to a brand id so cards can show its logo.
+  const refreshLaunchers = useCallback(() => {
+    if (!isTauri()) return;
+    ipc
+      .getConfig()
+      .then((c) => {
+        const ide = detectIde(c.ideCommand);
+        setIdeBrand(ide ? ide.brand ?? ide.id : "");
+        setAgentBrand(detectAgent(c.agentCommand)?.id ?? "");
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshLaunchers();
+  }, [refreshLaunchers]);
+
   // AI is usable when it's enabled, Ollama is reachable, and a chat model
   // resolved. Everything AI-related in the UI is hidden unless this holds.
   const aiReady = !!aiStatus && aiStatus.enabled && aiStatus.reachable && !!aiStatus.model;
@@ -427,8 +453,11 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       openAgent,
       openFolder,
       openHost,
+      ideBrand,
+      agentBrand,
+      refreshLaunchers,
     }),
-    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, clearSummaries, toggleFavorite, openIde, openAgent, openFolder, openHost],
+    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, clearSummaries, toggleFavorite, openIde, openAgent, openFolder, openHost, ideBrand, agentBrand, refreshLaunchers],
   );
 
   // Separate value so progress ticks (enrich/summarize batches) only re-render

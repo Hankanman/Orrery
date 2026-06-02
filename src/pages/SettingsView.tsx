@@ -53,7 +53,7 @@ const SETTINGS_SECTIONS = [
 type SectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 
 export function SettingsView() {
-  const { refresh, refreshAiStatus, clearSummaries } = useRepos();
+  const { refresh, refreshAiStatus, refreshLaunchers, clearSummaries } = useRepos();
   const [section, setSection] = useState<SectionId>(SETTINGS_SECTIONS[0].id);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [saved, setSaved] = useState(false);
@@ -213,6 +213,7 @@ export function SettingsView() {
       setSaved(true);
       refresh();
       refreshAiStatus(); // app-wide AI availability may have changed
+      refreshLaunchers(); // card buttons reflect the new IDE/agent logos
 
     } catch (e) {
       setSaved(false);

@@ -4,7 +4,6 @@ import {
   ArrowUp,
   CircleDot,
   Clock,
-  Code,
   ExternalLink,
   FolderOpen,
   GitBranch,
@@ -16,6 +15,7 @@ import {
 } from "lucide-react";
 import type { Repo } from "@/types";
 import { formatStars, languageColor, timeAgo } from "@/lib/format";
+import { BrandIcon } from "@/components/BrandIcon";
 import { HostIcon } from "@/components/HostIcon";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +33,10 @@ interface RepoCardProps {
   onOpenAgent?: (repo: Repo) => void;
   onOpenFolder?: (repo: Repo) => void;
   onOpenHost?: (repo: Repo) => void;
+  /** Brand id of the configured IDE — shows its logo on the IDE button. */
+  ideBrand?: string;
+  /** Brand id of the configured terminal agent. */
+  agentBrand?: string;
   /** Generate/regenerate this repo's AI summary. */
   onSummarize?: (repo: Repo) => void;
 }
@@ -77,6 +81,8 @@ function RepoCardImpl({
   onOpenAgent,
   onOpenFolder,
   onOpenHost,
+  ideBrand,
+  agentBrand,
   onSummarize,
 }: RepoCardProps) {
 
@@ -90,7 +96,7 @@ function RepoCardImpl({
           onOpenIde?.(repo);
         }}
       >
-        <Code className="size-3.5" />
+        <BrandIcon brand={ideBrand ?? ""} category="ide" />
         {view === "grid" ? "Open in IDE" : "IDE"}
       </button>
       <button
@@ -101,7 +107,7 @@ function RepoCardImpl({
           onOpenAgent?.(repo);
         }}
       >
-        <SquareTerminal className="size-3.5" />
+        <BrandIcon brand={agentBrand ?? ""} category="agent" />
         Agent
       </button>
       <button

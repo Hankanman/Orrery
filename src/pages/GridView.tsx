@@ -82,6 +82,8 @@ export function GridView() {
     openAgent,
     openFolder,
     openHost,
+    ideBrand,
+    agentBrand,
   } = useRepos();
 
   const [activeRoot, setActiveRoot] = useState("all");
@@ -311,6 +313,8 @@ export function GridView() {
             onOpenAgent={openAgent}
             onOpenFolder={openFolder}
             onOpenHost={openHost}
+            ideBrand={ideBrand}
+            agentBrand={agentBrand}
             onSummarize={summarizeRepo}
           />
         )}
