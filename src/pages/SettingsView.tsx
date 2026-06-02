@@ -5,6 +5,7 @@ import { ipc, isTauri, type AiStatus, type AiTest, type AppConfig, type DeviceSt
 import { reduceMotionEnabled, setReduceMotion } from "@/lib/motion";
 import { useRepos } from "@/lib/repos-context";
 import { useSidebarSlot } from "@/lib/sidebar-slot";
+import { cn } from "@/lib/utils";
 import { HostIcon } from "@/components/HostIcon";
 import { ModelSelect } from "@/components/ModelSelect";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,8 +40,11 @@ const SETTINGS_SECTIONS = [
   { id: "set-motion", label: "Motion" },
 ] as const;
 
+type SectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+
 export function SettingsView() {
   const { refresh, refreshAiStatus, clearSummaries } = useRepos();
+  const [section, setSection] = useState<SectionId>(SETTINGS_SECTIONS[0].id);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -111,7 +115,7 @@ export function SettingsView() {
     return () => unlisten?.();
   }, []);
 
-  // Settings' sidebar content: jump to a section.
+  // Settings' sidebar content: switch the visible section (tab-style).
   useSidebarSlot(
     useMemo(
       () => (
@@ -121,15 +125,15 @@ export function SettingsView() {
             <button
               key={s.id}
               type="button"
-              className="orr-sb-item"
-              onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              className={cn("orr-sb-item", section === s.id && "active")}
+              onClick={() => setSection(s.id)}
             >
               <span className="nm">{s.label}</span>
             </button>
           ))}
         </div>
       ),
-      [],
+      [section],
     ),
   );
 
@@ -263,7 +267,7 @@ export function SettingsView() {
       </header>
 
       <div className="orr-settings-body">
-        <Card id="set-roots" className="scroll-mt-4">
+        <Card id="set-roots" className={cn(section !== "set-roots" && "hidden")}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <FolderGit2 className="size-4 text-primary" /> Workspace roots
@@ -327,7 +331,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card id="set-launchers" className="scroll-mt-4">
+        <Card id="set-launchers" className={cn(section !== "set-launchers" && "hidden")}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Terminal className="size-4 text-primary" /> Launchers
@@ -352,7 +356,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card id="set-github" className="scroll-mt-4">
+        <Card id="set-github" className={cn(section !== "set-github" && "hidden")}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <HostIcon host="github" className="size-4" /> GitHub
@@ -400,7 +404,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card id="set-ai" className="scroll-mt-4">
+        <Card id="set-ai" className={cn(section !== "set-ai" && "hidden")}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="size-4 text-primary" /> AI &amp; semantic search
@@ -511,7 +515,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card id="set-motion" className="scroll-mt-4">
+        <Card id="set-motion" className={cn(section !== "set-motion" && "hidden")}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Zap className="size-4 text-primary" /> Motion
@@ -536,7 +540,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <div className="flex items-center gap-3">
+        <div className={cn("flex items-center gap-3", section === "set-motion" && "hidden")}>
           <Button onClick={save}>
             <Check className="size-4" /> Save & rescan
           </Button>
