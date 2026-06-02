@@ -35,8 +35,12 @@ interface RepoCardProps {
   onOpenHost?: (repo: Repo) => void;
   /** Brand id of the configured IDE — shows its logo on the IDE button. */
   ideBrand?: string;
+  /** Display name of the configured IDE (e.g. "VS Code"). */
+  ideName?: string;
   /** Brand id of the configured terminal agent. */
   agentBrand?: string;
+  /** Display name of the configured terminal agent (e.g. "Claude Code"). */
+  agentName?: string;
   /** Generate/regenerate this repo's AI summary. */
   onSummarize?: (repo: Repo) => void;
 }
@@ -82,7 +86,9 @@ function RepoCardImpl({
   onOpenFolder,
   onOpenHost,
   ideBrand,
+  ideName,
   agentBrand,
+  agentName,
   onSummarize,
 }: RepoCardProps) {
 
@@ -97,7 +103,7 @@ function RepoCardImpl({
         }}
       >
         <BrandIcon brand={ideBrand ?? ""} category="ide" />
-        {view === "grid" ? "Open in IDE" : "IDE"}
+        {ideName || (view === "grid" ? "Open in IDE" : "IDE")}
       </button>
       <button
         type="button"
@@ -108,7 +114,7 @@ function RepoCardImpl({
         }}
       >
         <BrandIcon brand={agentBrand ?? ""} category="agent" />
-        Agent
+        {agentName || "Agent"}
       </button>
       <button
         type="button"

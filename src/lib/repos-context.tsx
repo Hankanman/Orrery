@@ -49,8 +49,12 @@ interface ReposContextValue {
   openAgent: (repo: Repo) => void;
   /** Brand id of the configured IDE (for the card button logo), or "". */
   ideBrand: string;
+  /** Display name of the configured IDE (for the card button label), or "". */
+  ideName: string;
   /** Brand id of the configured terminal agent, or "". */
   agentBrand: string;
+  /** Display name of the configured terminal agent, or "". */
+  agentName: string;
   /** Re-read launcher config (call after saving settings). */
   refreshLaunchers: () => void;
   /** Reveal the repo's folder in the system file manager. */
@@ -90,7 +94,9 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [summarizing, setSummarizing] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [ideBrand, setIdeBrand] = useState("");
+  const [ideName, setIdeName] = useState("");
   const [agentBrand, setAgentBrand] = useState("");
+  const [agentName, setAgentName] = useState("");
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
   // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
@@ -304,7 +310,10 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       .then((c) => {
         const ide = detectIde(c.ideCommand);
         setIdeBrand(ide ? ide.brand ?? ide.id : "");
-        setAgentBrand(detectAgent(c.agentCommand)?.id ?? "");
+        setIdeName(ide?.name ?? "");
+        const agent = detectAgent(c.agentCommand);
+        setAgentBrand(agent?.id ?? "");
+        setAgentName(agent?.name ?? "");
       })
       .catch(() => {});
   }, []);
@@ -454,10 +463,12 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       openFolder,
       openHost,
       ideBrand,
+      ideName,
       agentBrand,
+      agentName,
       refreshLaunchers,
     }),
-    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, clearSummaries, toggleFavorite, openIde, openAgent, openFolder, openHost, ideBrand, agentBrand, refreshLaunchers],
+    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, clearSummaries, toggleFavorite, openIde, openAgent, openFolder, openHost, ideBrand, ideName, agentBrand, agentName, refreshLaunchers],
   );
 
   // Separate value so progress ticks (enrich/summarize batches) only re-render

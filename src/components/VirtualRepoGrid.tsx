@@ -16,7 +16,9 @@ interface VirtualRepoGridProps {
   onOpenFolder: (repo: Repo) => void;
   onOpenHost: (repo: Repo) => void;
   ideBrand: string;
+  ideName: string;
   agentBrand: string;
+  agentName: string;
   onSummarize: (repo: Repo) => void;
 }
 
@@ -34,7 +36,9 @@ export function VirtualRepoGrid({
   onOpenFolder,
   onOpenHost,
   ideBrand,
+  ideName,
   agentBrand,
+  agentName,
   onSummarize,
 }: VirtualRepoGridProps) {
   const list = view === "list";
@@ -61,7 +65,9 @@ export function VirtualRepoGrid({
           onOpenFolder={onOpenFolder}
           onOpenHost={onOpenHost}
           ideBrand={ideBrand}
+          ideName={ideName}
           agentBrand={agentBrand}
+          agentName={agentName}
           onSummarize={aiReady ? onSummarize : undefined}
         />
       )}

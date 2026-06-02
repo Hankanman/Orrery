@@ -1024,11 +1024,15 @@
     opacity: 0.5;
     cursor: default;
   }
-  .orr-cbtn.ide {
-    --act: var(--orr-act-ide);
-  }
+  /* IDE/agent carry a brand logo, so they stay neutral — an action-colour tint
+     would clash with the brand. Only the border/bg/text brighten on hover. */
+  .orr-cbtn.ide,
   .orr-cbtn.agent {
-    --act: var(--orr-act-agent);
+    --act: var(--orr-fg-1);
+  }
+  .orr-cbtn.ide:hover,
+  .orr-cbtn.agent:hover {
+    --act: var(--orr-fg-0);
   }
   .orr-cbtn.folder {
     --act: var(--orr-act-folder);
