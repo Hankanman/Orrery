@@ -6,7 +6,7 @@
 //! The `*_on(conn)` helpers take a connection so the logic is unit-testable
 //! against an in-memory database (see the tests module).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use rusqlite::Connection;
@@ -136,15 +136,69 @@ pub fn cached_host_info(slug: &str, max_age_secs: i64, now: i64) -> Option<HostI
     serde_json::from_str(&json).ok()
 }
 
+fn all_host_info_on(conn: &Connection) -> HashMap<String, HostInfo> {
+    let mut map = HashMap::new();
+    let Ok(mut stmt) = conn.prepare("SELECT slug, data FROM host_cache") else {
+        return map;
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    });
+    if let Ok(rows) = rows {
+        for (slug, json) in rows.flatten() {
+            if let Ok(info) = serde_json::from_str::<HostInfo>(&json) {
+                map.insert(slug, info);
+            }
+        }
+    }
+    map
+}
+
+/// Overlay persisted host enrichment onto repos (by slug). Freshly-scanned
+/// repos start with empty host fields, so this restores cached
+/// visibility/stars/etc. on launch — no network re-fetch required.
+fn apply_host_info_on(conn: &Connection, repos: &mut [Repo]) {
+    let cache = all_host_info_on(conn);
+    if cache.is_empty() {
+        return;
+    }
+    for r in repos.iter_mut() {
+        let Some(slug) = r.slug.as_deref() else { continue };
+        if let Some(info) = cache.get(slug) {
+            r.stars = info.stars;
+            r.topics = info.topics.clone();
+            r.open_issues = info.open_issues;
+            r.latest_release = info.latest_release.clone();
+            r.private = info.private;
+        }
+    }
+}
+
+/// All persisted host enrichment, keyed by slug (any age).
+pub fn all_host_info() -> HashMap<String, HostInfo> {
+    open().map(|c| all_host_info_on(&c)).unwrap_or_default()
+}
+
+/// Rehydrate `private`/`stars`/etc. on a repo snapshot from the host cache.
+pub fn apply_host_info(repos: &mut [Repo]) {
+    if let Ok(conn) = open() {
+        apply_host_info_on(&conn, repos);
+    }
+}
+
+fn store_host_info_on(conn: &Connection, slug: &str, info: &HostInfo, now: i64) {
+    if let Ok(json) = serde_json::to_string(info) {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO host_cache (slug, data, fetched_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![slug, json, now],
+        );
+    }
+}
+
 /// Persist host enrichment for a slug.
 pub fn store_host_info(slug: &str, info: &HostInfo, now: i64) {
     if let Ok(conn) = open() {
-        if let Ok(json) = serde_json::to_string(info) {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO host_cache (slug, data, fetched_at) VALUES (?1, ?2, ?3)",
-                rusqlite::params![slug, json, now],
-            );
-        }
+        store_host_info_on(&conn, slug, info, now);
     }
 }
 
@@ -275,6 +329,31 @@ mod tests {
         assert!(favs.contains("/a") && favs.contains("/b"));
         set_favorite_on(&conn, "/a", false).unwrap();
         assert!(!favorites_on(&conn).contains("/a"));
+    }
+
+    #[test]
+    fn apply_host_info_rehydrates_repo_from_cache() {
+        let conn = mem();
+        let info = HostInfo {
+            stars: 42,
+            topics: vec!["cli".into()],
+            open_issues: 3,
+            latest_release: Some("v1.2.3".into()),
+            private: true,
+        };
+        store_host_info_on(&conn, "o/test", &info, 1_000);
+
+        let mut repos = vec![sample("/a")]; // slug "o/test", host fields empty
+        apply_host_info_on(&conn, &mut repos);
+        assert!(repos[0].private);
+        assert_eq!(repos[0].stars, 42);
+        assert_eq!(repos[0].latest_release.as_deref(), Some("v1.2.3"));
+
+        // A repo with no cached slug is left untouched.
+        let mut other = vec![Repo { slug: Some("o/none".into()), ..sample("/b") }];
+        apply_host_info_on(&conn, &mut other);
+        assert!(!other[0].private);
+        assert_eq!(other[0].stars, 0);
     }
 
     #[test]

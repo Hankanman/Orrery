@@ -35,14 +35,16 @@ pub fn set_config(config: AppConfig) -> Result<(), String> {
 /// Cached repo snapshot for instant paint before a fresh scan completes.
 #[tauri::command]
 pub fn cached_repos() -> Vec<Repo> {
-    cache::load_repos()
+    let mut repos = cache::load_repos();
+    cache::apply_host_info(&mut repos);
+    repos
 }
 
 /// Scan the configured roots for repos (runs off the UI thread), refresh the
 /// cache, and return the results.
 #[tauri::command]
 pub async fn scan_repos() -> Result<Vec<Repo>, String> {
-    let repos = tauri::async_runtime::spawn_blocking(|| {
+    let mut repos = tauri::async_runtime::spawn_blocking(|| {
         let cfg = config::load();
         let favorites = cache::favorites();
         scan::scan(&cfg.roots, cfg.scan_depth, &cfg.ignore, &favorites, now_unix())
@@ -50,6 +52,9 @@ pub async fn scan_repos() -> Result<Vec<Repo>, String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    // Carry over persisted host enrichment so a fresh scan keeps last-known
+    // visibility/stars until the frontend's enrich pass re-confirms them.
+    cache::apply_host_info(&mut repos);
     let _ = cache::store_repos(&repos);
     Ok(repos)
 }
