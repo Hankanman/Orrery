@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🪐 Orrery
+<img src="docs/public/logo.svg" alt="Orrery" width="84">
+
+# Orrery
 
 **every repo in orbit**
 
