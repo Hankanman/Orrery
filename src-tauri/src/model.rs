@@ -118,7 +118,9 @@ pub struct AppConfig {
 }
 
 pub(crate) fn default_ai_model() -> String {
-    "granite4.1:3b-q2_K".to_string()
+    // Tiny + efficient for basic summaries: qwen3 0.6b (q4) is ~523MB and
+    // instruction-tuned — smaller and better-quantized than granite 3b-q2_K.
+    "qwen3:0.6b".to_string()
 }
 
 pub(crate) fn default_ollama_host() -> String {

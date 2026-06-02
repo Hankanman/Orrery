@@ -18,7 +18,7 @@ const FALLBACK: AppConfig = {
   agentCommand: "kitty --working-directory {path} -e claude",
   githubClientId: "",
   gitlabHosts: [],
-  aiModel: "granite4.1:3b-q2_K",
+  aiModel: "qwen3:0.6b",
   aiEnabled: true,
   embedModel: "nomic-embed-text:latest",
   ollamaHost: "http://localhost:11434",
@@ -428,7 +428,7 @@ export function SettingsView() {
                 value={config.aiModel}
                 onChange={(aiModel) => patch({ aiModel })}
                 disabled={!config.aiEnabled}
-                placeholder="granite4.1:3b-q2_K"
+                placeholder="qwen3:0.6b"
               />
               {modelStatus(config.aiModel)}
             </div>
