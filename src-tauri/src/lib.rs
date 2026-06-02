@@ -109,6 +109,7 @@ pub fn run() {
             commands::add_worktree,
             commands::remove_worktree,
             commands::repo_log,
+            commands::contribution_graph,
             commands::repo_diff,
             commands::repo_staged_diff,
             commands::repo_readme,

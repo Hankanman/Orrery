@@ -282,6 +282,19 @@ pub fn repo_log(id: String, limit: usize) -> Result<Vec<CommitInfo>, String> {
     git_ops::recent_log(&id, limit)
 }
 
+/// Daily commit counts (the user's own) across the given repos for the trailing
+/// ~53 weeks — the data behind Mission Control's contribution graph.
+#[tauri::command]
+pub async fn contribution_graph(ids: Vec<String>) -> Vec<git_ops::DayCount> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let today = now_unix().div_euclid(86_400);
+        let since = today - 7 * 53; // a little over a year, week-aligned by the UI
+        git_ops::contributions(&ids, since)
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn repo_diff(id: String) -> Result<String, String> {
     git_ops::working_diff(&id)

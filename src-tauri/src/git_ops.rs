@@ -2,6 +2,8 @@
 //! listing/switching/pruning, worktrees, recent log, and the working diff.
 //! All synchronous; callers run them off the UI thread.
 
+use std::collections::{HashMap, HashSet};
+
 use git2::{
     BranchType, Cred, CredentialType, DiffOptions, FetchOptions, RemoteCallbacks, Repository,
 };
@@ -256,6 +258,78 @@ pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
     Ok(out)
 }
 
+/// One day's commit count, keyed by epoch day in the author's local timezone
+/// (i.e. `floor((commit_time + tz_offset) / 86400)`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayCount {
+    pub day: i64,
+    pub count: u32,
+}
+
+/// The set of email addresses that count as "the user", lower-cased: the global
+/// git identity plus each repo's configured `user.email`. Used to count only the
+/// user's own commits — repos they cloned but never committed to contribute 0,
+/// which is the correct contribution-graph semantics.
+fn my_emails(paths: &[String]) -> HashSet<String> {
+    let mut set = HashSet::new();
+    let mut add = |cfg: &git2::Config| {
+        if let Ok(email) = cfg.get_string("user.email") {
+            set.insert(email.to_lowercase());
+        }
+    };
+    if let Ok(cfg) = git2::Config::open_default() {
+        add(&cfg);
+    }
+    for path in paths {
+        if let Ok(cfg) = Repository::open(path).and_then(|r| r.config()) {
+            add(&cfg);
+        }
+    }
+    set
+}
+
+/// Daily commit counts across `paths` for commits on/after `since_day` (epoch
+/// days), counting only commits authored by the user. If no git identity can be
+/// resolved, counts all commits so the graph is never mysteriously empty.
+/// Walks each repo's HEAD line in commit-time order, stopping once it passes the
+/// window. Aggregated by author-local day so the calendar matches when the user
+/// actually worked.
+pub fn contributions(paths: &[String], since_day: i64) -> Vec<DayCount> {
+    let emails = my_emails(paths);
+    let mut counts: HashMap<i64, u32> = HashMap::new();
+
+    for path in paths {
+        let Ok(repo) = Repository::open(path) else { continue };
+        let Ok(mut walk) = repo.revwalk() else { continue };
+        if walk.set_sorting(git2::Sort::TIME).is_err() || walk.push_head().is_err() {
+            continue;
+        }
+        for oid in walk.flatten() {
+            let Ok(commit) = repo.find_commit(oid) else { continue };
+            let when = commit.author().when();
+            let local = when.seconds() + i64::from(when.offset_minutes()) * 60;
+            let day = local.div_euclid(86_400);
+            if day < since_day {
+                break; // TIME order: everything after this is older still.
+            }
+            let mine = emails.is_empty()
+                || commit
+                    .author()
+                    .email()
+                    .map(|e| emails.contains(&e.to_lowercase()))
+                    .unwrap_or(false);
+            if mine {
+                *counts.entry(day).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut out: Vec<DayCount> = counts.into_iter().map(|(day, count)| DayCount { day, count }).collect();
+    out.sort_by_key(|d| d.day);
+    out
+}
+
 /// Clone `url` into `dest` (full destination path). Returns the working dir.
 pub fn clone(url: &str, dest: &str) -> Result<String, String> {
     let mut fo = FetchOptions::new();
@@ -419,5 +493,25 @@ mod tests {
         assert_eq!(short.len(), 7);
         assert_eq!(recent_log(&path, 5).unwrap()[0].summary, "feat: add new");
         assert!(staged_diff(&path).unwrap().is_empty(), "nothing staged after commit");
+    }
+
+    #[test]
+    fn contributions_count_the_users_commit_within_window() {
+        let (_dir, path) = init_repo();
+        let today = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            / 86_400;
+        let paths = vec![path];
+
+        // The single init commit (authored as the repo's user.email) counts once,
+        // landing within the trailing window.
+        let graph = contributions(&paths, today - 7);
+        assert_eq!(graph.iter().map(|d| d.count).sum::<u32>(), 1);
+        assert!(graph.iter().all(|d| d.day >= today - 7));
+
+        // A window that starts in the future excludes everything.
+        assert!(contributions(&paths, today + 7).is_empty());
     }
 }

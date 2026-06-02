@@ -14,6 +14,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
+import { ContributionGraph } from "@/components/ContributionGraph";
 import { RepoCard, type RepoView } from "@/components/RepoCard";
 import { RepoDrawer } from "@/components/RepoDrawer";
 import { Sidebar } from "@/components/layout/Sidebar";
@@ -91,6 +92,10 @@ export function GridView() {
 
   const attentionCount = useMemo(() => repos.filter(needsAttention).length, [repos]);
 
+  // All repo ids (paths) for the workspace-wide contribution graph — stable
+  // across filters so the overview doesn't jump when you narrow the grid.
+  const allIds = useMemo(() => repos.map((r) => r.id), [repos]);
+
   // One-shot daily briefing once repos are loaded.
   useEffect(() => {
     if (!isTauri() || briefedRef.current || !ready || repos.length === 0) return;
@@ -132,6 +137,8 @@ export function GridView() {
       />
 
       <div className="orr-main">
+        {ready && repos.length > 0 && <ContributionGraph ids={allIds} />}
+
         <div className="orr-toolbar">
           <span className="title">{title}</span>
           <span className="sub">

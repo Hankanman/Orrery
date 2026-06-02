@@ -27,6 +27,12 @@ export interface WorktreeInfo {
   path: string;
 }
 
+/** One day's commit count, keyed by epoch day (author-local). */
+export interface DayCount {
+  day: number;
+  count: number;
+}
+
 /** Mirrors the Rust `AppConfig` (see src-tauri/src/model.rs). */
 export interface AppConfig {
   roots: string[];
@@ -131,6 +137,7 @@ export const ipc = {
   addWorktree: (id: string, name: string, dest: string) => invoke<string>("add_worktree", { id, name, dest }),
   removeWorktree: (id: string, name: string) => invoke<void>("remove_worktree", { id, name }),
   repoLog: (id: string, limit = 20) => invoke<CommitInfo[]>("repo_log", { id, limit }),
+  contributionGraph: (ids: string[]) => invoke<DayCount[]>("contribution_graph", { ids }),
   repoDiff: (id: string) => invoke<string>("repo_diff", { id }),
   repoStagedDiff: (id: string) => invoke<string>("repo_staged_diff", { id }),
   repoReadme: (id: string) => invoke<string | null>("repo_readme", { id }),
