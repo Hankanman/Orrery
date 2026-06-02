@@ -60,6 +60,172 @@ pub struct CiStatus {
     pub state: String,
 }
 
+/// One entry in the release feed — the latest release of a repo you've starred.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseItem {
+    pub repo: String, // owner/name
+    pub name: String, // release title (falls back to tag)
+    pub tag: String,
+    pub url: String,
+    pub published_at: i64, // unix seconds
+    pub body: String,      // release notes, truncated
+    pub prerelease: bool,
+    pub host: Host,
+}
+
+/// Unix seconds from an ISO-8601 UTC timestamp ("2024-01-15T10:30:00Z").
+/// Dependency-free (no chrono); good enough for feed ordering/display.
+fn parse_iso8601(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: i64 = s.get(5..7)?.parse().ok()?;
+    let d: i64 = s.get(8..10)?.parse().ok()?;
+    let h: i64 = s.get(11..13)?.parse().ok()?;
+    let mi: i64 = s.get(14..16)?.parse().ok()?;
+    let se: i64 = s.get(17..19)?.parse().ok()?;
+    // days since 1970-01-01 (Howard Hinnant's days_from_civil)
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = (if y2 >= 0 { y2 } else { y2 - 399 }) / 400;
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3_600 + mi * 60 + se)
+}
+
+/// Chronological feed of the latest releases across the repos you've starred.
+/// Uses GitHub GraphQL — one request fetches 100 stars *and* their latest
+/// release, far cheaper than per-repo REST. Newest first, drafts skipped.
+pub async fn github_release_feed() -> Result<Vec<ReleaseItem>, String> {
+    let token = oauth::github_token().ok_or("connect GitHub to see the release feed")?;
+
+    const QUERY: &str = r#"query($cursor: String) {
+      viewer {
+        starredRepositories(first: 100, after: $cursor, orderBy: {field: STARRED_AT, direction: DESC}) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            nameWithOwner
+            releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) {
+              nodes { name tagName url publishedAt description isPrerelease isDraft }
+            }
+          }
+        }
+      }
+    }"#;
+
+    #[derive(Deserialize)]
+    struct Resp {
+        data: Option<Data>,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        viewer: Viewer,
+    }
+    #[derive(Deserialize)]
+    struct Viewer {
+        #[serde(rename = "starredRepositories")]
+        starred: Starred,
+    }
+    #[derive(Deserialize)]
+    struct Starred {
+        #[serde(rename = "pageInfo")]
+        page_info: PageInfo,
+        nodes: Vec<RepoNode>,
+    }
+    #[derive(Deserialize)]
+    struct PageInfo {
+        #[serde(rename = "hasNextPage")]
+        has_next_page: bool,
+        #[serde(rename = "endCursor")]
+        end_cursor: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct RepoNode {
+        #[serde(rename = "nameWithOwner")]
+        name_with_owner: String,
+        releases: Releases,
+    }
+    #[derive(Deserialize)]
+    struct Releases {
+        nodes: Vec<Rel>,
+    }
+    #[derive(Deserialize)]
+    struct Rel {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(rename = "tagName")]
+        tag_name: String,
+        url: String,
+        #[serde(rename = "publishedAt")]
+        published_at: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(rename = "isPrerelease", default)]
+        prerelease: bool,
+        #[serde(rename = "isDraft", default)]
+        draft: bool,
+    }
+
+    let mut items: Vec<ReleaseItem> = Vec::new();
+    let mut cursor: Option<String> = None;
+    // Bound the work to ~200 most-recently-starred repos (2 pages).
+    for _ in 0..2 {
+        let body = serde_json::json!({ "query": QUERY, "variables": { "cursor": cursor } });
+        let resp = client()
+            .post(format!("{GH}/graphql"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("GitHub GraphQL {}", resp.status()));
+        }
+        let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
+        let Some(data) = parsed.data else {
+            break;
+        };
+        let starred = data.viewer.starred;
+        for node in starred.nodes {
+            let Some(rel) = node.releases.nodes.into_iter().next() else {
+                continue;
+            };
+            if rel.draft {
+                continue;
+            }
+            let name = match rel.name {
+                Some(n) if !n.trim().is_empty() => n,
+                _ => rel.tag_name.clone(),
+            };
+            let mut body = rel.description.unwrap_or_default();
+            if body.chars().count() > 320 {
+                body = body.chars().take(320).collect::<String>() + "…";
+            }
+            items.push(ReleaseItem {
+                repo: node.name_with_owner,
+                name,
+                tag: rel.tag_name,
+                url: rel.url,
+                published_at: rel.published_at.as_deref().and_then(parse_iso8601).unwrap_or(0),
+                body,
+                prerelease: rel.prerelease,
+                host: Host::Github,
+            });
+        }
+        if !starred.page_info.has_next_page {
+            break;
+        }
+        cursor = starred.page_info.end_cursor;
+    }
+
+    items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    items.truncate(60);
+    Ok(items)
+}
+
 async fn github_user(token: &str) -> Result<String, String> {
     #[derive(Deserialize)]
     struct User {

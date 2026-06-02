@@ -25,13 +25,19 @@ const inboxRoute = createRoute({
   component: lazyRouteComponent(() => import("@/pages/InboxView"), "InboxView"),
 });
 
+const feedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/feed",
+  component: lazyRouteComponent(() => import("@/pages/FeedView"), "FeedView"),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   component: lazyRouteComponent(() => import("@/pages/SettingsView"), "SettingsView"),
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, settingsRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, feedRoute, settingsRoute]);
 
 export const router = createRouter({ routeTree });
 

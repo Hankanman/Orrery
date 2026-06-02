@@ -670,6 +670,12 @@ pub async fn list_starred() -> Result<Vec<RemoteRepo>, String> {
     inbox::github_starred().await
 }
 
+/// Release feed: latest releases across the repos you've starred.
+#[tauri::command]
+pub async fn release_feed() -> Result<Vec<inbox::ReleaseItem>, String> {
+    inbox::github_release_feed().await
+}
+
 /// Clone a repo into a configured root and return its working dir (#26).
 #[tauri::command]
 pub async fn clone_repo(url: String, dest_root: String) -> Result<String, String> {

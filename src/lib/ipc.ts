@@ -88,6 +88,17 @@ export interface CiStatus {
   state: "success" | "failure" | "pending" | "none";
 }
 
+export interface ReleaseItem {
+  repo: string;
+  name: string;
+  tag: string;
+  url: string;
+  publishedAt: number;
+  body: string;
+  prerelease: boolean;
+  host: "github" | "gitlab";
+}
+
 export interface AiStatus {
   /** Ollama server reachable at `endpoint`. */
   reachable: boolean;
@@ -180,6 +191,7 @@ export const ipc = {
   getNotifications: () => invoke<NotificationItem[]>("get_notifications"),
   ciStatus: (slug: string) => invoke<CiStatus>("ci_status", { slug }),
   listStarred: () => invoke<RemoteRepo[]>("list_starred"),
+  releaseFeed: () => invoke<ReleaseItem[]>("release_feed"),
   cloneRepo: (url: string, destRoot: string) => invoke<string>("clone_repo", { url, destRoot }),
   activeAgents: () => invoke<string[]>("active_agents"),
   notify: (title: string, body: string) => invoke<void>("notify", { title, body }),
