@@ -282,17 +282,57 @@ pub fn repo_log(id: String, limit: usize) -> Result<Vec<CommitInfo>, String> {
     git_ops::recent_log(&id, limit)
 }
 
+/// Cached contribution-graph result. Keyed by the repo set (`sig`) and the day
+/// it was computed for, with a short TTL — walking every repo's history is the
+/// expensive part, and commits don't change second-to-second.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedContrib {
+    computed_at: i64,
+    today: i64,
+    sig: u64,
+    days: Vec<git_ops::DayCount>,
+}
+
+/// Order-independent fingerprint of the repo set, so adding/removing a repo
+/// invalidates the cache but reordering doesn't.
+fn ids_signature(ids: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&String> = ids.iter().collect();
+    sorted.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for id in sorted {
+        id.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// Daily commit counts (the user's own) across the given repos for the trailing
-/// ~53 weeks — the data behind Mission Control's contribution graph.
+/// ~53 weeks — the data behind Mission Control's contribution graph. Cached for
+/// 10 minutes per repo set so revisiting the view is instant.
 #[tauri::command]
 pub async fn contribution_graph(ids: Vec<String>) -> Vec<git_ops::DayCount> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let today = now_unix().div_euclid(86_400);
+    const TTL: i64 = 600;
+    let now = now_unix();
+    let today = now.div_euclid(86_400);
+    let sig = ids_signature(&ids);
+
+    if let Some(c) = cache::get_meta("contrib_graph").and_then(|r| serde_json::from_str::<CachedContrib>(&r).ok()) {
+        if c.sig == sig && c.today == today && now - c.computed_at < TTL {
+            return c.days;
+        }
+    }
+
+    let days = tauri::async_runtime::spawn_blocking(move || {
         let since = today - 7 * 53; // a little over a year, week-aligned by the UI
         git_ops::contributions(&ids, since)
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_default();
+
+    if let Ok(blob) = serde_json::to_string(&CachedContrib { computed_at: now, today, sig, days: days.clone() }) {
+        cache::set_meta("contrib_graph", &blob);
+    }
+    days
 }
 
 #[tauri::command]

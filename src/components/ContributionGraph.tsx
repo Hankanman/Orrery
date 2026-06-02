@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
 import { ipc, isTauri, type DayCount } from "@/lib/ipc";
 
 const WEEKS = 53;
@@ -66,9 +67,11 @@ const fullDate = (day: number) =>
 interface ContributionGraphProps {
   /** Repo ids (absolute paths) to aggregate commits across. */
   ids: string[];
+  /** Hide the graph (also reachable from the toolbar toggle). */
+  onHide?: () => void;
 }
 
-export function ContributionGraph({ ids }: ContributionGraphProps) {
+export function ContributionGraph({ ids, onHide }: ContributionGraphProps) {
   const [data, setData] = useState<DayCount[] | null>(null);
   const key = ids.join("|");
 
@@ -114,6 +117,11 @@ export function ContributionGraph({ ids }: ContributionGraphProps) {
           ))}
           More
         </span>
+        {onHide && (
+          <button type="button" className="orr-contrib-x" onClick={onHide} aria-label="Hide activity graph">
+            <X className="size-3.5" />
+          </button>
+        )}
       </header>
 
       <div className="orr-contrib-cal">

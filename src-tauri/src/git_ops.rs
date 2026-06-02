@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use git2::{
     BranchType, Cred, CredentialType, DiffOptions, FetchOptions, RemoteCallbacks, Repository,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::GitStatus;
 
@@ -260,33 +260,11 @@ pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
 
 /// One day's commit count, keyed by epoch day in the author's local timezone
 /// (i.e. `floor((commit_time + tz_offset) / 86400)`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DayCount {
     pub day: i64,
     pub count: u32,
-}
-
-/// The set of email addresses that count as "the user", lower-cased: the global
-/// git identity plus each repo's configured `user.email`. Used to count only the
-/// user's own commits — repos they cloned but never committed to contribute 0,
-/// which is the correct contribution-graph semantics.
-fn my_emails(paths: &[String]) -> HashSet<String> {
-    let mut set = HashSet::new();
-    let mut add = |cfg: &git2::Config| {
-        if let Ok(email) = cfg.get_string("user.email") {
-            set.insert(email.to_lowercase());
-        }
-    };
-    if let Ok(cfg) = git2::Config::open_default() {
-        add(&cfg);
-    }
-    for path in paths {
-        if let Ok(cfg) = Repository::open(path).and_then(|r| r.config()) {
-            add(&cfg);
-        }
-    }
-    set
 }
 
 /// Daily commit counts across `paths` for commits on/after `since_day` (epoch
@@ -296,11 +274,25 @@ fn my_emails(paths: &[String]) -> HashSet<String> {
 /// window. Aggregated by author-local day so the calendar matches when the user
 /// actually worked.
 pub fn contributions(paths: &[String], since_day: i64) -> Vec<DayCount> {
-    let emails = my_emails(paths);
-    let mut counts: HashMap<i64, u32> = HashMap::new();
+    // Open each repo once, then reuse the handle for both identity and walking.
+    let repos: Vec<Repository> = paths.iter().filter_map(|p| Repository::open(p).ok()).collect();
 
-    for path in paths {
-        let Ok(repo) = Repository::open(path) else { continue };
+    // "The user" = global git identity plus each repo's configured user.email,
+    // lower-cased. Repos cloned but never committed to thus contribute 0.
+    let mut emails: HashSet<String> = HashSet::new();
+    if let Ok(cfg) = git2::Config::open_default() {
+        if let Ok(email) = cfg.get_string("user.email") {
+            emails.insert(email.to_lowercase());
+        }
+    }
+    for repo in &repos {
+        if let Ok(email) = repo.config().and_then(|c| c.get_string("user.email")) {
+            emails.insert(email.to_lowercase());
+        }
+    }
+
+    let mut counts: HashMap<i64, u32> = HashMap::new();
+    for repo in &repos {
         let Ok(mut walk) = repo.revwalk() else { continue };
         if walk.set_sorting(git2::Sort::TIME).is_err() || walk.push_head().is_err() {
             continue;

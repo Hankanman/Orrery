@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   ArrowUp,
   ArrowUpDown,
   CircleDot,
@@ -71,7 +72,25 @@ export function GridView() {
   const [selected, setSelected] = useState<Repo | null>(null);
   const [briefing, setBriefing] = useState<Briefing | null>(null);
   const [briefingDismissed, setBriefingDismissed] = useState(false);
+  const [showContrib, setShowContrib] = useState(() => {
+    try {
+      return localStorage.getItem("orr.contrib") !== "0";
+    } catch {
+      return true;
+    }
+  });
   const briefedRef = useRef(false);
+
+  const toggleContrib = () =>
+    setShowContrib((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem("orr.contrib", next ? "1" : "0");
+      } catch {
+        // ignore — private mode / no storage
+      }
+      return next;
+    });
 
   const visible = useMemo(() => {
     const filtered = repos.filter((r) => {
@@ -137,7 +156,7 @@ export function GridView() {
       />
 
       <div className="orr-main">
-        {ready && repos.length > 0 && <ContributionGraph ids={allIds} />}
+        {ready && repos.length > 0 && showContrib && <ContributionGraph ids={allIds} onHide={toggleContrib} />}
 
         <div className="orr-toolbar">
           <span className="title">{title}</span>
@@ -145,6 +164,15 @@ export function GridView() {
             {visible.length} {visible.length === 1 ? "repo" : "repos"}
           </span>
           <span className="ml-auto" />
+          <button
+            type="button"
+            className={cn("orr-sortpill", showContrib && "on")}
+            onClick={toggleContrib}
+            aria-pressed={showContrib}
+            title={showContrib ? "Hide activity graph" : "Show activity graph"}
+          >
+            <Activity className="size-3.5" />
+          </button>
           <button
             type="button"
             className={cn("orr-sortpill", attentionOnly && "on")}

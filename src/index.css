@@ -582,6 +582,18 @@
     font: var(--text-micro);
     color: var(--orr-fg-3);
   }
+  .orr-contrib-x {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--r-sm);
+    color: var(--orr-fg-3);
+  }
+  .orr-contrib-x:hover {
+    background: var(--orr-glass-hover);
+    color: var(--orr-fg-1);
+  }
   .orr-contrib-cal {
     overflow-x: auto;
     padding-bottom: 2px;
