@@ -1043,6 +1043,46 @@
     padding: 8px 0;
   }
 
+  /* Launcher preset chips (Settings). Muted base; the active one + hover tint
+     to the action's identity colour via --act (set per category below). */
+  .orr-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .orr-preset {
+    display: inline-flex;
+    align-items: center;
+    font: var(--text-data-sm);
+    line-height: 1;
+    padding: 6px 10px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    color: var(--orr-fg-1);
+    background: var(--orr-glass-2);
+    border: 1px solid var(--orr-border);
+    transition: all var(--dur-fast) var(--ease-out);
+  }
+  .orr-preset:hover {
+    border-color: color-mix(in oklch, var(--act, var(--primary)) 50%, transparent);
+    color: var(--orr-fg-0);
+    background: color-mix(in oklch, var(--act, var(--primary)) 10%, transparent);
+  }
+  .orr-preset.active {
+    color: var(--act, var(--primary));
+    border-color: color-mix(in oklch, var(--act, var(--primary)) 70%, transparent);
+    background: color-mix(in oklch, var(--act, var(--primary)) 16%, transparent);
+  }
+  .orr-preset.ide {
+    --act: var(--orr-act-ide);
+  }
+  .orr-preset.agent {
+    --act: var(--orr-act-agent);
+  }
+  .orr-preset.host {
+    --act: var(--orr-act-host);
+  }
+
   /* list-mode card */
   .orr-grid.list .orr-card {
     display: flex;

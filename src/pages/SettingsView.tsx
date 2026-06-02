@@ -8,6 +8,15 @@ import { useSidebarSlot } from "@/lib/sidebar-slot";
 import { cn } from "@/lib/utils";
 import { HostIcon } from "@/components/HostIcon";
 import { ModelSelect } from "@/components/ModelSelect";
+import {
+  AGENT_PRESETS,
+  IDE_PRESETS,
+  TERMINAL_PRESETS,
+  composeAgentCommand,
+  detectAgent,
+  detectIde,
+  detectTerminal,
+} from "@/lib/launchers";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -337,20 +346,66 @@ export function SettingsView() {
               <Terminal className="size-4 text-primary" /> Launchers
             </CardTitle>
             <CardDescription>
-              <code>{"{path}"}</code> is replaced with the repo path.
+              Pick a preset, or edit the command directly. <code>{"{path}"}</code> is replaced with the
+              repo path.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="space-y-1.5">
+          <CardContent className="space-y-5">
+            {/* IDE — one editor command per repo */}
+            <div className="space-y-2">
               <label className="text-sm text-muted-foreground" htmlFor="ide">
                 Open in IDE
               </label>
+              <div className="orr-presets">
+                {IDE_PRESETS.map((p) => (
+                  <button
+                    type="button"
+                    key={p.id}
+                    className={cn("orr-preset ide", detectIde(config.ideCommand)?.id === p.id && "active")}
+                    onClick={() => patch({ ideCommand: p.command })}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
               <Input id="ide" spellCheck={false} value={config.ideCommand} onChange={(e) => patch({ ideCommand: e.target.value })} />
             </div>
-            <div className="space-y-1.5">
-              <label className="text-sm text-muted-foreground" htmlFor="agent">
-                Terminal agent
-              </label>
+
+            {/* Terminal agent — terminal emulator × agent CLI, composed */}
+            <div className="space-y-2">
+              <label className="text-sm text-muted-foreground">Terminal agent</label>
+              <p className="text-xs text-muted-foreground/80">Terminal</p>
+              <div className="orr-presets">
+                {TERMINAL_PRESETS.map((t) => (
+                  <button
+                    type="button"
+                    key={t.id}
+                    className={cn("orr-preset host", detectTerminal(config.agentCommand)?.id === t.id && "active")}
+                    onClick={() =>
+                      patch({ agentCommand: composeAgentCommand(t, detectAgent(config.agentCommand)?.bin ?? "claude") })
+                    }
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground/80">Agent</p>
+              <div className="orr-presets">
+                {AGENT_PRESETS.map((a) => (
+                  <button
+                    type="button"
+                    key={a.id}
+                    className={cn("orr-preset agent", detectAgent(config.agentCommand)?.id === a.id && "active")}
+                    onClick={() =>
+                      patch({
+                        agentCommand: composeAgentCommand(detectTerminal(config.agentCommand) ?? TERMINAL_PRESETS[0], a.bin),
+                      })
+                    }
+                  >
+                    {a.name}
+                  </button>
+                ))}
+              </div>
               <Input id="agent" spellCheck={false} value={config.agentCommand} onChange={(e) => patch({ agentCommand: e.target.value })} />
             </div>
           </CardContent>
