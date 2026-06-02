@@ -158,6 +158,7 @@ export const ipc = {
   scanRepos: () => invoke<Repo[]>("scan_repos"),
   setFavorite: (id: string, favorite: boolean) => invoke<boolean>("set_favorite", { id, favorite }),
   openInIde: (id: string) => invoke<void>("open_in_ide", { id }),
+  openFolder: (id: string) => invoke<void>("open_folder", { id }),
   openAgent: (id: string) => invoke<void>("open_agent", { id }),
   enrichRepo: (host: "github" | "gitlab", domain: string, slug: string) =>
     invoke<HostInfo>("enrich_repo", { host, domain, slug }),

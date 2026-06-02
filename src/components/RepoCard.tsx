@@ -5,6 +5,8 @@ import {
   CircleDot,
   Clock,
   Code,
+  ExternalLink,
+  FolderOpen,
   GitBranch,
   RefreshCw,
   Sparkles,
@@ -29,6 +31,8 @@ interface RepoCardProps {
   onToggleFavorite?: (repo: Repo) => void;
   onOpenIde?: (repo: Repo) => void;
   onOpenAgent?: (repo: Repo) => void;
+  onOpenFolder?: (repo: Repo) => void;
+  onOpenHost?: (repo: Repo) => void;
   /** Generate/regenerate this repo's AI summary. */
   onSummarize?: (repo: Repo) => void;
 }
@@ -71,6 +75,8 @@ function RepoCardImpl({
   onToggleFavorite,
   onOpenIde,
   onOpenAgent,
+  onOpenFolder,
+  onOpenHost,
   onSummarize,
 }: RepoCardProps) {
 
@@ -78,7 +84,7 @@ function RepoCardImpl({
     <div className="orr-card-acts">
       <button
         type="button"
-        className="orr-cbtn agent"
+        className="orr-cbtn ide"
         onClick={(e) => {
           e.stopPropagation();
           onOpenIde?.(repo);
@@ -98,6 +104,32 @@ function RepoCardImpl({
         <SquareTerminal className="size-3.5" />
         Agent
       </button>
+      <button
+        type="button"
+        className="orr-cbtn folder icon"
+        title="Open folder"
+        aria-label="Open folder"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenFolder?.(repo);
+        }}
+      >
+        <FolderOpen className="size-3.5" />
+      </button>
+      {repo.slug && repo.host && (
+        <button
+          type="button"
+          className="orr-cbtn host icon"
+          title={`Open on ${repo.host}`}
+          aria-label={`Open on ${repo.host}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenHost?.(repo);
+          }}
+        >
+          <ExternalLink className="size-3.5" />
+        </button>
+      )}
     </div>
   );
 

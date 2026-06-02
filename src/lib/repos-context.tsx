@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { ipc, isTauri, type AiStatus } from "@/lib/ipc";
 import { MOCK_REPOS } from "@/lib/mock-repos";
 import type { Repo } from "@/types";
@@ -45,6 +46,10 @@ interface ReposContextValue {
   toggleFavorite: (repo: Repo) => void;
   openIde: (repo: Repo) => void;
   openAgent: (repo: Repo) => void;
+  /** Reveal the repo's folder in the system file manager. */
+  openFolder: (repo: Repo) => void;
+  /** Open the repo on its remote host (GitHub/GitLab) in the browser. */
+  openHost: (repo: Repo) => void;
 }
 
 const ReposContext = createContext<ReposContextValue | null>(null);
@@ -346,6 +351,19 @@ export function ReposProvider({ children }: { children: ReactNode }) {
     else console.log("[orrery] open in IDE:", repo.path);
   }, []);
 
+  const openFolder = useCallback((repo: Repo) => {
+    if (isTauri()) ipc.openFolder(repo.id).catch((e) => console.error("[orrery] open folder failed:", e));
+    else console.log("[orrery] open folder:", repo.path);
+  }, []);
+
+  const openHost = useCallback((repo: Repo) => {
+    if (!repo.slug) return;
+    const host = repo.remoteHost ?? (repo.host === "gitlab" ? "gitlab.com" : "github.com");
+    const url = `https://${host}/${repo.slug}`;
+    if (isTauri()) openUrl(url).catch(() => {});
+    else window.open(url, "_blank");
+  }, []);
+
   const refreshAgents = useCallback(() => {
     if (!isTauri()) return;
     ipc
@@ -407,8 +425,10 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       toggleFavorite,
       openIde,
       openAgent,
+      openFolder,
+      openHost,
     }),
-    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, clearSummaries, toggleFavorite, openIde, openAgent],
+    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, clearSummaries, toggleFavorite, openIde, openAgent, openFolder, openHost],
   );
 
   // Separate value so progress ticks (enrich/summarize batches) only re-render

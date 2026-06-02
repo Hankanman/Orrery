@@ -64,6 +64,13 @@ pub fn open_in_ide(id: String) -> Result<(), String> {
     launch::launch(&config::load().ide_command, &id)
 }
 
+/// Reveal the repo's directory in the system file manager.
+#[tauri::command]
+pub fn open_folder(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(id, None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Tracks live terminal-agent child processes, keyed by repo id (#51).
 #[derive(Default)]
 pub struct AgentSessions(pub std::sync::Mutex<std::collections::HashMap<String, std::process::Child>>);

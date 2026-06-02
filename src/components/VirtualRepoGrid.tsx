@@ -13,6 +13,8 @@ interface VirtualRepoGridProps {
   onToggleFavorite: (repo: Repo) => void;
   onOpenIde: (repo: Repo) => void;
   onOpenAgent: (repo: Repo) => void;
+  onOpenFolder: (repo: Repo) => void;
+  onOpenHost: (repo: Repo) => void;
   onSummarize: (repo: Repo) => void;
 }
 
@@ -27,6 +29,8 @@ export function VirtualRepoGrid({
   onToggleFavorite,
   onOpenIde,
   onOpenAgent,
+  onOpenFolder,
+  onOpenHost,
   onSummarize,
 }: VirtualRepoGridProps) {
   const list = view === "list";
@@ -50,6 +54,8 @@ export function VirtualRepoGrid({
           onToggleFavorite={onToggleFavorite}
           onOpenIde={onOpenIde}
           onOpenAgent={onOpenAgent}
+          onOpenFolder={onOpenFolder}
+          onOpenHost={onOpenHost}
           onSummarize={aiReady ? onSummarize : undefined}
         />
       )}

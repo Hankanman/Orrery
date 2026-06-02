@@ -115,6 +115,7 @@ pub fn run() {
             commands::set_favorite,
             commands::open_in_ide,
             commands::open_agent,
+            commands::open_folder,
             commands::enrich_repo,
             commands::github_login_start,
             commands::github_login_poll,

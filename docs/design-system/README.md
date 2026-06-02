@@ -164,7 +164,19 @@ The matching `*-glow` tokens are retained but no longer painted as halos (flat
 design). Use the solid hue for icons/text; the only remaining use of a `*-glow`
 value is a flat low-alpha hover *tint* on a couple of buttons.
 
-### 3.5 Language dots (`--lang-*`)
+### 3.5 Launch-action colours (`--orr-act-*`)
+Each repo action has its own identity colour (icon + hover tint), on a shared
+flat/muted button base (`.orr-cbtn`). The colour is set per-variant via an
+`--act` custom property.
+
+| Token | Action | Dark | Light |
+|---|---|---|---|
+| `--orr-act-ide` | Open in IDE | `#5b9dff` | `#2f6fdb` |
+| `--orr-act-agent` | Terminal agent | `#a78bfa` | `#7c4ddb` |
+| `--orr-act-folder` | Reveal folder | `#f5b94b` | `#c9871d` |
+| `--orr-act-host` | Open on GitHub/GitLab | `#46c8a0` | `#1f9e76` |
+
+### 3.6 Language dots (`--lang-*`)
 GitHub-linguist colours for ~17 common languages, plus `--lang-default`. Resolved
 in [`src/lib/format.ts`](../../src/lib/format.ts) via `languageColor()`.
 

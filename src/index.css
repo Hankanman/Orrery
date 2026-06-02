@@ -209,6 +209,12 @@
   --orr-dirty: #e08a2b;
   --orr-behind: #e05656;
 
+  /* Launch-action identity colours (IDE / agent / folder / host) */
+  --orr-act-ide: #2f6fdb;
+  --orr-act-agent: #7c4ddb;
+  --orr-act-folder: #c9871d;
+  --orr-act-host: #1f9e76;
+
   /* GitHub-linguist language dots */
   --lang-rust: #dea584;
   --lang-ts: #3178c6;
@@ -302,6 +308,12 @@
   --orr-clean: #3dd68c;
   --orr-dirty: #ff9e45;
   --orr-behind: #ff6b6b;
+
+  /* Brighter launch-action colours for dark mode */
+  --orr-act-ide: #5b9dff;
+  --orr-act-agent: #a78bfa;
+  --orr-act-folder: #f5b94b;
+  --orr-act-host: #46c8a0;
 }
 
 @layer components {
@@ -983,6 +995,8 @@
     margin-top: 14px;
     position: relative;
   }
+  /* Launch actions share a flat, muted base; each carries its own identity
+     colour (--act) on the icon and on hover — IDE, Agent, Folder, Host. */
   .orr-cbtn {
     flex: 1;
     display: inline-flex;
@@ -993,29 +1007,40 @@
     border-radius: var(--r-sm);
     padding: 8px 0;
     cursor: pointer;
-    border: 1px solid transparent;
+    background: var(--orr-glass-2);
+    color: var(--orr-fg-1);
+    border: 1px solid var(--orr-border);
     transition: all var(--dur-fast) var(--ease-out);
   }
+  .orr-cbtn svg {
+    color: var(--act, var(--orr-fg-2));
+  }
+  .orr-cbtn:hover {
+    border-color: color-mix(in oklch, var(--act, var(--primary)) 55%, transparent);
+    color: var(--act, var(--orr-fg-0));
+    background: color-mix(in oklch, var(--act, var(--primary)) 12%, transparent);
+  }
+  .orr-cbtn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
   .orr-cbtn.ide {
-    background: var(--orr-accent);
-    color: var(--orr-accent-fg);
-    font-weight: 600;
-  }
-  .orr-cbtn.ide:hover {
-    background: var(--orr-accent-bright);
-  }
-  .orr-cbtn.ide:active {
-    background: var(--orr-accent-dim);
+    --act: var(--orr-act-ide);
   }
   .orr-cbtn.agent {
-    background: var(--orr-glass-2);
-    color: var(--orr-fg-0);
-    border-color: var(--orr-border-strong);
+    --act: var(--orr-act-agent);
   }
-  .orr-cbtn.agent:hover {
-    border-color: color-mix(in oklch, var(--orr-ai) 50%, transparent);
-    color: var(--orr-ai);
-    background: var(--orr-ai-glow);
+  .orr-cbtn.folder {
+    --act: var(--orr-act-folder);
+  }
+  .orr-cbtn.host {
+    --act: var(--orr-act-host);
+  }
+  /* Icon-only action (folder / open-on-host on cards). */
+  .orr-cbtn.icon {
+    flex: none;
+    width: 38px;
+    padding: 8px 0;
   }
 
   /* list-mode card */

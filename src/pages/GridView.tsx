@@ -80,6 +80,8 @@ export function GridView() {
     toggleFavorite,
     openIde,
     openAgent,
+    openFolder,
+    openHost,
   } = useRepos();
 
   const [activeRoot, setActiveRoot] = useState("all");
@@ -307,6 +309,8 @@ export function GridView() {
             onToggleFavorite={toggleFavorite}
             onOpenIde={openIde}
             onOpenAgent={openAgent}
+            onOpenFolder={openFolder}
+            onOpenHost={openHost}
             onSummarize={summarizeRepo}
           />
         )}
