@@ -3,12 +3,19 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{LazyLock, RwLock};
 
 use crate::model::AppConfig;
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("orrery").join("config.toml"))
 }
+
+// Process-lifetime cache: `load()` is called many times per request cycle
+// (scan, enrich, ai, watcher…). The config only changes through `save()` (the
+// settings UI), which refreshes the cache, so we avoid re-reading/parsing the
+// TOML on every call.
+static CACHE: LazyLock<RwLock<Option<AppConfig>>> = LazyLock::new(|| RwLock::new(None));
 
 /// First command on PATH from `candidates`, formatted into a `{path}` template.
 fn detect(candidates: &[&str], template: &str) -> Option<String> {
@@ -61,7 +68,19 @@ impl Default for AppConfig {
 }
 
 /// Load config, falling back to (and writing) defaults if absent/invalid.
+/// Cached after the first read; `save()` keeps the cache current.
 pub fn load() -> AppConfig {
+    if let Some(cfg) = CACHE.read().ok().and_then(|g| g.clone()) {
+        return cfg;
+    }
+    let cfg = load_uncached();
+    if let Ok(mut g) = CACHE.write() {
+        *g = Some(cfg.clone());
+    }
+    cfg
+}
+
+fn load_uncached() -> AppConfig {
     let Some(path) = config_path() else {
         return AppConfig::default();
     };
@@ -82,7 +101,12 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let text = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(&path, text).map_err(|e| e.to_string())
+    fs::write(&path, text).map_err(|e| e.to_string())?;
+    // Keep the cache in step with what we just wrote.
+    if let Ok(mut g) = CACHE.write() {
+        *g = Some(config.clone());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -13,7 +13,11 @@ const UA: &str = "Orrery/0.1 (+https://orrery.app)";
 const GH: &str = "https://api.github.com";
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder().user_agent(UA).build().unwrap_or_default()
+    // Shared client (Arc-backed) so the inbox's several GitHub calls reuse one
+    // connection pool instead of handshaking anew each time.
+    static CLIENT: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(|| reqwest::Client::builder().user_agent(UA).build().unwrap_or_default());
+    CLIENT.clone()
 }
 
 #[derive(Debug, Clone, Serialize)]

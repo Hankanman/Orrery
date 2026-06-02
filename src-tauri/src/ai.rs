@@ -11,9 +11,16 @@ use crate::model::Repo;
 
 const OLLAMA: &str = "http://localhost:11434";
 
+/// Shared HTTP client so the many Ollama calls (status, per-repo summaries and
+/// embeddings) reuse one connection pool. reqwest::Client is Arc-backed.
+fn client() -> reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(reqwest::Client::new);
+    CLIENT.clone()
+}
+
 /// Is a local Ollama server reachable?
 pub async fn available() -> bool {
-    reqwest::Client::new()
+    client()
         .get(format!("{OLLAMA}/api/version"))
         .send()
         .await
@@ -34,7 +41,7 @@ pub async fn installed_models() -> Vec<(String, u64)> {
         #[serde(default)]
         size: u64,
     }
-    let resp = reqwest::Client::new().get(format!("{OLLAMA}/api/tags")).send().await;
+    let resp = client().get(format!("{OLLAMA}/api/tags")).send().await;
     match resp {
         Ok(r) => match r.json::<Tags>().await {
             Ok(t) => t.models.into_iter().map(|m| (m.name, m.size)).collect(),
@@ -112,7 +119,7 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
     if suppress_think {
         body["think"] = serde_json::Value::Bool(false);
     }
-    let resp = reqwest::Client::new()
+    let resp = client()
         .post(format!("{OLLAMA}/api/generate"))
         .json(&body)
         .send()
@@ -133,7 +140,7 @@ pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
         embeddings: Vec<Vec<f32>>,
     }
     let body = serde_json::json!({ "model": model, "input": text });
-    let resp = reqwest::Client::new()
+    let resp = client()
         .post(format!("{OLLAMA}/api/embed"))
         .json(&body)
         .send()

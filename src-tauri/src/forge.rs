@@ -45,10 +45,11 @@ pub(crate) fn valid_host(domain: &str) -> bool {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(UA)
-        .build()
-        .unwrap_or_default()
+    // One shared client → connection/TLS reuse across the per-repo enrich calls.
+    // reqwest::Client is Arc-backed, so cloning just shares the pool.
+    static CLIENT: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(|| reqwest::Client::builder().user_agent(UA).build().unwrap_or_default());
+    CLIENT.clone()
 }
 
 async fn fetch_github(slug: &str, token: Option<&str>) -> Result<HostInfo, String> {
