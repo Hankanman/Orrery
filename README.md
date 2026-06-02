@@ -55,9 +55,14 @@ toolchain and `pkg-config`).
 ```bash
 pnpm install          # install JS deps
 pnpm tauri dev        # run the desktop app (Vite + Rust core)
-pnpm tauri build       # produce a release bundle
+pnpm tauri:build      # produce release bundles (deb + rpm + AppImage)
 pnpm build            # frontend-only build (tsc + vite)
 ```
+
+`tauri:build` runs `tauri build` with `NO_STRIP=true`. On modern distros (e.g.
+Fedora) the linker emits a `.relr.dyn` section that the old `strip` bundled
+inside `linuxdeploy` can't parse, which otherwise aborts the AppImage stage;
+`NO_STRIP` skips that pass. Plain `pnpm tauri build` still works for deb/rpm.
 
 ## Linux display backend
 

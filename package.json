@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:build": "NO_STRIP=true tauri build"
   },
   "dependencies": {
     "@fontsource/geist-mono": "^5.2.8",
