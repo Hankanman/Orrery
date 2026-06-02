@@ -17,9 +17,10 @@ import {
 } from "lucide-react";
 import { ContributionGraph } from "@/components/ContributionGraph";
 import { RepoCard, type RepoView } from "@/components/RepoCard";
-import { Sidebar } from "@/components/layout/Sidebar";
+import { GridFacets } from "@/components/layout/GridFacets";
 import { ipc, isTauri, type Briefing } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
+import { useSidebarSlot } from "@/lib/sidebar-slot";
 import { repoStatus } from "@/lib/format";
 import type { Repo } from "@/types";
 import { cn } from "@/lib/utils";
@@ -138,6 +139,22 @@ export function GridView() {
   // across filters so the overview doesn't jump when you narrow the grid.
   const allIds = useMemo(() => repos.map((r) => r.id), [repos]);
 
+  // Mission Control's sidebar content: root + language filters.
+  useSidebarSlot(
+    useMemo(
+      () => (
+        <GridFacets
+          repos={repos}
+          activeRoot={activeRoot}
+          onSelectRoot={setActiveRoot}
+          langFilter={langFilter}
+          onSelectLang={setLangFilter}
+        />
+      ),
+      [repos, activeRoot, langFilter],
+    ),
+  );
+
   // One-shot daily briefing once repos are loaded — only when AI is usable.
   useEffect(() => {
     if (!isTauri() || briefedRef.current || !ready || repos.length === 0 || !aiReady) return;
@@ -177,16 +194,7 @@ export function GridView() {
   const sortLabel = SORTS.find((s) => s.key === sort)!.label;
 
   return (
-    <div className="orr-body">
-      <div className="orr-starfield" aria-hidden />
-      <Sidebar
-        repos={repos}
-        activeRoot={activeRoot}
-        onSelectRoot={setActiveRoot}
-        langFilter={langFilter}
-        onSelectLang={setLangFilter}
-      />
-
+    <>
       <div className="orr-main">
         {ready && repos.length > 0 && showContrib && <ContributionGraph ids={allIds} onHide={toggleContrib} />}
 
@@ -325,6 +333,6 @@ export function GridView() {
           <RepoDrawer repo={selected} onClose={() => setSelected(null)} />
         </Suspense>
       )}
-    </div>
+    </>
   );
 }

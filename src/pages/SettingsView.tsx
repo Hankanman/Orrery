@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, DownloadCloud, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2, Zap } from "lucide-react";
 import { ipc, isTauri, type AiStatus, type AiTest, type AppConfig, type DeviceStart } from "@/lib/ipc";
 import { reduceMotionEnabled, setReduceMotion } from "@/lib/motion";
 import { useRepos } from "@/lib/repos-context";
+import { useSidebarSlot } from "@/lib/sidebar-slot";
 import { HostIcon } from "@/components/HostIcon";
 import { ModelSelect } from "@/components/ModelSelect";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +30,14 @@ interface PullState {
   status: string;
   percent: number;
 }
+
+const SETTINGS_SECTIONS = [
+  { id: "set-roots", label: "Workspace roots" },
+  { id: "set-launchers", label: "Launchers" },
+  { id: "set-github", label: "GitHub" },
+  { id: "set-ai", label: "AI & search" },
+  { id: "set-motion", label: "Motion" },
+] as const;
 
 export function SettingsView() {
   const { refresh, refreshAiStatus, clearSummaries } = useRepos();
@@ -101,6 +110,28 @@ export function SettingsView() {
       .catch(() => {});
     return () => unlisten?.();
   }, []);
+
+  // Settings' sidebar content: jump to a section.
+  useSidebarSlot(
+    useMemo(
+      () => (
+        <div className="orr-sb-sec">
+          <div className="orr-sb-lead">Sections</div>
+          {SETTINGS_SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className="orr-sb-item"
+              onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            >
+              <span className="nm">{s.label}</span>
+            </button>
+          ))}
+        </div>
+      ),
+      [],
+    ),
+  );
 
   if (!config) return <div className="orr-settings" />;
 
@@ -232,7 +263,7 @@ export function SettingsView() {
       </header>
 
       <div className="orr-settings-body">
-        <Card>
+        <Card id="set-roots" className="scroll-mt-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <FolderGit2 className="size-4 text-primary" /> Workspace roots
@@ -296,7 +327,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="set-launchers" className="scroll-mt-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Terminal className="size-4 text-primary" /> Launchers
@@ -321,7 +352,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="set-github" className="scroll-mt-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <HostIcon host="github" className="size-4" /> GitHub
@@ -369,7 +400,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="set-ai" className="scroll-mt-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="size-4 text-primary" /> AI &amp; semantic search
@@ -480,7 +511,7 @@ export function SettingsView() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="set-motion" className="scroll-mt-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Zap className="size-4 text-primary" /> Motion

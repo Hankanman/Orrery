@@ -524,9 +524,21 @@
     display: flex;
     flex-direction: column;
     padding: 16px 12px;
-    gap: 20px;
-    overflow-y: auto;
+    gap: 16px;
+    overflow: hidden;
     z-index: 1;
+  }
+  /* Per-screen contextual content; scrolls independently of the fixed nav/foot. */
+  .orr-sb-slot {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .orr-sb-slot:empty {
+    flex: 1;
   }
   .orr-sb-sec {
     display: flex;

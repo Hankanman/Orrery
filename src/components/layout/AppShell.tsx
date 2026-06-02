@@ -1,9 +1,11 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { Folder, Inbox, Orbit, RefreshCw, Search, Settings } from "lucide-react";
+import { Link, Outlet } from "@tanstack/react-router";
+import { Folder, Orbit, RefreshCw, Search } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ScanProgress } from "@/components/ScanProgress";
+import { Sidebar } from "@/components/layout/Sidebar";
 import { ReposProvider, useRepos } from "@/lib/repos-context";
+import { SidebarSlotProvider } from "@/lib/sidebar-slot";
 import { useSystemAppearance } from "@/hooks/useSystemAppearance";
 import { cn } from "@/lib/utils";
 
@@ -13,7 +15,6 @@ const CommandPalette = lazy(() =>
 );
 
 function Shell() {
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { repos, loading, refresh } = useRepos();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -83,25 +84,11 @@ function Shell() {
         >
           <RefreshCw className={cn("size-4", loading && "animate-spin")} />
         </button>
-        <Link
-          to="/inbox"
-          className={cn("orr-iconbtn", pathname === "/inbox" && "active")}
-          title="Inbox"
-          aria-label="Inbox"
-        >
-          <Inbox className="size-4" />
-        </Link>
-        <Link
-          to="/settings"
-          className={cn("orr-iconbtn", pathname === "/settings" && "active")}
-          title="Settings"
-          aria-label="Settings"
-        >
-          <Settings className="size-4" />
-        </Link>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="orr-body">
+        <div className="orr-starfield" aria-hidden />
+        <Sidebar />
         <Outlet />
       </div>
 
@@ -119,7 +106,9 @@ export function AppShell() {
   return (
     <TooltipProvider delayDuration={300}>
       <ReposProvider>
-        <Shell />
+        <SidebarSlotProvider>
+          <Shell />
+        </SidebarSlotProvider>
       </ReposProvider>
     </TooltipProvider>
   );
