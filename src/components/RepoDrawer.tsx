@@ -5,6 +5,7 @@ import { Check, GitBranch, Scissors, Sparkles, Trash2, X } from "lucide-react";
 import type { Repo } from "@/types";
 import { ipc, isTauri, type BranchInfo, type CommitInfo, type WorktreeInfo } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
+import { BrandIcon } from "@/components/BrandIcon";
 import { HostIcon } from "@/components/HostIcon";
 import { VirtualList } from "@/components/VirtualList";
 import { timeAgo } from "@/lib/format";
@@ -13,7 +14,7 @@ import { cn } from "@/lib/utils";
 type Tab = "overview" | "changes" | "readme";
 
 export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () => void }) {
-  const { refresh, openIde, openAgent, aiReady } = useRepos();
+  const { refresh, openIde, openAgent, aiReady, ideBrand, ideName, agentBrand, agentName } = useRepos();
   const [tab, setTab] = useState<Tab>("overview");
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
@@ -334,10 +335,12 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
         {/* Footer actions */}
         <div className="flex gap-2 border-t border-border/70 p-3">
           <button type="button" className="orr-cbtn ide flex-1" onClick={() => openIde(repo)}>
-            Open in IDE
+            <BrandIcon brand={ideBrand} category="ide" />
+            {ideName || "Open in IDE"}
           </button>
           <button type="button" className="orr-cbtn agent flex-1" onClick={() => openAgent(repo)}>
-            Agent
+            <BrandIcon brand={agentBrand} category="agent" />
+            {agentName || "Agent"}
           </button>
         </div>
       </aside>
