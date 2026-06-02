@@ -855,6 +855,39 @@
       transform: none;
     }
   }
+  /* Initial-load cascade: the `.stagger` class is present only on the first
+     paint (GridView drops it after the cascade), so filtering/sorting later
+     animates uniformly rather than re-staggering. */
+  .orr-grid.stagger .orr-card:nth-child(1) {
+    animation-delay: 0ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(2) {
+    animation-delay: 50ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(3) {
+    animation-delay: 100ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(4) {
+    animation-delay: 150ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(5) {
+    animation-delay: 200ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(6) {
+    animation-delay: 250ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(7) {
+    animation-delay: 300ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(8) {
+    animation-delay: 350ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(9) {
+    animation-delay: 400ms;
+  }
+  .orr-grid.stagger .orr-card:nth-child(n + 10) {
+    animation-delay: 450ms;
+  }
   .orr-card-head {
     display: flex;
     align-items: flex-start;

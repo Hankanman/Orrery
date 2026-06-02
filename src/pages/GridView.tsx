@@ -82,6 +82,11 @@ export function GridView() {
     }
   });
   const briefedRef = useRef(false);
+  // Stagger card entrance on the first paint only. We drop the `stagger` class
+  // once the cascade has finished starting, so later mounts (filtering, sorting)
+  // animate uniformly instead of re-staggering.
+  const [stagger, setStagger] = useState(true);
+  const staggerStartedRef = useRef(false);
 
   const toggleContrib = () =>
     setShowContrib((v) => {
@@ -123,6 +128,15 @@ export function GridView() {
     briefedRef.current = true;
     ipc.dailyBriefing(repos).then(setBriefing).catch(() => {});
   }, [ready, repos]);
+
+  // Drop the stagger class once the first batch of cards is on screen and the
+  // cascade has had time to start on each — after that, mounts animate plainly.
+  useEffect(() => {
+    if (staggerStartedRef.current || !ready || visible.length === 0) return;
+    staggerStartedRef.current = true;
+    const t = setTimeout(() => setStagger(false), 650);
+    return () => clearTimeout(t);
+  }, [ready, visible.length]);
 
   const toggleChip = (chip: Chip) =>
     setChips((prev) => {
@@ -259,7 +273,7 @@ export function GridView() {
             </button>
           </div>
         ) : (
-          <div className={cn("orr-grid", view === "list" && "list")}>
+          <div className={cn("orr-grid", view === "list" && "list", stagger && "stagger")}>
             {visible.map((repo) => (
               <RepoCard
                 key={repo.id}
