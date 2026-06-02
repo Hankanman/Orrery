@@ -60,16 +60,21 @@ pub struct CiStatus {
     pub state: String,
 }
 
-/// One entry in the release feed — the latest release of a repo you've starred.
-#[derive(Debug, Clone, Serialize)]
+/// One entry in the activity feed. `kind` distinguishes a starred-repo release
+/// from a followed-user action so the UI can render the right sentence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReleaseItem {
+pub struct FeedItem {
+    /// "release" | "starred" | "created" | "forked" | "public"
+    pub kind: String,
+    /// The followed user who did it (activity events); None for starred releases.
+    pub actor: Option<String>,
     pub repo: String, // owner/name
-    pub name: String, // release title (falls back to tag)
-    pub tag: String,
+    pub title: String, // release title, or empty for plain actions
+    pub tag: String,   // release tag, or empty
+    pub detail: String, // release notes, truncated
     pub url: String,
-    pub published_at: i64, // unix seconds
-    pub body: String,      // release notes, truncated
+    pub timestamp: i64, // unix seconds
     pub prerelease: bool,
     pub host: Host,
 }
@@ -96,12 +101,17 @@ fn parse_iso8601(s: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3_600 + mi * 60 + se)
 }
 
-/// Chronological feed of the latest releases across the repos you've starred.
-/// Uses GitHub GraphQL — one request fetches 100 stars *and* their latest
-/// release, far cheaper than per-repo REST. Newest first, drafts skipped.
-pub async fn github_release_feed() -> Result<Vec<ReleaseItem>, String> {
-    let token = oauth::github_token().ok_or("connect GitHub to see the release feed")?;
+fn truncate(mut s: String, max: usize) -> String {
+    if s.chars().count() > max {
+        s = s.chars().take(max).collect::<String>() + "…";
+    }
+    s
+}
 
+/// Latest releases across the repos you've starred, via GitHub GraphQL — one
+/// request fetches 100 stars *and* their latest release (far cheaper than
+/// per-repo REST). Up to ~200 most-recently-starred repos.
+async fn release_items(token: &str) -> Result<Vec<FeedItem>, String> {
     const QUERY: &str = r#"query($cursor: String) {
       viewer {
         starredRepositories(first: 100, after: $cursor, orderBy: {field: STARRED_AT, direction: DESC}) {
@@ -169,14 +179,13 @@ pub async fn github_release_feed() -> Result<Vec<ReleaseItem>, String> {
         draft: bool,
     }
 
-    let mut items: Vec<ReleaseItem> = Vec::new();
+    let mut items: Vec<FeedItem> = Vec::new();
     let mut cursor: Option<String> = None;
-    // Bound the work to ~200 most-recently-starred repos (2 pages).
     for _ in 0..2 {
         let body = serde_json::json!({ "query": QUERY, "variables": { "cursor": cursor } });
         let resp = client()
             .post(format!("{GH}/graphql"))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .json(&body)
             .send()
             .await
@@ -185,32 +194,26 @@ pub async fn github_release_feed() -> Result<Vec<ReleaseItem>, String> {
             return Err(format!("GitHub GraphQL {}", resp.status()));
         }
         let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
-        let Some(data) = parsed.data else {
-            break;
-        };
+        let Some(data) = parsed.data else { break };
         let starred = data.viewer.starred;
         for node in starred.nodes {
-            let Some(rel) = node.releases.nodes.into_iter().next() else {
-                continue;
-            };
+            let Some(rel) = node.releases.nodes.into_iter().next() else { continue };
             if rel.draft {
                 continue;
             }
-            let name = match rel.name {
+            let title = match rel.name {
                 Some(n) if !n.trim().is_empty() => n,
                 _ => rel.tag_name.clone(),
             };
-            let mut body = rel.description.unwrap_or_default();
-            if body.chars().count() > 320 {
-                body = body.chars().take(320).collect::<String>() + "…";
-            }
-            items.push(ReleaseItem {
+            items.push(FeedItem {
+                kind: "release".into(),
+                actor: None,
                 repo: node.name_with_owner,
-                name,
+                title,
                 tag: rel.tag_name,
+                detail: truncate(rel.description.unwrap_or_default(), 320),
                 url: rel.url,
-                published_at: rel.published_at.as_deref().and_then(parse_iso8601).unwrap_or(0),
-                body,
+                timestamp: rel.published_at.as_deref().and_then(parse_iso8601).unwrap_or(0),
                 prerelease: rel.prerelease,
                 host: Host::Github,
             });
@@ -220,9 +223,136 @@ pub async fn github_release_feed() -> Result<Vec<ReleaseItem>, String> {
         }
         cursor = starred.page_info.end_cursor;
     }
+    Ok(items)
+}
 
-    items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
-    items.truncate(60);
+/// Activity from the people you follow — GitHub's "received events" (the home
+/// dashboard feed). Surfaces the meaningful event types.
+async fn following_items(token: &str) -> Result<Vec<FeedItem>, String> {
+    #[derive(Deserialize)]
+    struct Event {
+        #[serde(rename = "type")]
+        kind: Option<String>,
+        actor: Option<Actor>,
+        repo: Option<EvRepo>,
+        payload: Option<Payload>,
+        created_at: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Actor {
+        login: String,
+    }
+    #[derive(Deserialize)]
+    struct EvRepo {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Payload {
+        #[serde(default)]
+        ref_type: Option<String>,
+        #[serde(default)]
+        release: Option<EvRelease>,
+    }
+    #[derive(Deserialize)]
+    struct EvRelease {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        tag_name: Option<String>,
+        #[serde(default)]
+        html_url: Option<String>,
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default)]
+        prerelease: bool,
+    }
+
+    let login = github_user(token).await?;
+    let resp = client()
+        .get(format!("{GH}/users/{login}/received_events?per_page=100"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub events {}", resp.status()));
+    }
+    let events: Vec<Event> = resp.json().await.map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for e in events {
+        let ts = e.created_at.as_deref().and_then(parse_iso8601).unwrap_or(0);
+        let actor = e.actor.map(|a| a.login);
+        let Some(repo) = e.repo.map(|r| r.name) else { continue };
+        let repo_url = format!("https://github.com/{repo}");
+        let item = |kind: &str, title: String, tag: String, detail: String, url: String, pre: bool| FeedItem {
+            kind: kind.into(),
+            actor: actor.clone(),
+            repo: repo.clone(),
+            title,
+            tag,
+            detail,
+            url,
+            timestamp: ts,
+            prerelease: pre,
+            host: Host::Github,
+        };
+        match e.kind.as_deref() {
+            Some("ReleaseEvent") => {
+                if let Some(rel) = e.payload.and_then(|p| p.release) {
+                    let tag = rel.tag_name.unwrap_or_default();
+                    let title = match rel.name {
+                        Some(n) if !n.trim().is_empty() => n,
+                        _ => tag.clone(),
+                    };
+                    out.push(item(
+                        "release",
+                        title,
+                        tag,
+                        truncate(rel.body.unwrap_or_default(), 320),
+                        rel.html_url.unwrap_or(repo_url),
+                        rel.prerelease,
+                    ));
+                }
+            }
+            Some("WatchEvent") => out.push(item("starred", String::new(), String::new(), String::new(), repo_url, false)),
+            Some("CreateEvent") => {
+                if e.payload.as_ref().and_then(|p| p.ref_type.as_deref()) == Some("repository") {
+                    out.push(item("created", String::new(), String::new(), String::new(), repo_url, false));
+                }
+            }
+            Some("ForkEvent") => out.push(item("forked", String::new(), String::new(), String::new(), repo_url, false)),
+            Some("PublicEvent") => out.push(item("public", String::new(), String::new(), String::new(), repo_url, false)),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// The unified activity feed: starred-repo releases + activity from people you
+/// follow, merged newest-first and de-duplicated by URL. Each source is
+/// best-effort — a failure in one still returns the other.
+pub async fn github_feed() -> Result<Vec<FeedItem>, String> {
+    let token = oauth::github_token().ok_or("connect GitHub to see the feed")?;
+
+    let mut items: Vec<FeedItem> = Vec::new();
+    let mut errors = Vec::new();
+    match release_items(&token).await {
+        Ok(r) => items.extend(r),
+        Err(e) => errors.push(e),
+    }
+    match following_items(&token).await {
+        Ok(r) => items.extend(r),
+        Err(e) => errors.push(e),
+    }
+    if items.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+
+    items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|i| seen.insert(i.url.clone()));
+    items.truncate(80);
     Ok(items)
 }
 

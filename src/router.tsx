@@ -31,13 +31,19 @@ const feedRoute = createRoute({
   component: lazyRouteComponent(() => import("@/pages/FeedView"), "FeedView"),
 });
 
+const exploreRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/explore",
+  component: lazyRouteComponent(() => import("@/pages/ExploreView"), "ExploreView"),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   component: lazyRouteComponent(() => import("@/pages/SettingsView"), "SettingsView"),
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, feedRoute, settingsRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, feedRoute, exploreRoute, settingsRoute]);
 
 export const router = createRouter({ routeTree });
 

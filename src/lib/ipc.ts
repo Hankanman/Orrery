@@ -88,13 +88,15 @@ export interface CiStatus {
   state: "success" | "failure" | "pending" | "none";
 }
 
-export interface ReleaseItem {
+export interface FeedItem {
+  kind: "release" | "starred" | "created" | "forked" | "public";
+  actor: string | null;
   repo: string;
-  name: string;
+  title: string;
   tag: string;
+  detail: string;
   url: string;
-  publishedAt: number;
-  body: string;
+  timestamp: number;
   prerelease: boolean;
   host: "github" | "gitlab";
 }
@@ -191,7 +193,7 @@ export const ipc = {
   getNotifications: () => invoke<NotificationItem[]>("get_notifications"),
   ciStatus: (slug: string) => invoke<CiStatus>("ci_status", { slug }),
   listStarred: () => invoke<RemoteRepo[]>("list_starred"),
-  releaseFeed: () => invoke<ReleaseItem[]>("release_feed"),
+  getFeed: (refresh = false) => invoke<FeedItem[]>("get_feed", { refresh }),
   cloneRepo: (url: string, destRoot: string) => invoke<string>("clone_repo", { url, destRoot }),
   activeAgents: () => invoke<string[]>("active_agents"),
   notify: (title: string, body: string) => invoke<void>("notify", { title, body }),

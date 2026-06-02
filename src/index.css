@@ -1346,6 +1346,14 @@
   margin: 0 auto;
   padding: 0 24px 24px;
 }
+.orr-explore-grid {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0 24px 24px;
+}
 .orr-feed-item {
   display: block;
   width: 100%;
@@ -1393,9 +1401,9 @@
   font: var(--text-data-sm);
   color: var(--orr-fg-3);
 }
-.orr-feed-item .name {
+.orr-feed-item .action {
   margin-top: 4px;
-  font: var(--text-body);
+  font: var(--text-small);
   color: var(--orr-fg-1);
 }
 .orr-feed-item .body {

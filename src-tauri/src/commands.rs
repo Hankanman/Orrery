@@ -670,10 +670,29 @@ pub async fn list_starred() -> Result<Vec<RemoteRepo>, String> {
     inbox::github_starred().await
 }
 
-/// Release feed: latest releases across the repos you've starred.
+/// Activity feed (starred releases + followed-user activity). Cached 30 min
+/// since it hits the GitHub API; `refresh` forces a re-fetch.
 #[tauri::command]
-pub async fn release_feed() -> Result<Vec<inbox::ReleaseItem>, String> {
-    inbox::github_release_feed().await
+pub async fn get_feed(refresh: bool) -> Result<Vec<inbox::FeedItem>, String> {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Cached {
+        at: i64,
+        items: Vec<inbox::FeedItem>,
+    }
+    const TTL: i64 = 1800;
+    let now = now_unix();
+    if !refresh {
+        if let Some(c) = cache::get_meta("feed").and_then(|r| serde_json::from_str::<Cached>(&r).ok()) {
+            if now - c.at < TTL {
+                return Ok(c.items);
+            }
+        }
+    }
+    let items = inbox::github_feed().await?;
+    if let Ok(blob) = serde_json::to_string(&Cached { at: now, items: items.clone() }) {
+        cache::set_meta("feed", &blob);
+    }
+    Ok(items)
 }
 
 /// Clone a repo into a configured root and return its working dir (#26).

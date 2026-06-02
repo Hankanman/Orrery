@@ -148,7 +148,7 @@ pub fn run() {
             commands::get_notifications,
             commands::ci_status,
             commands::list_starred,
-            commands::release_feed,
+            commands::get_feed,
             commands::clone_repo,
             commands::active_agents,
             commands::notify
