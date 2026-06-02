@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { FolderGit2, HardDrive, Inbox, LayoutGrid, Plus } from "lucide-react";
 import type { Repo } from "@/types";
@@ -17,20 +18,24 @@ export function Sidebar({ repos, activeRoot, onSelectRoot, langFilter, onSelectL
   const { lastScan } = useRepos();
   const navigate = useNavigate();
 
-  // Roots, in first-seen order, with live counts.
-  const roots: { path: string; count: number }[] = [];
-  for (const r of repos) {
-    const found = roots.find((x) => x.path === r.root);
-    if (found) found.count += 1;
-    else roots.push({ path: r.root, count: 1 });
-  }
-
-  // Language facets, most common first.
-  const langCounts = new Map<string, number>();
-  for (const r of repos) {
-    if (r.language) langCounts.set(r.language, (langCounts.get(r.language) ?? 0) + 1);
-  }
-  const langs = [...langCounts.entries()].sort((a, b) => b[1] - a[1]);
+  // Derived facets recompute only when the repo list changes — not on every
+  // parent re-render (enrich/summarize update repos in batches at startup).
+  const { roots, langs } = useMemo(() => {
+    // Roots, in first-seen order, with live counts.
+    const roots: { path: string; count: number }[] = [];
+    for (const r of repos) {
+      const found = roots.find((x) => x.path === r.root);
+      if (found) found.count += 1;
+      else roots.push({ path: r.root, count: 1 });
+    }
+    // Language facets, most common first.
+    const langCounts = new Map<string, number>();
+    for (const r of repos) {
+      if (r.language) langCounts.set(r.language, (langCounts.get(r.language) ?? 0) + 1);
+    }
+    const langs = [...langCounts.entries()].sort((a, b) => b[1] - a[1]);
+    return { roots, langs };
+  }, [repos]);
 
   return (
     <aside className="orr-sidebar">

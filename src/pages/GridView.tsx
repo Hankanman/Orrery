@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowUp,
@@ -17,13 +17,15 @@ import {
 } from "lucide-react";
 import { ContributionGraph } from "@/components/ContributionGraph";
 import { RepoCard, type RepoView } from "@/components/RepoCard";
-import { RepoDrawer } from "@/components/RepoDrawer";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { ipc, isTauri, type Briefing } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import { repoStatus } from "@/lib/format";
 import type { Repo } from "@/types";
 import { cn } from "@/lib/utils";
+
+// Defer the drawer (and its react-markdown/remark-gfm deps) until a repo opens.
+const RepoDrawer = lazy(() => import("@/components/RepoDrawer").then((m) => ({ default: m.RepoDrawer })));
 
 type SortKey = "activity" | "name" | "stars";
 type Chip = "dirty" | "ahead" | "starred" | "stale";
@@ -274,7 +276,11 @@ export function GridView() {
         )}
       </div>
 
-      <RepoDrawer repo={selected} onClose={() => setSelected(null)} />
+      {selected && (
+        <Suspense fallback={null}>
+          <RepoDrawer repo={selected} onClose={() => setSelected(null)} />
+        </Suspense>
+      )}
     </div>
   );
 }

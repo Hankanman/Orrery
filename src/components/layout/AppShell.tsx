@@ -1,18 +1,22 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { Folder, Inbox, Orbit, RefreshCw, Search, Settings } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { CommandPalette } from "@/components/CommandPalette";
 import { ReposProvider, useRepos } from "@/lib/repos-context";
 import { useSystemAppearance } from "@/hooks/useSystemAppearance";
 import { cn } from "@/lib/utils";
+
+// Defer the command palette (and its cmdk + dialog deps) until first ⌘K.
+const CommandPalette = lazy(() =>
+  import("@/components/CommandPalette").then((m) => ({ default: m.CommandPalette })),
+);
 
 function Shell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { repos, loading, refresh } = useRepos();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
-  const rootCount = new Set(repos.map((r) => r.root)).size;
+  const rootCount = useMemo(() => new Set(repos.map((r) => r.root)).size, [repos]);
 
   // Global ⌘K / Ctrl-K to open the command palette.
   useEffect(() => {
@@ -89,7 +93,11 @@ function Shell() {
         <Outlet />
       </div>
 
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      {paletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+        </Suspense>
+      )}
     </div>
   );
 }

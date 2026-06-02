@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Code, FolderGit2, RefreshCw, Settings, Sparkles, SquareTerminal } from "lucide-react";
 import {
@@ -25,32 +25,38 @@ export function CommandPalette({
   const { repos, openIde, openAgent, refresh } = useRepos();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
-  const [matches, setMatches] = useState<Repo[]>([]);
+  const [hitIds, setHitIds] = useState<string[]>([]);
 
   // Debounced semantic search — surfaces conceptually-related repos that a
-  // plain name filter would miss. Results are force-mounted so cmdk's literal
-  // filter doesn't hide them.
+  // plain name filter would miss. Depends only on `query`, so repo updates
+  // (enrich/summarize batches) don't re-fire the IPC call.
   useEffect(() => {
     if (!isTauri() || query.trim().length < 3) {
-      setMatches([]);
+      setHitIds([]);
       return;
     }
     let cancelled = false;
     const handle = setTimeout(async () => {
       try {
         const hits = await ipc.semanticSearch(query);
-        if (cancelled) return; // a newer query superseded this one
-        const byId = new Map(repos.map((r) => [r.id, r]));
-        setMatches(hits.map((h) => byId.get(h.id)).filter((r): r is Repo => Boolean(r)).slice(0, 5));
+        if (!cancelled) setHitIds(hits.map((h) => h.id)); // a newer query supersedes via cancel
       } catch {
-        if (!cancelled) setMatches([]);
+        if (!cancelled) setHitIds([]);
       }
     }, 250);
     return () => {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [query, repos]);
+  }, [query]);
+
+  // Map hit ids → repos separately, so a repo update just re-maps (cheap)
+  // rather than re-running the search. Results are force-mounted below so
+  // cmdk's literal filter doesn't hide them.
+  const matches = useMemo(() => {
+    const byId = new Map(repos.map((r) => [r.id, r]));
+    return hitIds.map((id) => byId.get(id)).filter((r): r is Repo => Boolean(r)).slice(0, 5);
+  }, [hitIds, repos]);
 
   const run = (fn: () => void) => {
     onOpenChange(false);

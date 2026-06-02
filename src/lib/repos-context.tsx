@@ -260,7 +260,22 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshAgents = useCallback(() => {
-    if (isTauri()) ipc.activeAgents().then(setActiveAgents).catch(() => {});
+    if (!isTauri()) return;
+    ipc
+      .activeAgents()
+      .then((next) => {
+        // Keep the same array reference when nothing changed (the usual case:
+        // no agents). Otherwise this 10s poll churns the context value and
+        // re-renders every consumer. Order-insensitive set compare.
+        setActiveAgents((prev) => {
+          if (prev.length === next.length) {
+            const set = new Set(prev);
+            if (next.every((id) => set.has(id))) return prev;
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
   }, []);
 
   const openAgent = useCallback(
