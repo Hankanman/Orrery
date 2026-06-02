@@ -32,7 +32,7 @@ zbus = "5"
 futures-util = "0.3"
 
 # Repo discovery + metadata
-git2 = "0.19"                                              # libgit2 (vendored)
+git2 = "0.20"                                              # libgit2 (vendored)
 walkdir = "2"                                              # repo scanning
 globset = "0.4"                                            # ignore-glob matching
 toml = "0.8"                                               # config file
