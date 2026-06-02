@@ -76,7 +76,17 @@ pub fn maybe_run() -> bool {
             help();
             true
         }
-        // No args (normal launch) or anything unrecognized → start the GUI.
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("orrery {}", env!("CARGO_PKG_VERSION"));
+            true
+        }
+        // An unrecognized flag is a typo, not a GUI launch — show help.
+        Some(arg) if arg.starts_with('-') => {
+            eprintln!("unknown option: {arg}\n");
+            help();
+            true
+        }
+        // No args (normal launch) or a non-flag arg (e.g. a file assoc) → GUI.
         _ => false,
     }
 }

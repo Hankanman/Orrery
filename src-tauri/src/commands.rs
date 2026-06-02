@@ -71,8 +71,9 @@ pub struct AgentSessions(pub std::sync::Mutex<std::collections::HashMap<String, 
 #[tauri::command]
 pub fn open_agent(id: String, sessions: tauri::State<AgentSessions>) -> Result<(), String> {
     let child = launch::spawn(&config::load().agent_command, &id)?;
-    if let Ok(mut map) = sessions.0.lock() {
-        map.insert(id, child); // replaces any prior (finished) session for this repo
+    let mut map = sessions.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mut old) = map.insert(id, child) {
+        let _ = old.try_wait(); // reap a prior (possibly exited) session
     }
     Ok(())
 }
@@ -80,16 +81,18 @@ pub fn open_agent(id: String, sessions: tauri::State<AgentSessions>) -> Result<(
 /// Repo ids with a currently-running agent session (reaps exited ones).
 #[tauri::command]
 pub fn active_agents(sessions: tauri::State<AgentSessions>) -> Vec<String> {
-    let Ok(mut map) = sessions.0.lock() else {
-        return Vec::new();
-    };
+    let mut map = sessions.0.lock().unwrap_or_else(|e| e.into_inner());
     let mut alive = Vec::new();
     map.retain(|id, child| match child.try_wait() {
         Ok(None) => {
             alive.push(id.clone());
             true
         }
-        _ => false, // exited or unwaitable → forget it
+        Ok(Some(_)) => false, // exited and reaped by try_wait
+        Err(_) => {
+            let _ = child.wait(); // best-effort reap before drop
+            false
+        }
     });
     alive
 }

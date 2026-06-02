@@ -47,13 +47,14 @@ fn configure_linux_env() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(target_os = "linux")]
-    configure_linux_env();
-
-    // Headless CLI subcommands (orrery list/open/…) — handle and exit.
+    // Headless CLI subcommands (orrery list/open/…) — handle and exit before
+    // touching GUI env vars (so e.g. GDK_BACKEND doesn't leak to a CLI-spawned editor).
     if cli::maybe_run() {
         return;
     }
+
+    #[cfg(target_os = "linux")]
+    configure_linux_env();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

@@ -56,7 +56,11 @@ impl Runner {
 
     #[zbus(name = "Run")]
     async fn run(&self, match_id: &str, _action_id: &str) {
-        // `match_id` is the repo's absolute path (its id) — open it in the IDE.
+        // The session bus is unauthenticated — only act on a match_id we
+        // actually produced (a known repo), never an arbitrary path.
+        if !cache::load_repos().iter().any(|r| r.id == match_id) {
+            return;
+        }
         let _ = launch::launch(&config::load().ide_command, match_id);
     }
 }
