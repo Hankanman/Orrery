@@ -60,7 +60,7 @@ export function languageColor(language: string | null): string {
     Perl: "#0298c3",
     R: "#198ce7",
     Julia: "#a270ba",
-    Crystal: "#000100",
+    Crystal: "#c8ccd1",
     Nix: "#7e7eff",
     Solidity: "#aa6746",
     Markdown: "#083fa1",
