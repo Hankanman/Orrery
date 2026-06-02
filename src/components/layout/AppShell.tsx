@@ -87,7 +87,6 @@ function Shell() {
       </header>
 
       <div className="orr-body">
-        <div className="orr-starfield" aria-hidden />
         <Sidebar />
         <Outlet />
       </div>

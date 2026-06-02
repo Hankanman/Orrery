@@ -80,10 +80,7 @@ export function GridFacets({ repos, activeRoot, onSelectRoot, langFilter, onSele
               className={cn("orr-sb-item", langFilter === lang && "active")}
               onClick={() => onSelectLang(langFilter === lang ? null : lang)}
             >
-              <span
-                className="dot"
-                style={{ background: languageColor(lang), boxShadow: `0 0 7px ${languageColor(lang)}` }}
-              />
+              <span className="dot" style={{ background: languageColor(lang) }} />
               <span className="nm">{lang}</span>
               <span className="count">{count}</span>
             </button>

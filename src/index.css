@@ -174,19 +174,6 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    /* Subtle accent glow in the deep background (visible mostly in dark). */
-    background-image:
-      radial-gradient(
-        1200px 600px at 78% -10%,
-        color-mix(in oklch, var(--primary) 8%, transparent),
-        transparent 60%
-      ),
-      radial-gradient(
-        900px 500px at 12% 110%,
-        color-mix(in oklch, var(--accent) 7%, transparent),
-        transparent 60%
-      );
-    background-attachment: fixed;
   }
 
   ::-webkit-scrollbar {
@@ -326,20 +313,6 @@
   .orr-starfield {
     display: none;
   }
-  .dark .orr-starfield {
-    display: block;
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    opacity: 0.5;
-    z-index: 0;
-    background-image:
-      radial-gradient(1px 1px at 20% 30%, rgba(255, 255, 255, 0.18), transparent),
-      radial-gradient(1px 1px at 70% 60%, rgba(255, 255, 255, 0.12), transparent),
-      radial-gradient(1px 1px at 40% 80%, rgba(255, 255, 255, 0.1), transparent),
-      radial-gradient(1px 1px at 85% 20%, rgba(255, 255, 255, 0.14), transparent),
-      radial-gradient(1px 1px at 55% 12%, rgba(255, 255, 255, 0.08), transparent);
-  }
 
   /* ---- In-app header (no window controls — KWin draws the titlebar) ---- */
   .orr-header {
@@ -350,8 +323,7 @@
     gap: 14px;
     padding: 0 16px;
     border-bottom: 1px solid var(--orr-border);
-    background: color-mix(in oklch, var(--background) 70%, transparent);
-    backdrop-filter: blur(18px);
+    background: var(--background);
     position: relative;
     z-index: 30;
   }
@@ -380,7 +352,6 @@
     transform: translate(-50%, -50%);
     border-radius: 50%;
     background: var(--primary);
-    box-shadow: 0 0 8px var(--orr-accent-glow);
   }
   .orr-spinner .sat {
     position: absolute;
@@ -397,7 +368,6 @@
     transform: translate(-50%, -50%);
     border-radius: 50%;
     background: var(--orr-accent-bright);
-    box-shadow: 0 0 6px var(--orr-accent-glow);
   }
   @keyframes orr-orbit {
     to {
@@ -455,7 +425,6 @@
   }
   .orr-mark {
     color: var(--orr-accent);
-    filter: drop-shadow(0 0 10px var(--orr-accent-glow));
   }
   .orr-roots {
     display: flex;
@@ -519,8 +488,7 @@
     width: 236px;
     flex: none;
     border-right: 1px solid var(--orr-border);
-    background: color-mix(in oklch, var(--background) 55%, transparent);
-    backdrop-filter: blur(14px);
+    background: var(--background);
     display: flex;
     flex-direction: column;
     padding: 16px 12px;
@@ -630,9 +598,6 @@
     flex-direction: column;
     position: relative;
     z-index: 1;
-    background:
-      radial-gradient(80% 50% at 78% -8%, var(--orr-accent-glow), transparent 60%),
-      radial-gradient(60% 40% at 0% 100%, var(--orr-ai-glow), transparent 60%);
   }
   .orr-toolbar {
     flex: none;
@@ -832,7 +797,6 @@
     border-radius: var(--r-md);
     border: 1px solid var(--orr-border);
     background: var(--orr-glass);
-    backdrop-filter: blur(var(--orr-blur));
     box-shadow: var(--orr-shadow-2), var(--orr-inset-top);
     padding: 14px 15px;
     cursor: pointer;
@@ -845,24 +809,11 @@
       box-shadow var(--dur-base) var(--ease-out),
       background var(--dur-base) var(--ease-out);
   }
-  .orr-card::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-    background: radial-gradient(120% 80% at 80% -10%, var(--orr-accent-glow), transparent 60%);
-    opacity: 0;
-    transition: opacity var(--dur-base);
-  }
   .orr-card:hover {
     transform: translateY(-3px);
     border-color: var(--orr-border-accent);
-    box-shadow: var(--orr-shadow-3), 0 0 30px var(--orr-accent-glow), var(--orr-inset-top);
+    box-shadow: var(--orr-shadow-3), var(--orr-inset-top);
     background: var(--orr-glass-hover);
-  }
-  .orr-card:hover::after {
-    opacity: 0.5;
   }
   .orr-card:active {
     transform: translateY(-1px) scale(0.995);
@@ -955,7 +906,6 @@
   }
   .orr-card-fav.on {
     color: var(--orr-star);
-    filter: drop-shadow(0 0 8px var(--orr-star-glow));
   }
   .orr-card-badge {
     font: var(--text-data-sm);
@@ -1097,7 +1047,6 @@
   }
   .orr-cbtn.ide:hover {
     background: var(--orr-accent-bright);
-    box-shadow: 0 0 18px var(--orr-accent-glow);
   }
   .orr-cbtn.ide:active {
     background: var(--orr-accent-dim);
@@ -1464,41 +1413,3 @@
   background: var(--card);
 }
 
-/* ============================================================================
-   WEBKITGTK (Tauri webview) PERFORMANCE
-   Chromium GPU-composites these; WebKitGTK does them on the CPU, so with ~20
-   glass cards they judder badly on scroll/animation. In the wrapper we drop
-   the blur and fixed-attachment — over the uniform dark base the glass reads
-   almost identically (cards are defined by their border + shadow), and the UI
-   becomes as smooth as the browser. The plain `pnpm dev` browser build is
-   untouched and keeps the full glass.
-   ========================================================================== */
-.tauri body {
-  background-attachment: scroll;
-}
-.tauri .orr-card {
-  backdrop-filter: none;
-}
-.tauri .orr-search {
-  backdrop-filter: none;
-}
-.tauri .orr-header {
-  backdrop-filter: none;
-  /* Slightly more opaque so the header stays legible without the blur. */
-  background: color-mix(in oklch, var(--background) 92%, transparent);
-}
-/* Large-radius box-shadows repaint expensively on the CPU. On hover, only the
-   transform (cheap, composited) animates; the shadow swaps without a 30px glow
-   to blur each frame, and the radial hover-glow overlay is dropped. */
-.tauri .orr-card {
-  transition:
-    transform var(--dur-base) var(--ease-out),
-    border-color var(--dur-base) var(--ease-out),
-    background var(--dur-base) var(--ease-out);
-}
-.tauri .orr-card:hover {
-  box-shadow: var(--orr-shadow-3), var(--orr-inset-top);
-}
-.tauri .orr-card::after {
-  display: none;
-}
