@@ -47,3 +47,12 @@ urlencoding = "2"
 [dev-dependencies]
 tempfile = "3"
 
+
+# Release profile tuned for size (these bundles ship to users). strip drops
+# symbols (~the unstripped 28M binary), LTO + a single codegen unit shrink and
+# can speed up the result. Keeps the default opt-level (3) so the perf work
+# isn't traded away. Helps deb/rpm most; the AppImage is dominated by WebKit.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
