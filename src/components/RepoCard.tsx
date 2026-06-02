@@ -1,3 +1,4 @@
+import { memo } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -56,7 +57,7 @@ function StatusRow({ repo }: { repo: Repo }) {
   );
 }
 
-export function RepoCard({
+function RepoCardImpl({
   repo,
   view = "grid",
   agentActive,
@@ -182,3 +183,8 @@ export function RepoCard({
     </button>
   );
 }
+
+// Memoized: during startup, enrich/summarize update repos in batches; with
+// stable context callbacks and preserved object identity for unchanged repos,
+// only the cards that actually changed re-render.
+export const RepoCard = memo(RepoCardImpl);

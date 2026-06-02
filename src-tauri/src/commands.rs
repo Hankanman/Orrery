@@ -422,9 +422,19 @@ pub async fn index_repos(repos: Vec<Repo>) -> usize {
                 repo.description.as_deref().unwrap_or("")
             );
             async move {
+                // Embedding only changes when the indexed text does. Skip repos
+                // whose text signature is unchanged — this turns rescans (and
+                // every file-watch refresh) from N Ollama calls into N cheap
+                // meta lookups.
+                let key = format!("embed_sig:{id}");
+                let sig = text_signature(&text);
+                if cache::get_meta(&key).as_deref() == Some(sig.as_str()) {
+                    return false;
+                }
                 match ai::embed(&model, &text).await {
                     Ok(vec) => {
                         cache::store_embedding(&id, &vec);
+                        cache::set_meta(&key, &sig);
                         true
                     }
                     Err(_) => false,
@@ -435,6 +445,14 @@ pub async fn index_repos(repos: Vec<Repo>) -> usize {
         count += done.into_iter().filter(|x| *x).count();
     }
     count
+}
+
+/// Stable hex fingerprint of a repo's embedding text, for skip-if-unchanged.
+fn text_signature(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    format!("{:x}", h.finish())
 }
 
 #[derive(serde::Serialize)]
@@ -556,4 +574,31 @@ pub async fn clone_repo(url: String, dest_root: String) -> Result<String, String
     tauri::async_runtime::spawn_blocking(move || git_ops::clone(&url, &dest_str))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Opt-in probe: times index_repos cold (forced re-embed) vs warm (skip).
+    ///   cargo test -p orrery --lib perf_index -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn perf_index() {
+        let cfg = config::load();
+        let repos = scan::scan(&cfg.roots, cfg.scan_depth, &cfg.ignore, &cache::favorites(), now_unix());
+        // Force cold by invalidating signatures for this run.
+        for r in &repos {
+            cache::set_meta(&format!("embed_sig:{}", r.id), "force-cold");
+        }
+        eprintln!("\n── index_repos perf ({} repos) ──", repos.len());
+        for label in ["cold", "warm"] {
+            let r = repos.clone();
+            let t = Instant::now();
+            let n = tauri::async_runtime::block_on(index_repos(r));
+            eprintln!("{label}: {:.1} ms  ({n} embedded)", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        eprintln!("─────────────────────────────────\n");
+    }
 }
