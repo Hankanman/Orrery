@@ -16,7 +16,8 @@ import {
   X,
 } from "lucide-react";
 import { ContributionGraph } from "@/components/ContributionGraph";
-import { RepoCard, type RepoView } from "@/components/RepoCard";
+import { type RepoView } from "@/components/RepoCard";
+import { VirtualRepoGrid } from "@/components/VirtualRepoGrid";
 import { GridFacets } from "@/components/layout/GridFacets";
 import { ipc, isTauri, type Briefing } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
@@ -98,11 +99,6 @@ export function GridView() {
     }
   });
   const briefedRef = useRef(false);
-  // Stagger card entrance on the first paint only. We drop the `stagger` class
-  // once the cascade has finished starting, so later mounts (filtering, sorting)
-  // animate uniformly instead of re-staggering.
-  const [stagger, setStagger] = useState(true);
-  const staggerStartedRef = useRef(false);
 
   const toggleContrib = () =>
     setShowContrib((v) => {
@@ -162,14 +158,6 @@ export function GridView() {
     ipc.dailyBriefing(repos).then(setBriefing).catch(() => {});
   }, [ready, repos, aiReady]);
 
-  // Drop the stagger class once the first batch of cards is on screen and the
-  // cascade has had time to start on each — after that, mounts animate plainly.
-  useEffect(() => {
-    if (staggerStartedRef.current || !ready || visible.length === 0) return;
-    staggerStartedRef.current = true;
-    const t = setTimeout(() => setStagger(false), 650);
-    return () => clearTimeout(t);
-  }, [ready, visible.length]);
 
   const toggleChip = (chip: Chip) =>
     setChips((prev) => {
@@ -272,7 +260,7 @@ export function GridView() {
         </div>
 
         {!ready ? (
-          <div className={cn("orr-grid", view === "list" && "list")}>
+          <div className="orr-grid-skel">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="orr-card orr-skel" aria-hidden>
                 <div className="orr-skel-line w-2/3" />
@@ -309,22 +297,18 @@ export function GridView() {
             </button>
           </div>
         ) : (
-          <div className={cn("orr-grid", view === "list" && "list", stagger && "stagger")}>
-            {visible.map((repo) => (
-              <RepoCard
-                key={repo.id}
-                repo={repo}
-                view={view}
-                agentActive={activeAgents.includes(repo.id)}
-                summarizing={summarizing.includes(repo.id)}
-                onOpen={setSelected}
-                onToggleFavorite={toggleFavorite}
-                onOpenIde={openIde}
-                onOpenAgent={openAgent}
-                onSummarize={aiReady ? summarizeRepo : undefined}
-              />
-            ))}
-          </div>
+          <VirtualRepoGrid
+            repos={visible}
+            view={view}
+            activeAgents={activeAgents}
+            summarizing={summarizing}
+            aiReady={aiReady}
+            onOpen={setSelected}
+            onToggleFavorite={toggleFavorite}
+            onOpenIde={openIde}
+            onOpenAgent={openAgent}
+            onSummarize={summarizeRepo}
+          />
         )}
       </div>
 

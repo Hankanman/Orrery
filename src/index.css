@@ -779,7 +779,28 @@
   }
 
   /* ---- The grid ---- */
+  /* Virtualized grid: .orr-grid is the scroll container; rows are absolutely
+     positioned inside the sizer (see VirtualRepoGrid). */
   .orr-grid {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 22px 28px;
+  }
+  .orr-grid-sizer {
+    position: relative;
+    width: 100%;
+  }
+  .orr-grid-row {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    display: grid;
+    gap: 14px;
+    align-items: start;
+  }
+  /* Loading skeletons keep the plain responsive grid (not virtualized). */
+  .orr-grid-skel {
     flex: 1;
     overflow-y: auto;
     display: grid;
@@ -788,10 +809,6 @@
     grid-template-columns: repeat(auto-fill, minmax(344px, 1fr));
     grid-auto-rows: max-content;
     align-content: start;
-  }
-  .orr-grid.list {
-    grid-template-columns: 1fr;
-    gap: 8px;
   }
 
   /* ---- Repo card ---- */
@@ -819,55 +836,6 @@
   }
   .orr-card:active {
     transform: translateY(-1px) scale(0.995);
-  }
-  /* Cards arrive with a gentle rise+fade. `backwards` applies the start frame
-     before paint (no flash) and releases afterwards so :hover transforms still
-     win. Transform/opacity only — no layout shift. */
-  .orr-grid .orr-card {
-    animation: orr-rise var(--dur-base) var(--ease-out) backwards;
-  }
-  @keyframes orr-rise {
-    from {
-      opacity: 0;
-      transform: translateY(6px);
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
-  /* Initial-load cascade: the `.stagger` class is present only on the first
-     paint (GridView drops it after the cascade), so filtering/sorting later
-     animates uniformly rather than re-staggering. */
-  .orr-grid.stagger .orr-card:nth-child(1) {
-    animation-delay: 0ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(2) {
-    animation-delay: 50ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(3) {
-    animation-delay: 100ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(4) {
-    animation-delay: 150ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(5) {
-    animation-delay: 200ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(6) {
-    animation-delay: 250ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(7) {
-    animation-delay: 300ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(8) {
-    animation-delay: 350ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(9) {
-    animation-delay: 400ms;
-  }
-  .orr-grid.stagger .orr-card:nth-child(n + 10) {
-    animation-delay: 450ms;
   }
   .orr-card-head {
     display: flex;
