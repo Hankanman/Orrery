@@ -78,7 +78,7 @@ function RepoCardImpl({
     <div className="orr-card-acts">
       <button
         type="button"
-        className="orr-cbtn ide"
+        className="orr-cbtn agent"
         onClick={(e) => {
           e.stopPropagation();
           onOpenIde?.(repo);
