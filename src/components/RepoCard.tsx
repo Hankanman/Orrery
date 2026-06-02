@@ -1,7 +1,6 @@
 import {
   ArrowDown,
   ArrowUp,
-  Check,
   CircleDot,
   Clock,
   Code,
@@ -28,7 +27,8 @@ interface RepoCardProps {
   onOpenAgent?: (repo: Repo) => void;
 }
 
-/** Mono git-state line: ⎇ branch · ↑↓ · ● changes / ✓ clean */
+/** Mono git-state line: ⎇ branch · ↑↓ divergence · ● changes. Clean repos show
+ *  just the branch — no badge, since clean is the unremarkable default. */
 function StatusRow({ repo }: { repo: Repo }) {
   const { git } = repo;
   const diverged = git.ahead > 0 || git.behind > 0;
@@ -46,15 +46,10 @@ function StatusRow({ repo }: { repo: Repo }) {
           {git.behind}
         </span>
       )}
-      {git.dirty > 0 ? (
+      {git.dirty > 0 && (
         <span className="orr-st dirty">
           <CircleDot className="size-3.5" />
           {git.dirty}
-        </span>
-      ) : (
-        <span className="orr-st clean">
-          <Check className="size-3.5" />
-          clean
         </span>
       )}
     </div>
