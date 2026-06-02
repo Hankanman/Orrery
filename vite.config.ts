@@ -16,6 +16,29 @@ export default defineConfig(async () => ({
     },
   },
 
+  build: {
+    rollupOptions: {
+      output: {
+        // Split the always-loaded framework deps into their own chunks (better
+        // caching, and keeps the app chunk under the size warning). Trailing
+        // slashes are deliberate so e.g. react-markdown — lazy-loaded inside the
+        // repo drawer — isn't matched and stays in its lazy chunk.
+        manualChunks(id) {
+          if (
+            id.includes("/node_modules/react/") ||
+            id.includes("/node_modules/react-dom/") ||
+            id.includes("/node_modules/scheduler/")
+          ) {
+            return "react";
+          }
+          if (id.includes("/node_modules/@tanstack/")) {
+            return "tanstack";
+          }
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
