@@ -1,4 +1,5 @@
-import { FolderGit2, HardDrive, LayoutGrid, Plus, Sparkles } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import { FolderGit2, HardDrive, Inbox, LayoutGrid, Plus } from "lucide-react";
 import type { Repo } from "@/types";
 import { languageColor, timeAgo } from "@/lib/format";
 import { useRepos } from "@/lib/repos-context";
@@ -14,6 +15,8 @@ interface SidebarProps {
 
 export function Sidebar({ repos, activeRoot, onSelectRoot, langFilter, onSelectLang }: SidebarProps) {
   const { lastScan } = useRepos();
+  const navigate = useNavigate();
+
   // Roots, in first-seen order, with live counts.
   const roots: { path: string; count: number }[] = [];
   for (const r of repos) {
@@ -35,17 +38,23 @@ export function Sidebar({ repos, activeRoot, onSelectRoot, langFilter, onSelectL
         <button type="button" className="orr-sb-item active">
           <LayoutGrid className="size-4" /> Mission Control
         </button>
-        <button type="button" className="orr-sb-item opacity-50" title="Coming soon" disabled>
-          <Sparkles className="size-4" /> Feed
+        <button type="button" className="orr-sb-item" onClick={() => navigate({ to: "/inbox" })}>
+          <Inbox className="size-4" /> Feed
         </button>
       </div>
 
       <div className="orr-sb-sec">
         <div className="orr-sb-lead">
           Roots
-          <span className="add" title="Add a directory">
+          <button
+            type="button"
+            className="add"
+            title="Add a workspace directory"
+            aria-label="Add a workspace directory"
+            onClick={() => navigate({ to: "/settings" })}
+          >
             <Plus className="size-3.5" />
-          </span>
+          </button>
         </div>
         <button
           type="button"

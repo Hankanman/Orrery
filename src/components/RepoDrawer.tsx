@@ -271,10 +271,10 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
           {tab === "changes" && (
             <div className="space-y-3">
               <div className="flex flex-wrap gap-2">
-                <button type="button" className="orr-cbtn" onClick={genCommitMsg} disabled={aiBusy}>
+                <button type="button" className="orr-cbtn" onClick={genCommitMsg} disabled={aiBusy || !isTauri()}>
                   <Sparkles className="size-3.5" /> {aiBusy ? "Thinking…" : "Commit message"}
                 </button>
-                <button type="button" className="orr-cbtn" onClick={genChangelog} disabled={aiBusy}>
+                <button type="button" className="orr-cbtn" onClick={genChangelog} disabled={aiBusy || !isTauri()}>
                   <Sparkles className="size-3.5" /> Changelog
                 </button>
               </div>

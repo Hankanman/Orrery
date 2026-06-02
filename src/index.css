@@ -65,17 +65,17 @@
 }
 
 .dark {
-  /* Surfaces — deep space blue-slate, layered */
-  --background: oklch(0.16 0.022 256);
-  --foreground: oklch(0.94 0.01 250);
-  --card: oklch(0.2 0.026 256);
-  --card-foreground: oklch(0.94 0.01 250);
-  --popover: oklch(0.21 0.028 256);
-  --popover-foreground: oklch(0.94 0.01 250);
+  /* Surfaces — deep blue-black void the system orbits in (design system) */
+  --background: #0a0e16;
+  --foreground: #eef2f8;
+  --card: #121826;
+  --card-foreground: #eef2f8;
+  --popover: #121826;
+  --popover-foreground: #eef2f8;
 
-  /* Primary — overridden by the system accent at runtime */
-  --primary: oklch(0.8 0.15 196);
-  --primary-foreground: oklch(0.18 0.03 230);
+  /* Primary — orbit cyan default; overridden by the system accent at runtime */
+  --primary: #38dbf0;
+  --primary-foreground: #06080d;
 
   --secondary: oklch(0.27 0.025 256);
   --secondary-foreground: oklch(0.92 0.01 250);
@@ -89,11 +89,12 @@
 
   --border: oklch(0.3 0.022 256);
   --input: oklch(0.3 0.022 256);
-  --ring: oklch(0.8 0.15 196);
+  --ring: #38dbf0;
 
-  --ok: oklch(0.78 0.16 155);
-  --warn: oklch(0.82 0.16 85);
-  --danger: oklch(0.66 0.2 25);
+  /* git-state semantics (design system neon) */
+  --ok: #3dd68c;
+  --warn: #ff9e45;
+  --danger: #ff6b6b;
 
   --chart-1: oklch(0.8 0.15 196);
   --chart-2: oklch(0.62 0.17 295);
@@ -156,8 +157,8 @@
   --color-sidebar-ring: var(--sidebar-ring);
 
   /* Lead with the desktop's UI font so the app feels native. */
-  --font-sans: system-ui, ui-sans-serif, "Inter", sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+  --font-sans: "Geist Sans", system-ui, ui-sans-serif, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "JetBrains Mono", monospace;
 }
 
 @layer base {
@@ -292,17 +293,26 @@
   --orr-fg-0: #eef2f8;
   --orr-fg-1: #afb9cb;
   --orr-fg-2: #6c778c;
-  --orr-fg-3: #4a5468;
-  --orr-glass: rgba(255, 255, 255, 0.04);
-  --orr-glass-hover: rgba(255, 255, 255, 0.07);
-  --orr-glass-2: rgba(255, 255, 255, 0.09);
-  --orr-border: rgba(255, 255, 255, 0.08);
-  --orr-border-strong: rgba(255, 255, 255, 0.15);
+  --orr-fg-3: #434e63;
+  --orr-glass: rgba(255, 255, 255, 0.035);
+  --orr-glass-hover: rgba(255, 255, 255, 0.06);
+  --orr-glass-2: rgba(255, 255, 255, 0.085);
+  --orr-border: rgba(255, 255, 255, 0.075);
+  --orr-border-strong: rgba(255, 255, 255, 0.14);
   --orr-scrim: rgba(6, 8, 13, 0.72);
   --orr-shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
   --orr-shadow-3: 0 16px 48px rgba(0, 0, 0, 0.6);
   --orr-shadow-pop: 0 24px 64px rgba(0, 0, 0, 0.7);
   --orr-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  /* Vivid neon for the data hues in dark mode (design system) */
+  --orr-star: #ffc24b;
+  --orr-star-glow: rgba(255, 194, 75, 0.26);
+  --orr-ai: #a78bfa;
+  --orr-ai-glow: rgba(167, 139, 250, 0.24);
+  --orr-clean: #3dd68c;
+  --orr-dirty: #ff9e45;
+  --orr-behind: #ff6b6b;
 }
 
 @layer components {
@@ -448,6 +458,11 @@
     cursor: pointer;
     display: grid;
     place-items: center;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--orr-fg-3);
+    transition: color var(--dur-fast) var(--ease-out);
   }
   .orr-sb-lead .add:hover {
     color: var(--orr-accent);

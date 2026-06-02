@@ -113,11 +113,17 @@ export function InboxView() {
             </h2>
             <div className="orr-inbox-list">
               {notes.map((n, i) => (
-                <div key={i} className="orr-inbox-row static">
+                <button
+                  key={i}
+                  type="button"
+                  className="orr-inbox-row"
+                  onClick={() => open(`https://github.com/${n.repo}`)}
+                >
+                  <Bell className="size-4 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1 truncate">{n.title}</span>
                   <span className="orr-tag">{n.reason.replace(/_/g, " ")}</span>
                   <span className="shrink-0 font-mono text-xs text-muted-foreground">{n.repo}</span>
-                </div>
+                </button>
               ))}
             </div>
           </section>
