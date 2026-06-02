@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# tauri-action creates the GitHub Release and uploads the bundles.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & release (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev libxdo-dev build-essential cmake pkg-config
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build bundles & publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Skip the strip pass — linuxdeploy's bundled strip can't parse the
+          # .relr.dyn section modern linkers emit, which aborts the AppImage.
+          NO_STRIP: "true"
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Orrery ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          releaseBody: |
+            Linux builds of Orrery. See the [documentation](https://hankanman.github.io/Orrery/) for setup.
+
+            > Early development — expect rough edges. Built from the source at this tag.
