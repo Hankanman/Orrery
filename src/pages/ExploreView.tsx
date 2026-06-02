@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Compass, DownloadCloud, Star } from "lucide-react";
 import { ipc, isTauri, type RemoteRepo } from "@/lib/ipc";
+import { MOCK_STARRED } from "@/lib/mock-activity";
 import { useRepos } from "@/lib/repos-context";
 import { HostIcon } from "@/components/HostIcon";
 import { LangIcon } from "@/components/LangIcon";
@@ -25,7 +26,8 @@ export function ExploreView() {
 
   useEffect(() => {
     if (!isTauri()) {
-      setStarred([]);
+      setStarred(MOCK_STARRED);
+      setRoot("~/dev");
       return;
     }
     ipc.getConfig().then((c) => setRoot(c.roots[0] ?? "~/dev")).catch(() => {});

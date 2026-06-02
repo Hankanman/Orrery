@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Bell, CircleDot, Eye, GitPullRequest, Inbox } from "lucide-react";
 import { ipc, isTauri, type InboxItem, type NotificationItem } from "@/lib/ipc";
+import { MOCK_INBOX, MOCK_NOTIFICATIONS } from "@/lib/mock-activity";
 import { Spinner } from "@/components/Spinner";
 
 function open(url: string) {
@@ -36,8 +37,8 @@ export function InboxView() {
 
   useEffect(() => {
     if (!isTauri()) {
-      setInbox([]);
-      setNotes([]);
+      setInbox(MOCK_INBOX);
+      setNotes(MOCK_NOTIFICATIONS);
       return;
     }
     ipc.getInbox().then(setInbox).catch((e) => {

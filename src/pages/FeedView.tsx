@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { FolderPlus, GitFork, Globe, RefreshCw, Rss, Star, Tag } from "lucide-react";
 import { ipc, isTauri, type FeedItem } from "@/lib/ipc";
+import { MOCK_FEED } from "@/lib/mock-activity";
 import { Spinner } from "@/components/Spinner";
 import { VirtualList } from "@/components/VirtualList";
 import { timeAgo } from "@/lib/format";
@@ -44,7 +45,7 @@ export function FeedView() {
 
   const load = (refresh = false) => {
     if (!isTauri()) {
-      setItems([]);
+      setItems(MOCK_FEED);
       return;
     }
     if (refresh) setRefreshing(true);
