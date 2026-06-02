@@ -22,7 +22,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS host_cache (slug TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);",
+         CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS embeddings (id TEXT PRIMARY KEY, vec TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )
 }
 
@@ -164,6 +166,51 @@ pub fn store_summary(id: &str, summary: &str, last_commit: i64) {
         let _ = conn.execute(
             "INSERT OR REPLACE INTO ai_cache (id, summary, last_commit) VALUES (?1, ?2, ?3)",
             rusqlite::params![id, summary, last_commit],
+        );
+    }
+}
+
+/// Store a repo's embedding vector (as JSON) for semantic search.
+pub fn store_embedding(id: &str, vec: &[f32]) {
+    if let Ok(conn) = open() {
+        if let Ok(json) = serde_json::to_string(vec) {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO embeddings (id, vec) VALUES (?1, ?2)",
+                rusqlite::params![id, json],
+            );
+        }
+    }
+}
+
+/// Load all repo embeddings as (id, vector).
+pub fn load_embeddings() -> Vec<(String, Vec<f32>)> {
+    let Ok(conn) = open() else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT id, vec FROM embeddings") else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)));
+    match rows {
+        Ok(iter) => iter
+            .flatten()
+            .filter_map(|(id, json)| serde_json::from_str::<Vec<f32>>(&json).ok().map(|v| (id, v)))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub fn get_meta(key: &str) -> Option<String> {
+    let conn = open().ok()?;
+    let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1").ok()?;
+    stmt.query_row([key], |row| row.get::<_, String>(0)).ok()
+}
+
+pub fn set_meta(key: &str, value: &str) {
+    if let Ok(conn) = open() {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
         );
     }
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   ArrowUpDown,
@@ -9,12 +9,15 @@ import {
   LayoutGrid,
   List,
   RefreshCw,
+  Sparkles,
   Star,
   TriangleAlert,
+  X,
 } from "lucide-react";
 import { RepoCard, type RepoView } from "@/components/RepoCard";
 import { RepoDrawer } from "@/components/RepoDrawer";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { ipc, isTauri, type Briefing } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import { repoStatus } from "@/lib/format";
 import type { Repo } from "@/types";
@@ -65,6 +68,9 @@ export function GridView() {
   const [sort, setSort] = useState<SortKey>("activity");
   const [view, setView] = useState<RepoView>("grid");
   const [selected, setSelected] = useState<Repo | null>(null);
+  const [briefing, setBriefing] = useState<Briefing | null>(null);
+  const [briefingDismissed, setBriefingDismissed] = useState(false);
+  const briefedRef = useRef(false);
 
   const visible = useMemo(() => {
     const filtered = repos.filter((r) => {
@@ -84,6 +90,13 @@ export function GridView() {
   }, [repos, activeRoot, langFilter, chips, attentionOnly, sort]);
 
   const attentionCount = useMemo(() => repos.filter(needsAttention).length, [repos]);
+
+  // One-shot daily briefing once repos are loaded.
+  useEffect(() => {
+    if (!isTauri() || briefedRef.current || !ready || repos.length === 0) return;
+    briefedRef.current = true;
+    ipc.dailyBriefing(repos).then(setBriefing).catch(() => {});
+  }, [ready, repos]);
 
   const toggleChip = (chip: Chip) =>
     setChips((prev) => {
@@ -151,6 +164,16 @@ export function GridView() {
             </button>
           </div>
         </div>
+
+        {briefing && !briefingDismissed && briefing.repoCount > 0 && (
+          <div className="orr-briefing">
+            <Sparkles className="size-4 shrink-0 text-primary" />
+            <p className="min-w-0 flex-1">{briefing.text}</p>
+            <button type="button" aria-label="Dismiss briefing" onClick={() => setBriefingDismissed(true)}>
+              <X className="size-4" />
+            </button>
+          </div>
+        )}
 
         <div className="orr-chiprow">
           {CHIPS.map(({ key, label, icon: Icon }) => (

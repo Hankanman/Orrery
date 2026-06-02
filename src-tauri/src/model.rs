@@ -109,10 +109,17 @@ pub struct AppConfig {
     /// Whether to generate local AI summaries.
     #[serde(default = "default_true")]
     pub ai_enabled: bool,
+    /// Ollama embedding model for semantic search.
+    #[serde(default = "default_embed_model")]
+    pub embed_model: String,
 }
 
 pub(crate) fn default_ai_model() -> String {
     "llama3.2:3b".to_string()
+}
+
+pub(crate) fn default_embed_model() -> String {
+    "nomic-embed-text".to_string()
 }
 
 pub(crate) fn default_true() -> bool {

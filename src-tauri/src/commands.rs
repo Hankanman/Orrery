@@ -246,6 +246,12 @@ pub fn repo_diff(id: String) -> Result<String, String> {
     git_ops::working_diff(&id)
 }
 
+/// Staged diff (index vs HEAD) — exactly what a commit would record.
+#[tauri::command]
+pub fn repo_staged_diff(id: String) -> Result<String, String> {
+    git_ops::staged_diff(&id)
+}
+
 /// Raw README markdown for the detail drawer.
 #[tauri::command]
 pub fn repo_readme(id: String) -> Option<String> {
@@ -253,4 +259,158 @@ pub fn repo_readme(id: String) -> Option<String> {
     candidates
         .iter()
         .find_map(|name| std::fs::read_to_string(std::path::Path::new(&id).join(name)).ok())
+}
+
+// ── Phase 6: local-AI superpowers ──────────────────────────────────────────
+
+async fn resolve_ai_model() -> Result<String, String> {
+    let cfg = config::load();
+    if !cfg.ai_enabled {
+        return Err("AI is disabled".into());
+    }
+    let installed = ai::installed_models().await;
+    ai::pick_model(&cfg.ai_model, &installed).ok_or_else(|| "no Ollama model available".to_string())
+}
+
+/// Generate a commit message from the staged diff (#39).
+#[tauri::command]
+pub async fn generate_commit_message(id: String) -> Result<String, String> {
+    let id2 = id.clone();
+    let diff = tauri::async_runtime::spawn_blocking(move || git_ops::staged_diff(&id2))
+        .await
+        .map_err(|e| e.to_string())??;
+    if diff.trim().is_empty() {
+        return Err("Nothing staged — `git add` your changes first.".into());
+    }
+    let model = resolve_ai_model().await?;
+    ai::generate(&model, &ai::commit_prompt(&diff)).await
+}
+
+/// Commit the staged changes with the given message (#39).
+#[tauri::command]
+pub fn commit_staged(id: String, message: String) -> Result<String, String> {
+    if message.trim().is_empty() {
+        return Err("empty commit message".into());
+    }
+    git_ops::commit(&id, message.trim())
+}
+
+/// Generate a changelog / PR description from recent commits (#42).
+#[tauri::command]
+pub async fn generate_changelog(id: String, limit: usize) -> Result<String, String> {
+    let id2 = id.clone();
+    let commits = tauri::async_runtime::spawn_blocking(move || git_ops::recent_log(&id2, limit))
+        .await
+        .map_err(|e| e.to_string())??;
+    if commits.is_empty() {
+        return Err("no commits to summarize".into());
+    }
+    let lines: Vec<String> = commits.iter().map(|c| format!("- {} ({})", c.summary, c.id)).collect();
+    let model = resolve_ai_model().await?;
+    ai::generate(&model, &ai::changelog_prompt(&lines)).await
+}
+
+/// Build/refresh the semantic-search embedding index for the given repos (#41).
+#[tauri::command]
+pub async fn index_repos(repos: Vec<Repo>) -> usize {
+    let model = config::load().embed_model;
+    let mut count = 0usize;
+    // Embed in small concurrent batches rather than one-at-a-time.
+    for chunk in repos.chunks(6) {
+        let done = futures_util::future::join_all(chunk.iter().map(|repo| {
+            let model = model.clone();
+            let id = repo.id.clone();
+            let text = format!(
+                "{} {} {} {}",
+                repo.display_name,
+                repo.slug.as_deref().unwrap_or(""),
+                repo.language.as_deref().unwrap_or(""),
+                repo.description.as_deref().unwrap_or("")
+            );
+            async move {
+                match ai::embed(&model, &text).await {
+                    Ok(vec) => {
+                        cache::store_embedding(&id, &vec);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+        }))
+        .await;
+        count += done.into_iter().filter(|x| *x).count();
+    }
+    count
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub id: String,
+    pub score: f32,
+}
+
+/// Semantic search over the embedding index; returns ranked repo ids (#41).
+#[tauri::command]
+pub async fn semantic_search(query: String) -> Result<Vec<SearchHit>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let model = config::load().embed_model;
+    let q = ai::embed(&model, &query).await?;
+    let mut hits: Vec<SearchHit> = cache::load_embeddings()
+        .into_iter()
+        .map(|(id, v)| SearchHit { id, score: ai::cosine(&q, &v) })
+        .filter(|h| h.score > 0.35)
+        .collect();
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    hits.truncate(8);
+    Ok(hits)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Briefing {
+    pub text: String,
+    pub repo_count: usize,
+}
+
+/// A short AI digest of what changed across repos since the last visit (#40).
+#[tauri::command]
+pub async fn daily_briefing(repos: Vec<Repo>) -> Result<Briefing, String> {
+    let now = now_unix();
+    // First run (no stored timestamp): look back a week rather than dumping
+    // every repo ever touched.
+    let since = cache::get_meta("last_open")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(now - 7 * 24 * 3600);
+
+    let mut recent: Vec<&Repo> = repos.iter().filter(|r| r.last_commit_unix > since).collect();
+    recent.sort_by(|a, b| b.last_commit_unix.cmp(&a.last_commit_unix));
+    recent.truncate(12);
+
+    if recent.is_empty() {
+        cache::set_meta("last_open", &now.to_string());
+        return Ok(Briefing { text: "Nothing new since your last visit.".into(), repo_count: 0 });
+    }
+
+    let lines: Vec<String> = recent
+        .iter()
+        .map(|r| {
+            format!(
+                "- {} ({}): {} uncommitted, {} ahead / {} behind",
+                r.display_name,
+                r.language.as_deref().unwrap_or("?"),
+                r.git.dirty,
+                r.git.ahead,
+                r.git.behind
+            )
+        })
+        .collect();
+    let count = lines.len();
+    let model = resolve_ai_model().await?;
+    let text = ai::generate(&model, &ai::briefing_prompt(&lines)).await?;
+    // Only advance the window once we've actually produced a briefing.
+    cache::set_meta("last_open", &now.to_string());
+    Ok(Briefing { text, repo_count: count })
 }

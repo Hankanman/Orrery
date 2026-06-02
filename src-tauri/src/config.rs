@@ -55,6 +55,7 @@ impl Default for AppConfig {
             gitlab_hosts: Vec::new(),
             ai_model: crate::model::default_ai_model(),
             ai_enabled: true,
+            embed_model: crate::model::default_embed_model(),
         }
     }
 }

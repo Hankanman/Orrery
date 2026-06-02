@@ -256,6 +256,28 @@ pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
     Ok(out)
 }
 
+fn diff_to_string(diff: &git2::Diff) -> String {
+    let mut buf = String::new();
+    let _ = diff.print(git2::DiffFormat::Patch, |_, _, line| {
+        match line.origin() {
+            '+' | '-' | ' ' => buf.push(line.origin()),
+            _ => {}
+        }
+        buf.push_str(std::str::from_utf8(line.content()).unwrap_or(""));
+        true
+    });
+    // Cap to keep the IPC payload + UI reasonable (char-boundary safe).
+    if buf.len() > 200_000 {
+        let mut end = 200_000;
+        while !buf.is_char_boundary(end) {
+            end -= 1;
+        }
+        buf.truncate(end);
+        buf.push_str("\n… diff truncated …\n");
+    }
+    buf
+}
+
 /// Unified diff of the working tree + index vs HEAD (for the diff peek).
 pub fn working_diff(path: &str) -> Result<String, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
@@ -265,28 +287,50 @@ pub fn working_diff(path: &str) -> Result<String, String> {
     let diff = repo
         .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
         .map_err(|e| e.to_string())?;
+    Ok(diff_to_string(&diff))
+}
 
-    let mut buf = String::new();
-    diff.print(git2::DiffFormat::Patch, |_, _, line| {
-        match line.origin() {
-            '+' | '-' | ' ' => buf.push(line.origin()),
-            _ => {}
+/// Diff of the index vs HEAD — i.e. exactly what a commit would record.
+pub fn staged_diff(path: &str) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let diff = repo
+        .diff_tree_to_index(head_tree.as_ref(), None, None)
+        .map_err(|e| e.to_string())?;
+    Ok(diff_to_string(&diff))
+}
+
+/// Commit the currently-staged changes with `message`. Returns the short hash.
+pub fn commit(path: &str, message: &str) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+
+    // Refuse to commit on a detached HEAD — it would orphan the commit.
+    if let Ok(head) = repo.head() {
+        if !head.is_branch() {
+            return Err("HEAD is detached — check out a branch before committing".into());
         }
-        buf.push_str(std::str::from_utf8(line.content()).unwrap_or(""));
-        true
-    })
-    .map_err(|e| e.to_string())?;
-    // Cap to keep the IPC payload + UI reasonable.
-    if buf.len() > 200_000 {
-        // Snap to a char boundary — truncating mid-codepoint would panic.
-        let mut end = 200_000;
-        while !buf.is_char_boundary(end) {
-            end -= 1;
-        }
-        buf.truncate(end);
-        buf.push_str("\n… diff truncated …\n");
     }
-    Ok(buf)
+
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    let tree_id = index.write_tree().map_err(|e| e.to_string())?;
+    let tree = repo.find_tree(tree_id).map_err(|e| e.to_string())?;
+    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+
+    // Nothing staged → the tree equals the parent's; don't create an empty commit.
+    if let Some(p) = &parent {
+        if p.tree_id() == tree_id {
+            return Err("no staged changes to commit".into());
+        }
+    }
+
+    let sig = repo
+        .signature()
+        .map_err(|_| "set git user.name and user.email first".to_string())?;
+    let parents: Vec<&git2::Commit> = parent.iter().collect();
+    let oid = repo
+        .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+        .map_err(|e| e.to_string())?;
+    Ok(oid.to_string()[..7.min(oid.to_string().len())].to_string())
 }
 
 #[cfg(test)]
@@ -345,5 +389,21 @@ mod tests {
         assert!(working_diff(&path).unwrap().is_empty(), "clean tree → empty diff");
         fs::write(dir.path().join("README.md"), "# Test\nchanged").unwrap();
         assert!(working_diff(&path).unwrap().contains("changed"));
+    }
+
+    #[test]
+    fn staged_diff_then_commit() {
+        let (dir, path) = init_repo();
+        fs::write(dir.path().join("new.txt"), "hello").unwrap();
+        let repo = Repository::open(&path).unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("new.txt")).unwrap();
+        idx.write().unwrap();
+
+        assert!(staged_diff(&path).unwrap().contains("new.txt"));
+        let short = commit(&path, "feat: add new").unwrap();
+        assert_eq!(short.len(), 7);
+        assert_eq!(recent_log(&path, 5).unwrap()[0].summary, "feat: add new");
+        assert!(staged_diff(&path).unwrap().is_empty(), "nothing staged after commit");
     }
 }
