@@ -976,13 +976,50 @@
     min-height: 38px;
   }
   .orr-card-ai {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: 5px;
     font: var(--text-data-sm);
     color: var(--orr-ai);
     margin-top: 9px;
     position: relative;
+  }
+  .orr-card-ai > span {
+    min-width: 0;
+  }
+  /* On-demand summary: a "Generate summary" button when none exists, and a
+     reveal-on-hover regenerate icon when one does. */
+  .orr-card-ai.gen {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--orr-fg-2);
+    transition: color var(--dur-fast) var(--ease-out);
+  }
+  .orr-card-ai.gen:hover {
+    color: var(--orr-ai);
+  }
+  .orr-card-ai-act {
+    margin-left: auto;
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: var(--r-sm);
+    color: var(--orr-fg-3);
+    opacity: 0;
+    transition:
+      opacity var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
+  }
+  .orr-card:hover .orr-card-ai-act {
+    opacity: 1;
+  }
+  .orr-card-ai-act:hover {
+    color: var(--orr-ai);
+    background: var(--orr-glass-2);
   }
   .orr-card-status {
     display: flex;

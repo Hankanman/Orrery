@@ -6,6 +6,7 @@ import {
   Clock,
   Code,
   GitBranch,
+  RefreshCw,
   Sparkles,
   SquareTerminal,
   Star,
@@ -22,10 +23,14 @@ interface RepoCardProps {
   repo: Repo;
   view?: RepoView;
   agentActive?: boolean;
+  /** An on-demand AI summary is being generated for this repo. */
+  summarizing?: boolean;
   onOpen?: (repo: Repo) => void;
   onToggleFavorite?: (repo: Repo) => void;
   onOpenIde?: (repo: Repo) => void;
   onOpenAgent?: (repo: Repo) => void;
+  /** Generate/regenerate this repo's AI summary. */
+  onSummarize?: (repo: Repo) => void;
 }
 
 /** Mono git-state line: ⎇ branch · ↑↓ divergence · ● changes. Clean repos show
@@ -61,10 +66,12 @@ function RepoCardImpl({
   repo,
   view = "grid",
   agentActive,
+  summarizing,
   onOpen,
   onToggleFavorite,
   onOpenIde,
   onOpenAgent,
+  onSummarize,
 }: RepoCardProps) {
 
   const launchers = (
@@ -130,11 +137,44 @@ function RepoCardImpl({
             {repo.slug ?? "no remote"} · {repo.path}
           </div>
           <div className="orr-card-desc">{repo.description ?? "No README description."}</div>
-          {repo.aiSummary && (
+          {summarizing ? (
+            <div className="orr-card-ai">
+              <Sparkles className="size-3 shrink-0 animate-pulse" />
+              <span className="opacity-70">Summarizing…</span>
+            </div>
+          ) : repo.aiSummary ? (
             <div className="orr-card-ai" title={repo.aiSummary}>
               <Sparkles className="size-3 shrink-0" />
               <span className="line-clamp-2">{repo.aiSummary}</span>
+              {onSummarize && (
+                <button
+                  type="button"
+                  className="orr-card-ai-act"
+                  aria-label="Regenerate summary"
+                  title="Regenerate summary"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSummarize(repo);
+                  }}
+                >
+                  <RefreshCw className="size-3" />
+                </button>
+              )}
             </div>
+          ) : (
+            onSummarize && (
+              <button
+                type="button"
+                className="orr-card-ai gen"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSummarize(repo);
+                }}
+              >
+                <Sparkles className="size-3 shrink-0" />
+                <span>Generate summary</span>
+              </button>
+            )
           )}
           <StatusRow repo={repo} />
           <div className="orr-card-host">

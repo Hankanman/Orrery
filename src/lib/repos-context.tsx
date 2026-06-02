@@ -26,9 +26,15 @@ interface ReposContextValue {
   fetching: boolean;
   /** Repo ids with a running terminal-agent session. */
   activeAgents: string[];
+  /** Repo ids with an on-demand AI summary in flight. */
+  summarizing: string[];
   refresh: () => void;
   /** Fetch every repo's origin and merge refreshed ahead/behind into the grid. */
   fetchAll: () => void;
+  /** Regenerate one repo's AI summary on demand. */
+  summarizeRepo: (repo: Repo) => void;
+  /** Generate summaries for every repo that lacks one. */
+  summarizeMissing: () => void;
   toggleFavorite: (repo: Repo) => void;
   openIde: (repo: Repo) => void;
   openAgent: (repo: Repo) => void;
@@ -61,6 +67,8 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [activeAgents, setActiveAgents] = useState<string[]>([]);
   const [enrichProgress, setEnrichProgress] = useState<{ done: number; total: number } | null>(null);
   const [summarizeProgress, setSummarizeProgress] = useState<{ done: number; total: number } | null>(null);
+  // Repo ids with an on-demand summary in flight (drives the per-card spinner).
+  const [summarizing, setSummarizing] = useState<string[]>([]);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
   // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
@@ -240,6 +248,22 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       .finally(() => setFetching(false));
   }, []);
 
+  // Regenerate one repo's summary on demand (force, ignoring the cache).
+  const summarizeRepo = useCallback((repo: Repo) => {
+    if (!isTauri()) return;
+    setSummarizing((s) => (s.includes(repo.id) ? s : [...s, repo.id]));
+    ipc
+      .summarizeRepo(repo, true)
+      .then((summary) => {
+        if (summary) setRepos((prev) => prev.map((r) => (r.id === repo.id ? { ...r, aiSummary: summary } : r)));
+      })
+      .catch((e) => console.error("[orrery] summarize failed:", e))
+      .finally(() => setSummarizing((s) => s.filter((id) => id !== repo.id)));
+  }, []);
+
+  // Fill in summaries for every repo that lacks one (toolbar "Summarize all").
+  const summarizeMissing = useCallback(() => summarizeAll(reposRef.current), [summarizeAll]);
+
   useEffect(() => {
     let cancelled = false;
     if (!isTauri()) {
@@ -346,13 +370,16 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       lastScan,
       fetching,
       activeAgents,
+      summarizing,
       refresh,
       fetchAll,
+      summarizeRepo,
+      summarizeMissing,
       toggleFavorite,
       openIde,
       openAgent,
     }),
-    [repos, loading, ready, error, lastScan, fetching, activeAgents, refresh, fetchAll, toggleFavorite, openIde, openAgent],
+    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, refresh, fetchAll, summarizeRepo, summarizeMissing, toggleFavorite, openIde, openAgent],
   );
 
   // Separate value so progress ticks (enrich/summarize batches) only re-render

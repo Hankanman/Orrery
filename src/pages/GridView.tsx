@@ -62,8 +62,22 @@ function needsAttention(repo: Repo): boolean {
 }
 
 export function GridView() {
-  const { repos, loading, ready, error, fetching, activeAgents, refresh, fetchAll, toggleFavorite, openIde, openAgent } =
-    useRepos();
+  const {
+    repos,
+    loading,
+    ready,
+    error,
+    fetching,
+    activeAgents,
+    summarizing,
+    refresh,
+    fetchAll,
+    summarizeRepo,
+    summarizeMissing,
+    toggleFavorite,
+    openIde,
+    openAgent,
+  } = useRepos();
 
   const [activeRoot, setActiveRoot] = useState("all");
   const [langFilter, setLangFilter] = useState<string | null>(null);
@@ -117,6 +131,7 @@ export function GridView() {
   }, [repos, activeRoot, langFilter, chips, attentionOnly, sort]);
 
   const attentionCount = useMemo(() => repos.filter(needsAttention).length, [repos]);
+  const missingSummaries = useMemo(() => repos.filter((r) => !r.aiSummary).length, [repos]);
 
   // All repo ids (paths) for the workspace-wide contribution graph — stable
   // across filters so the overview doesn't jump when you narrow the grid.
@@ -202,6 +217,16 @@ export function GridView() {
             <CloudDownload className={cn("size-3.5", fetching && "animate-pulse")} />
             {fetching ? "Fetching…" : "Fetch all"}
           </button>
+          <button
+            type="button"
+            className="orr-sortpill"
+            onClick={summarizeMissing}
+            disabled={missingSummaries === 0}
+            title="Generate AI summaries for repos without one"
+          >
+            <Sparkles className="size-3.5" />
+            Summarize{missingSummaries > 0 ? ` ${missingSummaries}` : ""}
+          </button>
           <button type="button" className="orr-sortpill" onClick={cycleSort}>
             <ArrowUpDown className="size-3.5" />
             {sortLabel}
@@ -280,10 +305,12 @@ export function GridView() {
                 repo={repo}
                 view={view}
                 agentActive={activeAgents.includes(repo.id)}
+                summarizing={summarizing.includes(repo.id)}
                 onOpen={setSelected}
                 onToggleFavorite={toggleFavorite}
                 onOpenIde={openIde}
                 onOpenAgent={openAgent}
+                onSummarize={summarizeRepo}
               />
             ))}
           </div>
