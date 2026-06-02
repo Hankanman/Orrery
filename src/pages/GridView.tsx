@@ -70,6 +70,7 @@ export function GridView() {
     fetching,
     activeAgents,
     summarizing,
+    aiReady,
     refresh,
     fetchAll,
     summarizeRepo,
@@ -137,12 +138,12 @@ export function GridView() {
   // across filters so the overview doesn't jump when you narrow the grid.
   const allIds = useMemo(() => repos.map((r) => r.id), [repos]);
 
-  // One-shot daily briefing once repos are loaded.
+  // One-shot daily briefing once repos are loaded — only when AI is usable.
   useEffect(() => {
-    if (!isTauri() || briefedRef.current || !ready || repos.length === 0) return;
+    if (!isTauri() || briefedRef.current || !ready || repos.length === 0 || !aiReady) return;
     briefedRef.current = true;
     ipc.dailyBriefing(repos).then(setBriefing).catch(() => {});
-  }, [ready, repos]);
+  }, [ready, repos, aiReady]);
 
   // Drop the stagger class once the first batch of cards is on screen and the
   // cascade has had time to start on each — after that, mounts animate plainly.
@@ -217,16 +218,18 @@ export function GridView() {
             <CloudDownload className={cn("size-3.5", fetching && "animate-pulse")} />
             {fetching ? "Fetching…" : "Fetch all"}
           </button>
-          <button
-            type="button"
-            className="orr-sortpill"
-            onClick={summarizeMissing}
-            disabled={missingSummaries === 0}
-            title="Generate AI summaries for repos without one"
-          >
-            <Sparkles className="size-3.5" />
-            Summarize{missingSummaries > 0 ? ` ${missingSummaries}` : ""}
-          </button>
+          {aiReady && (
+            <button
+              type="button"
+              className="orr-sortpill"
+              onClick={summarizeMissing}
+              disabled={missingSummaries === 0}
+              title="Generate AI summaries for repos without one"
+            >
+              <Sparkles className="size-3.5" />
+              Summarize{missingSummaries > 0 ? ` ${missingSummaries}` : ""}
+            </button>
+          )}
           <button type="button" className="orr-sortpill" onClick={cycleSort}>
             <ArrowUpDown className="size-3.5" />
             {sortLabel}
@@ -310,7 +313,7 @@ export function GridView() {
                 onToggleFavorite={toggleFavorite}
                 onOpenIde={openIde}
                 onOpenAgent={openAgent}
-                onSummarize={summarizeRepo}
+                onSummarize={aiReady ? summarizeRepo : undefined}
               />
             ))}
           </div>

@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ipc, isTauri } from "@/lib/ipc";
+import { ipc, isTauri, type AiStatus } from "@/lib/ipc";
 import { MOCK_REPOS } from "@/lib/mock-repos";
 import type { Repo } from "@/types";
 
@@ -28,6 +28,11 @@ interface ReposContextValue {
   activeAgents: string[];
   /** Repo ids with an on-demand AI summary in flight. */
   summarizing: string[];
+  /** AI is enabled, reachable, and has a usable chat model — gate all AI UI on
+   *  this so features are hidden (not broken) when AI is off/misconfigured. */
+  aiReady: boolean;
+  /** Re-query Ollama status (call after changing AI settings). */
+  refreshAiStatus: () => void;
   refresh: () => void;
   /** Fetch every repo's origin and merge refreshed ahead/behind into the grid. */
   fetchAll: () => void;
@@ -69,6 +74,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   const [summarizeProgress, setSummarizeProgress] = useState<{ done: number; total: number } | null>(null);
   // Repo ids with an on-demand summary in flight (drives the per-card spinner).
   const [summarizing, setSummarizing] = useState<string[]>([]);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   // Guards against overlapping scans (startup scan + a Rescan click racing).
   const scanning = useRef(false);
   // Generation tokens so a superseded enrich/summarize run can't clobber a newer one.
@@ -264,6 +270,18 @@ export function ReposProvider({ children }: { children: ReactNode }) {
   // Fill in summaries for every repo that lacks one (toolbar "Summarize all").
   const summarizeMissing = useCallback(() => summarizeAll(reposRef.current), [summarizeAll]);
 
+  const refreshAiStatus = useCallback(() => {
+    if (isTauri()) ipc.aiStatus().then(setAiStatus).catch(() => {});
+  }, []);
+
+  // AI is usable when it's enabled, Ollama is reachable, and a chat model
+  // resolved. Everything AI-related in the UI is hidden unless this holds.
+  const aiReady = !!aiStatus && aiStatus.enabled && aiStatus.reachable && !!aiStatus.model;
+
+  useEffect(() => {
+    refreshAiStatus();
+  }, [refreshAiStatus]);
+
   useEffect(() => {
     let cancelled = false;
     if (!isTauri()) {
@@ -371,6 +389,8 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       fetching,
       activeAgents,
       summarizing,
+      aiReady,
+      refreshAiStatus,
       refresh,
       fetchAll,
       summarizeRepo,
@@ -379,7 +399,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
       openIde,
       openAgent,
     }),
-    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, refresh, fetchAll, summarizeRepo, summarizeMissing, toggleFavorite, openIde, openAgent],
+    [repos, loading, ready, error, lastScan, fetching, activeAgents, summarizing, aiReady, refreshAiStatus, refresh, fetchAll, summarizeRepo, summarizeMissing, toggleFavorite, openIde, openAgent],
   );
 
   // Separate value so progress ticks (enrich/summarize batches) only re-render

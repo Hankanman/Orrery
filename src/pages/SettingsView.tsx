@@ -31,7 +31,7 @@ interface PullState {
 }
 
 export function SettingsView() {
-  const { refresh } = useRepos();
+  const { refresh, refreshAiStatus } = useRepos();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -166,6 +166,8 @@ export function SettingsView() {
       setSaveError(null);
       setSaved(true);
       refresh();
+      refreshAiStatus(); // app-wide AI availability may have changed
+
     } catch (e) {
       setSaved(false);
       setSaveError(String(e));
@@ -183,6 +185,7 @@ export function SettingsView() {
       const [status, test] = await Promise.all([ipc.aiStatus(), ipc.aiTest()]);
       setAiStatus(status);
       setAiTest(test);
+      refreshAiStatus(); // keep the app-wide AI gate in sync
     } catch (e) {
       setAiTest({ chatOk: false, embedOk: false, ms: 0, error: String(e) });
     } finally {
@@ -414,7 +417,7 @@ export function SettingsView() {
                 checked={config.aiEnabled}
                 onChange={(e) => patch({ aiEnabled: e.target.checked })}
               />
-              Generate summaries, commit messages &amp; briefing
+              Enable AI features (summaries, commit messages, briefing, search)
             </label>
 
             {/* Chat model */}

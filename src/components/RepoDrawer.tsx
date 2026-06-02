@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 type Tab = "overview" | "changes" | "readme";
 
 export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () => void }) {
-  const { refresh, openIde, openAgent } = useRepos();
+  const { refresh, openIde, openAgent, aiReady } = useRepos();
   const [tab, setTab] = useState<Tab>("overview");
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
@@ -270,14 +270,16 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
 
           {tab === "changes" && (
             <div className="space-y-3">
-              <div className="flex flex-wrap gap-2">
-                <button type="button" className="orr-cbtn" onClick={genCommitMsg} disabled={aiBusy || !isTauri()}>
-                  <Sparkles className="size-3.5" /> {aiBusy ? "Thinking…" : "Commit message"}
-                </button>
-                <button type="button" className="orr-cbtn" onClick={genChangelog} disabled={aiBusy || !isTauri()}>
-                  <Sparkles className="size-3.5" /> Changelog
-                </button>
-              </div>
+              {aiReady && (
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="orr-cbtn" onClick={genCommitMsg} disabled={aiBusy}>
+                    <Sparkles className="size-3.5" /> {aiBusy ? "Thinking…" : "Commit message"}
+                  </button>
+                  <button type="button" className="orr-cbtn" onClick={genChangelog} disabled={aiBusy}>
+                    <Sparkles className="size-3.5" /> Changelog
+                  </button>
+                </div>
+              )}
 
               {commitMsg && (
                 <div className="space-y-2">

@@ -22,7 +22,7 @@ export function CommandPalette({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { repos, openIde, openAgent, refresh } = useRepos();
+  const { repos, openIde, openAgent, refresh, aiReady } = useRepos();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [hitIds, setHitIds] = useState<string[]>([]);
@@ -31,7 +31,7 @@ export function CommandPalette({
   // plain name filter would miss. Depends only on `query`, so repo updates
   // (enrich/summarize batches) don't re-fire the IPC call.
   useEffect(() => {
-    if (!isTauri() || query.trim().length < 3) {
+    if (!isTauri() || !aiReady || query.trim().length < 3) {
       setHitIds([]);
       return;
     }
@@ -48,7 +48,7 @@ export function CommandPalette({
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [query]);
+  }, [query, aiReady]);
 
   // Map hit ids → repos separately, so a repo update just re-maps (cheap)
   // rather than re-running the search. Results are force-mounted below so
