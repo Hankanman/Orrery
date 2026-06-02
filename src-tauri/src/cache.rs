@@ -259,6 +259,7 @@ mod tests {
             topics: Vec::new(),
             open_issues: 0,
             latest_release: None,
+            private: false,
             favorite: false,
             ai_summary: None,
         }

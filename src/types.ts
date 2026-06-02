@@ -51,6 +51,9 @@ export interface Repo {
   latestRelease?: string | null;
   /** Latest CI state (enrichment): "success" | "failure" | "pending" | "none". */
   ci?: string | null;
+  /** Whether the host remote is private (enrichment; false for public or
+   *  remote-less repos). */
+  private?: boolean;
   /** User-favorited (host amber star on the card). */
   favorite: boolean;
   /** Local-AI synthesized blurb (Phase 3); presence lights the violet indicator. */

@@ -7,8 +7,10 @@ import {
   Clock,
   CloudDownload,
   FolderSearch,
+  Globe,
   LayoutGrid,
   List,
+  Lock,
   RefreshCw,
   Sparkles,
   Star,
@@ -31,6 +33,19 @@ const RepoDrawer = lazy(() => import("@/components/RepoDrawer").then((m) => ({ d
 
 type SortKey = "activity" | "name" | "stars";
 type Chip = "dirty" | "ahead" | "starred" | "stale";
+type Visibility = "all" | "public" | "private";
+
+const VIS_OPTIONS: { key: Visibility; label: string; icon: typeof Globe | null }[] = [
+  { key: "all", label: "All", icon: null },
+  { key: "public", label: "Public", icon: Globe },
+  { key: "private", label: "Private", icon: Lock },
+];
+
+/** A repo is public only if it has a remote that isn't private; private covers
+ *  private remotes and local-only repos (which aren't published anywhere). */
+function isPublic(repo: Repo): boolean {
+  return repo.host != null && !repo.private;
+}
 
 const SORTS: { key: SortKey; label: string }[] = [
   { key: "activity", label: "Activity" },
@@ -91,6 +106,7 @@ export function GridView() {
   const [activeRoot, setActiveRoot] = useState("all");
   const [langFilter, setLangFilter] = useState<string | null>(null);
   const [chips, setChips] = useState<Set<Chip>>(new Set());
+  const [visibility, setVisibility] = useState<Visibility>("all");
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [sort, setSort] = useState<SortKey>("activity");
   const [view, setView] = useState<RepoView>("grid");
@@ -121,6 +137,8 @@ export function GridView() {
     const filtered = repos.filter((r) => {
       if (activeRoot !== "all" && r.root !== activeRoot) return false;
       if (langFilter && r.language !== langFilter) return false;
+      if (visibility === "public" && !isPublic(r)) return false;
+      if (visibility === "private" && isPublic(r)) return false;
       if (attentionOnly && !needsAttention(r)) return false;
       for (const chip of chips) if (!matchesChip(r, chip)) return false;
       return true;
@@ -132,7 +150,7 @@ export function GridView() {
       return b.lastCommitUnix - a.lastCommitUnix;
     });
     return sorted;
-  }, [repos, activeRoot, langFilter, chips, attentionOnly, sort]);
+  }, [repos, activeRoot, langFilter, chips, visibility, attentionOnly, sort]);
 
   const attentionCount = useMemo(() => repos.filter(needsAttention).length, [repos]);
   const missingSummaries = useMemo(() => repos.filter((r) => !r.aiSummary).length, [repos]);
@@ -182,6 +200,7 @@ export function GridView() {
     setActiveRoot("all");
     setLangFilter(null);
     setChips(new Set());
+    setVisibility("all");
   };
 
   const title = activeRoot === "all" ? "All repos" : activeRoot;
@@ -257,6 +276,20 @@ export function GridView() {
         )}
 
         <div className="orr-chiprow">
+          <div className="orr-seg text" role="group" aria-label="Filter by visibility">
+            {VIS_OPTIONS.map(({ key, label, icon: Icon }) => (
+              <button
+                type="button"
+                key={key}
+                className={cn(visibility === key && "on")}
+                aria-pressed={visibility === key}
+                onClick={() => setVisibility(key)}
+              >
+                {Icon && <Icon className="size-3.5" />}
+                {label}
+              </button>
+            ))}
+          </div>
           {CHIPS.map(({ key, label, icon: Icon }) => (
             <button type="button" key={key} className={cn("orr-chip", chips.has(key) && "on")} onClick={() => toggleChip(key)}>
               <Icon className="size-3.5" />

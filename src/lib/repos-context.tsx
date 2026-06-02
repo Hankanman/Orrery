@@ -145,6 +145,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
                   topics: hit.info.topics,
                   openIssues: hit.info.openIssues,
                   latestRelease: hit.info.latestRelease,
+                  private: hit.info.private,
                 }
               : next;
           });
@@ -228,6 +229,7 @@ export function ReposProvider({ children }: { children: ReactNode }) {
                   topics: old.topics,
                   openIssues: old.openIssues,
                   latestRelease: old.latestRelease,
+                  private: old.private,
                   ci: old.ci,
                   aiSummary: old.aiSummary,
                 }

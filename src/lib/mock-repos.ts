@@ -53,6 +53,7 @@ export const MOCK_REPOS: Repo[] = [
     root: "~/dev/work",
     host: "gitlab",
     stars: 0,
+    private: true,
     favorite: false,
     aiSummary:
       "Heavy active development on a feature branch — JWT rotation mid-refactor, with uncommitted changes and divergence from main.",
@@ -86,6 +87,7 @@ export const MOCK_REPOS: Repo[] = [
     root: "~/dev/work",
     host: "gitlab",
     stars: 0,
+    private: true,
     favorite: false,
     aiSummary: "Behind upstream by 3 commits — a pull is due before the next build.",
   },

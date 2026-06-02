@@ -65,6 +65,10 @@ pub struct Repo {
     /// Latest release tag on the host (enrichment).
     #[serde(default)]
     pub latest_release: Option<String>,
+    /// Whether the host remote is private (enrichment; false until fetched, and
+    /// for public or remote-less repos).
+    #[serde(default)]
+    pub private: bool,
     /// User-favorited (persisted locally).
     pub favorite: bool,
     /// Local-AI summary (Phase 3).
@@ -79,6 +83,8 @@ pub struct HostInfo {
     pub topics: Vec<String>,
     pub open_issues: u32,
     pub latest_release: Option<String>,
+    #[serde(default)]
+    pub private: bool,
 }
 
 /// User configuration, persisted as TOML.

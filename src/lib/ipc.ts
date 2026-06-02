@@ -137,6 +137,7 @@ export interface HostInfo {
   topics: string[];
   openIssues: number;
   latestRelease: string | null;
+  private: boolean;
 }
 
 export interface DeviceStart {

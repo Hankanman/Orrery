@@ -155,6 +155,7 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         topics: Vec::new(),
         open_issues: 0,
         latest_release: None,
+        private: false,
         favorite,
         ai_summary: None,
     })

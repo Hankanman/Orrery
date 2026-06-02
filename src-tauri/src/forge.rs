@@ -61,6 +61,8 @@ async fn fetch_github(slug: &str, token: Option<&str>) -> Result<HostInfo, Strin
         open_issues_count: u32,
         #[serde(default)]
         topics: Vec<String>,
+        #[serde(default)]
+        private: bool,
     }
 
     let client = client();
@@ -97,6 +99,7 @@ async fn fetch_github(slug: &str, token: Option<&str>) -> Result<HostInfo, Strin
         topics: repo.topics,
         open_issues: repo.open_issues_count,
         latest_release,
+        private: repo.private,
     })
 }
 
@@ -109,6 +112,9 @@ async fn fetch_gitlab(domain: &str, slug: &str, token: Option<&str>) -> Result<H
         open_issues_count: u32,
         #[serde(default)]
         topics: Vec<String>,
+        /// "public" | "internal" | "private"; absent on older instances.
+        #[serde(default)]
+        visibility: Option<String>,
     }
 
     if !valid_host(domain) {
@@ -151,6 +157,7 @@ async fn fetch_gitlab(domain: &str, slug: &str, token: Option<&str>) -> Result<H
         topics: project.topics,
         open_issues: project.open_issues_count,
         latest_release,
+        private: project.visibility.as_deref().is_some_and(|v| v != "public"),
     })
 }
 

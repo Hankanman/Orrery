@@ -7,6 +7,7 @@ import {
   ExternalLink,
   FolderOpen,
   GitBranch,
+  Lock,
   RefreshCw,
   Sparkles,
   SquareTerminal,
@@ -220,6 +221,11 @@ function RepoCardImpl({
           )}
           <StatusRow repo={repo} />
           <div className="orr-card-host">
+            {repo.private && (
+              <span className="orr-st" title="Private repository">
+                <Lock className="size-3 opacity-70" />
+              </span>
+            )}
             {repo.ci && repo.ci !== "none" && (
               <span className="orr-st" title={`CI: ${repo.ci}`}>
                 <span

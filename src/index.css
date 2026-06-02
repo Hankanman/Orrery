@@ -737,6 +737,18 @@
     background: var(--orr-glass-2);
     color: var(--orr-accent-bright);
   }
+  /* Labelled segmented control (e.g. visibility: All / Public / Private). The
+     base seg button is a grid (icon-only); switch to a flex row so the icon and
+     label sit side by side instead of stacking. */
+  .orr-seg.text button {
+    display: inline-flex;
+    align-items: center;
+    width: auto;
+    height: 30px;
+    gap: 5px;
+    padding: 0 11px;
+    font: var(--text-data-sm);
+  }
   .orr-sortpill {
     display: flex;
     align-items: center;
@@ -758,6 +770,7 @@
   .orr-chiprow {
     flex: none;
     display: flex;
+    align-items: center;
     gap: 8px;
     padding: 12px 22px 4px;
     flex-wrap: wrap;
