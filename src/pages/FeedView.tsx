@@ -33,6 +33,28 @@ const FEED_KINDS: { kind: FeedItem["kind"]; label: string }[] = [
 
 type Filter = "all" | "new" | FeedItem["kind"];
 
+// Last feed we successfully loaded, persisted so a return visit paints instantly
+// instead of showing a spinner while the (cached or live) fetch comes back.
+const SNAPSHOT_KEY = "orr.feed.snapshot";
+
+function readSnapshot(): FeedItem[] | null {
+  try {
+    const raw = localStorage.getItem(SNAPSHOT_KEY);
+    const parsed = raw ? (JSON.parse(raw) as FeedItem[]) : null;
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSnapshot(items: FeedItem[]) {
+  try {
+    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(items));
+  } catch {
+    /* quota or serialization failure — the snapshot is a nicety, not load-bearing */
+  }
+}
+
 function actionText(r: FeedItem): string {
   const who = r.actor ?? "Someone";
   switch (r.kind) {
@@ -51,7 +73,7 @@ function actionText(r: FeedItem): string {
 
 /** Feed — releases from repos you've starred + activity from people you follow. */
 export function FeedView() {
-  const [items, setItems] = useState<FeedItem[] | null>(null);
+  const [items, setItems] = useState<FeedItem[] | null>(() => readSnapshot());
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
@@ -71,6 +93,7 @@ export function FeedView() {
       .getFeed(refresh)
       .then((f) => {
         setItems(f);
+        writeSnapshot(f);
         setError(null);
       })
       .catch((e) => {

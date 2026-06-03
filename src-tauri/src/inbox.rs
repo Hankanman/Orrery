@@ -337,13 +337,15 @@ pub async fn github_feed() -> Result<Vec<FeedItem>, String> {
 
     let mut items: Vec<FeedItem> = Vec::new();
     let mut errors = Vec::new();
-    match release_items(&token).await {
-        Ok(r) => items.extend(r),
-        Err(e) => errors.push(e),
-    }
-    match following_items(&token).await {
-        Ok(r) => items.extend(r),
-        Err(e) => errors.push(e),
+    // The two sources are independent network fetches, so run them concurrently:
+    // cold-load latency becomes the slower of the two rather than their sum.
+    let (releases, following) =
+        futures_util::future::join(release_items(&token), following_items(&token)).await;
+    for source in [releases, following] {
+        match source {
+            Ok(r) => items.extend(r),
+            Err(e) => errors.push(e),
+        }
     }
     if items.is_empty() && !errors.is_empty() {
         return Err(errors.join("; "));
