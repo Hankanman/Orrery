@@ -3,7 +3,7 @@
 // so the web demo — and the documentation screenshots — show realistic data.
 // All entries are invented and public; nothing here reflects real accounts.
 
-import type { FeedItem, InboxItem, NotificationItem, RemoteRepo } from "@/lib/ipc";
+import type { FeedItem, InboxItem, NotificationItem, RemoteRepo, RepoPrunable } from "@/lib/ipc";
 
 const NOW = Math.floor(Date.now() / 1000);
 const HOUR = 3600;
@@ -21,6 +21,20 @@ export const MOCK_NOTIFICATIONS: NotificationItem[] = [
   { title: "You were mentioned in #142", repo: "Hankanman/Orrery", reason: "mention", kind: "Issue" },
   { title: "Review requested on #138", repo: "Hankanman/Orrery", reason: "review_requested", kind: "PullRequest" },
   { title: "CI passed on main", repo: "acme/web-dashboard", reason: "ci_activity", kind: "CheckSuite" },
+];
+
+export const MOCK_PRUNABLE: RepoPrunable[] = [
+  {
+    id: "/home/seb/dev/personal/Orrery",
+    branches: [
+      { name: "feat/old-card-layout", isHead: false, upstream: null, gone: false, merged: true },
+      { name: "fix/typo", isHead: false, upstream: "origin/fix/typo", gone: true, merged: false },
+    ],
+  },
+  {
+    id: "/home/seb/dev/personal/synth",
+    branches: [{ name: "experiment/wavetables", isHead: false, upstream: null, gone: false, merged: true }],
+  },
 ];
 
 export const MOCK_FEED: FeedItem[] = [

@@ -3,10 +3,15 @@ import { Check, Copy, Dices } from "lucide-react";
 import * as T from "@/lib/tools";
 import { cn } from "@/lib/utils";
 
+/** Sidebar groupings for the Dev Tools page (ordered as shown). */
+export const TOOL_CATEGORIES = ["Generate", "Encode", "Data", "Convert", "Text"] as const;
+export type ToolCategory = (typeof TOOL_CATEGORIES)[number];
+
 export interface DevTool {
   id: string;
   name: string;
   description: string;
+  category: ToolCategory;
   keywords: string[];
   Component: ComponentType;
 }
@@ -379,15 +384,15 @@ function RegexTool() {
 // ── registry ──────────────────────────────────────────────────────────────────
 
 export const TOOLS: DevTool[] = [
-  { id: "uuid", name: "UUID generator", description: "Random v4 or time-ordered v7 UUIDs.", keywords: ["uuid", "guid", "id", "v4", "v7"], Component: UuidTool },
-  { id: "url", name: "URL encode / decode", description: "Percent-encode or decode a string.", keywords: ["url", "uri", "percent", "encode", "decode", "escape"], Component: makeTwoWay(T.encodeUrl, T.decodeUrl) },
-  { id: "base64", name: "Base64 encode / decode", description: "UTF-8 safe Base64 both ways.", keywords: ["base64", "encode", "decode", "atob", "btoa"], Component: makeTwoWay(T.encodeBase64, T.decodeBase64) },
-  { id: "json", name: "JSON format / minify", description: "Pretty-print, minify, and validate JSON.", keywords: ["json", "format", "pretty", "minify", "validate", "beautify"], Component: JsonTool },
-  { id: "jwt", name: "JWT decoder", description: "Decode a JWT's header and payload (no verify).", keywords: ["jwt", "token", "decode", "auth", "bearer"], Component: JwtTool },
-  { id: "hash", name: "Hash (SHA)", description: "SHA-1/256/384/512 of some text.", keywords: ["hash", "sha", "sha256", "digest", "checksum"], Component: HashTool },
-  { id: "timestamp", name: "Timestamp converter", description: "Unix epoch ↔ human dates.", keywords: ["timestamp", "epoch", "unix", "date", "time"], Component: TimestampTool },
-  { id: "numbase", name: "Number base converter", description: "Convert between dec, hex, binary, octal.", keywords: ["number", "base", "hex", "binary", "octal", "radix", "convert"], Component: NumberBaseTool },
-  { id: "color", name: "Colour converter", description: "HEX ↔ RGB ↔ HSL, with a swatch.", keywords: ["color", "colour", "hex", "rgb", "hsl", "swatch"], Component: ColorTool },
-  { id: "case", name: "Case converter", description: "camel, snake, kebab, slug, and more.", keywords: ["case", "camel", "snake", "kebab", "slug", "pascal", "constant"], Component: CaseTool },
-  { id: "regex", name: "Regex tester", description: "Test a pattern and inspect match groups.", keywords: ["regex", "regexp", "pattern", "match", "test"], Component: RegexTool },
+  { id: "uuid", name: "UUID generator", description: "Random v4 or time-ordered v7 UUIDs.", category: "Generate", keywords: ["uuid", "guid", "id", "v4", "v7"], Component: UuidTool },
+  { id: "hash", name: "Hash (SHA)", description: "SHA-1/256/384/512 of some text.", category: "Generate", keywords: ["hash", "sha", "sha256", "digest", "checksum"], Component: HashTool },
+  { id: "url", name: "URL encode / decode", description: "Percent-encode or decode a string.", category: "Encode", keywords: ["url", "uri", "percent", "encode", "decode", "escape"], Component: makeTwoWay(T.encodeUrl, T.decodeUrl) },
+  { id: "base64", name: "Base64 encode / decode", description: "UTF-8 safe Base64 both ways.", category: "Encode", keywords: ["base64", "encode", "decode", "atob", "btoa"], Component: makeTwoWay(T.encodeBase64, T.decodeBase64) },
+  { id: "json", name: "JSON format / minify", description: "Pretty-print, minify, and validate JSON.", category: "Data", keywords: ["json", "format", "pretty", "minify", "validate", "beautify"], Component: JsonTool },
+  { id: "jwt", name: "JWT decoder", description: "Decode a JWT's header and payload (no verify).", category: "Data", keywords: ["jwt", "token", "decode", "auth", "bearer"], Component: JwtTool },
+  { id: "timestamp", name: "Timestamp converter", description: "Unix epoch ↔ human dates.", category: "Convert", keywords: ["timestamp", "epoch", "unix", "date", "time"], Component: TimestampTool },
+  { id: "numbase", name: "Number base converter", description: "Convert between dec, hex, binary, octal.", category: "Convert", keywords: ["number", "base", "hex", "binary", "octal", "radix", "convert"], Component: NumberBaseTool },
+  { id: "color", name: "Colour converter", description: "HEX ↔ RGB ↔ HSL, with a swatch.", category: "Convert", keywords: ["color", "colour", "hex", "rgb", "hsl", "swatch"], Component: ColorTool },
+  { id: "case", name: "Case converter", description: "camel, snake, kebab, slug, and more.", category: "Text", keywords: ["case", "camel", "snake", "kebab", "slug", "pascal", "constant"], Component: CaseTool },
+  { id: "regex", name: "Regex tester", description: "Test a pattern and inspect match groups.", category: "Text", keywords: ["regex", "regexp", "pattern", "match", "test"], Component: RegexTool },
 ];
