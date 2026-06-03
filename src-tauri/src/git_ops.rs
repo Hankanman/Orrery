@@ -236,7 +236,12 @@ pub fn add_worktree(path: &str, name: &str, dest: &str) -> Result<String, String
 pub fn remove_worktree(path: &str, name: &str) -> Result<(), String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let wt = repo.find_worktree(name).map_err(|e| e.to_string())?;
-    wt.prune(None).map_err(|e| e.to_string())?;
+    // `valid(true)` lets us prune a still-live worktree (the default only prunes
+    // ones whose working dir is already gone). We deliberately leave the working
+    // directory on disk — this unlinks the worktree, it doesn't delete files.
+    let mut opts = git2::WorktreePruneOptions::new();
+    opts.valid(true);
+    wt.prune(Some(&mut opts)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -467,6 +472,24 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].summary, "init");
         assert_eq!(log[0].author, "t");
+    }
+
+    #[test]
+    fn worktree_add_list_remove_roundtrips() {
+        let (_dir, path) = init_repo();
+        assert!(worktrees(&path).unwrap().is_empty());
+
+        let dest = format!("{path}-wt");
+        add_worktree(&path, "feat-x", &dest).unwrap();
+        let wts = worktrees(&path).unwrap();
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].name, "feat-x");
+
+        // Removing a still-live worktree must succeed (valid-prune).
+        remove_worktree(&path, "feat-x").unwrap();
+        assert!(worktrees(&path).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&dest);
     }
 
     #[test]

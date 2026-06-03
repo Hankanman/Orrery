@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, GitBranch, Scissors, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Code, FolderOpen, GitBranch, Plus, Scissors, Sparkles, SquareTerminal, Trash2, X } from "lucide-react";
 import type { Repo } from "@/types";
 import { ipc, isTauri, type BranchInfo, type CommitInfo, type WorktreeInfo } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
@@ -18,6 +18,7 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
   const [tab, setTab] = useState<Tab>("overview");
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
+  const [newWt, setNewWt] = useState("");
   const [log, setLog] = useState<CommitInfo[]>([]);
   const [diff, setDiff] = useState("");
   const [readme, setReadme] = useState<string | null>(null);
@@ -102,9 +103,27 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
 
   const removeWt = async (name: string) => {
     if (!id) return;
-    if (!window.confirm(`Remove worktree "${name}"? This unlinks it from the repo.`)) return;
+    if (!window.confirm(`Remove worktree "${name}"? This unlinks it from the repo; the folder stays on disk.`)) return;
     await ipc.removeWorktree(id, name).catch((e) => setError(`Couldn't remove worktree: ${String(e)}`));
     setWorktrees(await ipc.listWorktrees(id).catch(() => worktrees));
+  };
+
+  // Create a worktree (+ branch) named `newWt`, placed in a sibling directory.
+  const addWt = async () => {
+    const name = newWt.trim();
+    if (!id || !name || busy) return;
+    const dest = `${id}-${name.replace(/[^A-Za-z0-9._-]/g, "-")}`;
+    setBusy(true);
+    setError(null);
+    try {
+      await ipc.addWorktree(id, name, dest);
+      setNewWt("");
+      setWorktrees(await ipc.listWorktrees(id));
+    } catch (e) {
+      setError(`Couldn't add worktree: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const genCommitMsg = async () => {
@@ -238,27 +257,56 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
               </section>
 
               {/* Worktrees */}
-              {worktrees.length > 0 && (
-                <section>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Worktrees</h3>
-                  <div className="space-y-1">
-                    {worktrees.map((w) => (
-                      <div key={w.name} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm">
-                        <span className="font-mono">{w.name}</span>
-                        <span className="truncate text-xs text-muted-foreground">{w.path}</span>
-                        <button
-                          type="button"
-                          className="ml-auto text-muted-foreground hover:text-danger"
-                          aria-label="Remove worktree"
-                          onClick={() => removeWt(w.name)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
+              <section>
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Worktrees</h3>
+                <div className="space-y-1">
+                  {worktrees.map((w) => (
+                    <div key={w.name} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm">
+                      <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="font-mono">{w.name}</span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{w.path}</span>
+                      <button type="button" className="text-muted-foreground hover:text-foreground" title="Open in IDE" aria-label="Open in IDE" onClick={() => isTauri() && ipc.openInIde(w.path).catch(() => {})}>
+                        <Code className="size-3.5" />
+                      </button>
+                      <button type="button" className="text-muted-foreground hover:text-foreground" title="Open agent here" aria-label="Open agent here" onClick={() => isTauri() && ipc.openAgent(w.path).catch(() => {})}>
+                        <SquareTerminal className="size-3.5" />
+                      </button>
+                      <button type="button" className="text-muted-foreground hover:text-foreground" title="Open folder" aria-label="Open folder" onClick={() => isTauri() && ipc.openFolder(w.path).catch(() => {})}>
+                        <FolderOpen className="size-3.5" />
+                      </button>
+                      <button type="button" className="text-muted-foreground hover:text-danger" title="Remove worktree" aria-label="Remove worktree" onClick={() => removeWt(w.name)}>
+                        <Trash2 className="size-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  {worktrees.length === 0 && (
+                    <p className="px-2 text-xs text-muted-foreground">No linked worktrees. Create one to work on a branch in parallel — or to drop an agent into an isolated tree.</p>
+                  )}
+                </div>
+                <form
+                  className="mt-2 flex items-center gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    addWt();
+                  }}
+                >
+                  <input
+                    className="min-w-0 flex-1 rounded-md border border-border bg-background/50 px-2 py-1.5 font-mono text-xs outline-none focus:border-primary/50"
+                    value={newWt}
+                    spellCheck={false}
+                    placeholder="new-branch-name"
+                    onChange={(e) => setNewWt(e.target.value)}
+                    disabled={busy}
+                  />
+                  <button
+                    type="submit"
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-40"
+                    disabled={busy || !newWt.trim()}
+                  >
+                    <Plus className="size-3.5" /> Add worktree
+                  </button>
+                </form>
+              </section>
 
               {/* Recent commits */}
               <section>
