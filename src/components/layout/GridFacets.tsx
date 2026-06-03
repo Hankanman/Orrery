@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Bookmark, FolderGit2, Plus, X } from "lucide-react";
+import { Bookmark, FolderGit2, Plus, Tag, X } from "lucide-react";
 import type { Repo } from "@/types";
 import type { SavedView } from "@/lib/saved-views";
+import { tagCounts, useRepoTags } from "@/lib/repo-tags";
 import { LangIcon } from "@/components/LangIcon";
 import { cn } from "@/lib/utils";
 
@@ -12,6 +13,8 @@ interface GridFacetsProps {
   onSelectRoot: (root: string) => void;
   langFilter: string | null;
   onSelectLang: (lang: string | null) => void;
+  activeTag: string | null;
+  onSelectTag: (tag: string | null) => void;
   savedViews: SavedView[];
   onApplyView: (v: SavedView) => void;
   onSaveView: (name: string) => void;
@@ -25,12 +28,15 @@ export function GridFacets({
   onSelectRoot,
   langFilter,
   onSelectLang,
+  activeTag,
+  onSelectTag,
   savedViews,
   onApplyView,
   onSaveView,
   onDeleteView,
 }: GridFacetsProps) {
   const navigate = useNavigate();
+  const projects = tagCounts(useRepoTags());
 
   const { roots, langs } = useMemo(() => {
     const roots: { path: string; count: number }[] = [];
@@ -137,6 +143,24 @@ export function GridFacets({
             >
               <LangIcon language={lang} className="size-3.5" />
               <span className="nm">{lang}</span>
+              <span className="count">{count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {projects.length > 0 && (
+        <div className="orr-sb-sec">
+          <div className="orr-sb-lead">Projects</div>
+          {projects.map(([tag, count]) => (
+            <button
+              type="button"
+              key={tag}
+              className={cn("orr-sb-item", activeTag === tag && "active")}
+              onClick={() => onSelectTag(activeTag === tag ? null : tag)}
+            >
+              <Tag className="size-3.5" />
+              <span className="nm">{tag}</span>
               <span className="count">{count}</span>
             </button>
           ))}
