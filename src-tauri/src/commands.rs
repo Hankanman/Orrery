@@ -586,6 +586,14 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+/// Cross-repo content search via ripgrep (#65). Runs off the UI thread.
+#[tauri::command]
+pub async fn search_code(query: String, paths: Vec<String>) -> Result<Vec<crate::search::SearchHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::search::search(&query, &paths, 60))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Semantic search over the embedding index; returns ranked repo ids (#41).
 #[tauri::command]
 pub async fn semantic_search(query: String) -> Result<Vec<SearchHit>, String> {

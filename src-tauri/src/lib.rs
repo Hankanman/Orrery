@@ -12,6 +12,7 @@ mod launch;
 mod model;
 mod oauth;
 mod scan;
+mod search;
 mod tray;
 mod watcher;
 
@@ -152,6 +153,7 @@ pub fn run() {
             commands::get_feed,
             commands::clone_repo,
             commands::active_agents,
+            commands::search_code,
             commands::notify
         ])
         .run(tauri::generate_context!())

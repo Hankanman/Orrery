@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Code, FolderGit2, RefreshCw, Settings, Sparkles, SquareTerminal } from "lucide-react";
+import { Code, FileSearch, FolderGit2, RefreshCw, Settings, Sparkles, SquareTerminal } from "lucide-react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -11,7 +11,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command";
-import { ipc, isTauri } from "@/lib/ipc";
+import { ipc, isTauri, type CodeHit } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
 import type { Repo } from "@/types";
 
@@ -26,6 +26,12 @@ export function CommandPalette({
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [hitIds, setHitIds] = useState<string[]>([]);
+  const [codeHits, setCodeHits] = useState<CodeHit[]>([]);
+
+  // Repo paths for content search, via a ref so enrich/summarize batches don't
+  // re-fire the search (it depends only on `query`).
+  const repoPathsRef = useRef<string[]>([]);
+  repoPathsRef.current = repos.map((r) => r.id);
 
   // Debounced semantic search — surfaces conceptually-related repos that a
   // plain name filter would miss. Depends only on `query`, so repo updates
@@ -58,6 +64,28 @@ export function CommandPalette({
     return hitIds.map((id) => byId.get(id)).filter((r): r is Repo => Boolean(r)).slice(0, 5);
   }, [hitIds, repos]);
 
+  // Debounced cross-repo content search (ripgrep). Force-mounted below so cmdk's
+  // literal filter doesn't hide the hits.
+  useEffect(() => {
+    if (!isTauri() || query.trim().length < 2) {
+      setCodeHits([]);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(async () => {
+      try {
+        const hits = await ipc.searchCode(query, repoPathsRef.current);
+        if (!cancelled) setCodeHits(hits);
+      } catch {
+        if (!cancelled) setCodeHits([]);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [query]);
+
   const run = (fn: () => void) => {
     onOpenChange(false);
     fn();
@@ -76,6 +104,25 @@ export function CommandPalette({
                 <Sparkles className="text-primary" />
                 <span className="font-medium">{repo.displayName}</span>
                 <span className="text-muted-foreground truncate text-xs">{repo.slug ?? repo.path}</span>
+              </CommandItem>
+            ))}
+          </CommandGroup>
+        )}
+
+        {codeHits.length > 0 && (
+          <CommandGroup heading="Code" forceMount>
+            {codeHits.map((h, i) => (
+              <CommandItem
+                key={`code-${i}`}
+                value={`code-${i}`}
+                forceMount
+                onSelect={() => run(() => isTauri() && ipc.openInIde(h.abs).catch(() => {}))}
+              >
+                <FileSearch />
+                <span className="shrink-0 font-mono text-xs">
+                  {h.file}:{h.line}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{h.text.trim()}</span>
               </CommandItem>
             ))}
           </CommandGroup>
