@@ -33,7 +33,6 @@ import {
   type Visibility,
 } from "@/lib/repo-filter";
 import { useSavedViews, type SavedView } from "@/lib/saved-views";
-import { useRepoTags } from "@/lib/repo-tags";
 import type { Repo } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -86,8 +85,6 @@ export function GridView() {
 
   const [activeRoot, setActiveRoot] = useState("all");
   const [langFilter, setLangFilter] = useState<string | null>(null);
-  const [activeTag, setActiveTag] = useState<string | null>(null);
-  const tagMap = useRepoTags();
   const [chips, setChips] = useState<Set<Chip>>(new Set());
   const [visibility, setVisibility] = useState<Visibility>("all");
   const [attentionOnly, setAttentionOnly] = useState(false);
@@ -120,7 +117,6 @@ export function GridView() {
     const filtered = repos.filter((r) => {
       if (activeRoot !== "all" && r.root !== activeRoot) return false;
       if (langFilter && r.language !== langFilter) return false;
-      if (activeTag && !tagMap[r.id]?.includes(activeTag)) return false;
       if (!matchesVisibility(r, visibility)) return false;
       if (attentionOnly && !needsAttention(r)) return false;
       for (const chip of chips) if (!matchesChip(r, chip)) return false;
@@ -133,7 +129,7 @@ export function GridView() {
       return b.lastCommitUnix - a.lastCommitUnix;
     });
     return sorted;
-  }, [repos, activeRoot, langFilter, activeTag, tagMap, chips, visibility, attentionOnly, sort]);
+  }, [repos, activeRoot, langFilter, chips, visibility, attentionOnly, sort]);
 
   const attentionCount = useMemo(() => repos.filter(needsAttention).length, [repos]);
   const missingSummaries = useMemo(() => repos.filter((r) => !r.aiSummary).length, [repos]);
@@ -150,7 +146,6 @@ export function GridView() {
   filtersRef.current = {
     root: activeRoot,
     lang: langFilter,
-    tag: activeTag,
     chips: [...chips],
     visibility,
     attention: attentionOnly,
@@ -159,7 +154,6 @@ export function GridView() {
   const applyView = useCallback((v: SavedView) => {
     setActiveRoot(v.root);
     setLangFilter(v.lang);
-    setActiveTag(v.tag ?? null);
     setChips(new Set(v.chips));
     setVisibility(v.visibility);
     setAttentionOnly(v.attention);
@@ -167,7 +161,7 @@ export function GridView() {
   }, []);
   const saveCurrentView = useCallback((name: string) => saveView({ name, ...filtersRef.current }), [saveView]);
 
-  // Mission Control's sidebar content: saved views + projects + root + language filters.
+  // Mission Control's sidebar content: saved views + root + language filters.
   useSidebarSlot(
     useMemo(
       () => (
@@ -177,15 +171,13 @@ export function GridView() {
           onSelectRoot={setActiveRoot}
           langFilter={langFilter}
           onSelectLang={setLangFilter}
-          activeTag={activeTag}
-          onSelectTag={setActiveTag}
           savedViews={views}
           onApplyView={applyView}
           onSaveView={saveCurrentView}
           onDeleteView={removeView}
         />
       ),
-      [repos, activeRoot, langFilter, activeTag, views, applyView, saveCurrentView, removeView],
+      [repos, activeRoot, langFilter, views, applyView, saveCurrentView, removeView],
     ),
   );
 
@@ -213,7 +205,6 @@ export function GridView() {
   const clearFilters = () => {
     setActiveRoot("all");
     setLangFilter(null);
-    setActiveTag(null);
     setChips(new Set());
     setVisibility("all");
   };

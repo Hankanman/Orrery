@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, Code, FolderOpen, GitBranch, Plus, Scissors, Sparkles, SquareTerminal, Tag, Trash2, X } from "lucide-react";
+import { Check, Code, FolderOpen, GitBranch, Plus, Scissors, Sparkles, SquareTerminal, Trash2, X } from "lucide-react";
 import type { Repo } from "@/types";
 import { ipc, isTauri, type BranchInfo, type CommitInfo, type WorktreeInfo } from "@/lib/ipc";
 import { useRepos } from "@/lib/repos-context";
-import { setRepoTags, useRepoTags } from "@/lib/repo-tags";
 import { BrandIcon } from "@/components/BrandIcon";
 import { HostIcon } from "@/components/HostIcon";
 import { VirtualList } from "@/components/VirtualList";
@@ -20,8 +19,6 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
   const [newWt, setNewWt] = useState("");
-  const [newTag, setNewTag] = useState("");
-  const tagMap = useRepoTags();
   const [log, setLog] = useState<CommitInfo[]>([]);
   const [diff, setDiff] = useState("");
   const [readme, setReadme] = useState<string | null>(null);
@@ -127,18 +124,6 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
     } finally {
       setBusy(false);
     }
-  };
-
-  // Project tags for this repo (shared store; syncs with the sidebar facet).
-  const tags = (id && tagMap[id]) || [];
-  const addTag = () => {
-    const t = newTag.trim();
-    if (!id || !t) return;
-    setRepoTags(id, [...tags, t]);
-    setNewTag("");
-  };
-  const removeTag = (t: string) => {
-    if (id) setRepoTags(id, tags.filter((x) => x !== t));
   };
 
   const genCommitMsg = async () => {
@@ -269,37 +254,6 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
                     )}
                   />
                 )}
-              </section>
-
-              {/* Projects / tags */}
-              <section>
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Projects</h3>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {tags.map((t) => (
-                    <span key={t} className="inline-flex items-center gap-1 rounded-md border border-border bg-secondary/40 px-2 py-0.5 text-xs">
-                      <Tag className="size-3 text-muted-foreground" />
-                      {t}
-                      <button type="button" className="text-muted-foreground hover:text-danger" aria-label={`Remove ${t}`} onClick={() => removeTag(t)}>
-                        <X className="size-3" />
-                      </button>
-                    </span>
-                  ))}
-                  <form
-                    className="inline-flex items-center"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      addTag();
-                    }}
-                  >
-                    <input
-                      className="w-28 rounded-md border border-border bg-background/50 px-2 py-0.5 text-xs outline-none focus:border-primary/50"
-                      value={newTag}
-                      spellCheck={false}
-                      placeholder="+ project"
-                      onChange={(e) => setNewTag(e.target.value)}
-                    />
-                  </form>
-                </div>
               </section>
 
               {/* Worktrees */}
