@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { FolderPlus, GitFork, Globe, RefreshCw, Rss, Star, Tag } from "lucide-react";
+import { FolderPlus, GitFork, Globe, RefreshCw, Rss, Sparkle, Star, Tag } from "lucide-react";
 import { ipc, isTauri, type FeedItem } from "@/lib/ipc";
+import { lastVisit, markVisited } from "@/lib/last-visit";
 import { MOCK_FEED } from "@/lib/mock-activity";
+import { useSidebarSlot } from "@/lib/sidebar-slot";
 import { Spinner } from "@/components/Spinner";
 import { VirtualList } from "@/components/VirtualList";
 import { timeAgo } from "@/lib/format";
@@ -20,6 +22,16 @@ const KIND_ICON = {
   forked: GitFork,
   public: Globe,
 } as const;
+
+const FEED_KINDS: { kind: FeedItem["kind"]; label: string }[] = [
+  { kind: "release", label: "Releases" },
+  { kind: "starred", label: "Stars" },
+  { kind: "created", label: "New repos" },
+  { kind: "forked", label: "Forks" },
+  { kind: "public", label: "Open-sourced" },
+];
+
+type Filter = "all" | "new" | FeedItem["kind"];
 
 function actionText(r: FeedItem): string {
   const who = r.actor ?? "Someone";
@@ -42,6 +54,12 @@ export function FeedView() {
   const [items, setItems] = useState<FeedItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [filter, setFilter] = useState<Filter>("all");
+
+  // Snapshot the last visit before we stamp a new one, so items that arrived
+  // since you last looked stay highlighted for the duration of this visit.
+  const seenRef = useRef(lastVisit("feed"));
+  const isNew = (r: FeedItem) => seenRef.current !== 0 && r.timestamp > seenRef.current;
 
   const load = (refresh = false) => {
     if (!isTauri()) {
@@ -64,8 +82,48 @@ export function FeedView() {
 
   useEffect(() => {
     load(false);
+    markVisited("feed"); // viewing the feed clears its "new" badge
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const all = items ?? [];
+  const newCount = useMemo(() => all.filter(isNew).length, [all]);
+
+  const visible = useMemo(() => {
+    if (filter === "all") return all;
+    if (filter === "new") return all.filter(isNew);
+    return all.filter((r) => r.kind === filter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [all, filter]);
+
+  // Sidebar: filter the feed by type (and a "new since last visit" view).
+  useSidebarSlot(
+    useMemo(() => {
+      const item = (f: Filter, label: string, Icon: typeof Tag, count: number, accent = false) => (
+        <button
+          key={f}
+          type="button"
+          className={cn("orr-sb-item", filter === f && "active")}
+          onClick={() => setFilter(f)}
+        >
+          <Icon className="size-4" />
+          <span className="nm">{label}</span>
+          {count > 0 && <span className={accent ? "orr-sb-badge" : "count"}>{count}</span>}
+        </button>
+      );
+      return (
+        <div className="orr-sb-sec">
+          <div className="orr-sb-lead">Filter</div>
+          {item("all", "All activity", Rss, all.length)}
+          {newCount > 0 && item("new", "New since last visit", Sparkle, newCount, true)}
+          {FEED_KINDS.map(({ kind, label }) =>
+            item(kind, label, KIND_ICON[kind], all.filter((r) => r.kind === kind).length),
+          )}
+        </div>
+      );
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [filter, all, newCount]),
+  );
 
   return (
     <div className="orr-feed">
@@ -99,15 +157,19 @@ export function FeedView() {
           <p className="t">Couldn’t load the feed</p>
           <p className="s">{error}</p>
         </div>
-      ) : items.length === 0 ? (
+      ) : visible.length === 0 ? (
         <div className="orr-empty">
           <Rss className="size-8 opacity-60" />
-          <p className="t">Nothing new</p>
-          <p className="s">Star repos and follow people on GitHub (and connect it in Settings) to fill your feed.</p>
+          <p className="t">{filter === "all" ? "Nothing new" : "Nothing here"}</p>
+          <p className="s">
+            {filter === "all"
+              ? "Star repos and follow people on GitHub (and connect it in Settings) to fill your feed."
+              : "No activity matches this filter."}
+          </p>
         </div>
       ) : (
         <VirtualList
-          items={items}
+          items={visible}
           getKey={(r) => `${r.url}:${r.kind}:${r.timestamp}`}
           estimateSize={96}
           gap={10}
@@ -115,7 +177,7 @@ export function FeedView() {
           renderItem={(r) => {
             const Icon = KIND_ICON[r.kind];
             return (
-              <button type="button" className="orr-feed-item" onClick={() => open(r.url)}>
+              <button type="button" className={cn("orr-feed-item", isNew(r) && "new")} onClick={() => open(r.url)}>
                 <div className="row">
                   <Icon className="size-3.5 shrink-0 opacity-70" />
                   <span className="repo">{r.repo}</span>
@@ -125,6 +187,7 @@ export function FeedView() {
                     </span>
                   )}
                   {r.prerelease && <span className="pre">pre-release</span>}
+                  {isNew(r) && <span className="nu">new</span>}
                   <span className="time">{timeAgo(r.timestamp)}</span>
                 </div>
                 <div className="action">{actionText(r)}</div>
