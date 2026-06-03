@@ -37,9 +37,15 @@ pub fn search(query: &str, paths: &[String], limit: usize) -> Result<Vec<SearchH
         .arg("--max-columns")
         .arg("300")
         .arg("-e")
-        .arg(query);
+        .arg(query)
+        // `--` ends flag parsing: nothing after it (the paths) can be smuggled
+        // in as a ripgrep flag like `--pre=…`, even if a path begins with `-`.
+        .arg("--");
     for p in paths {
-        cmd.arg(p);
+        // Defence in depth — repo paths are always absolute; ignore anything else.
+        if std::path::Path::new(p).is_absolute() {
+            cmd.arg(p);
+        }
     }
 
     let out = cmd.output().map_err(|e| e.to_string())?;
@@ -101,5 +107,20 @@ mod tests {
     fn empty_query_or_no_paths_returns_empty() {
         assert!(search("", &["/tmp".into()], 10).unwrap().is_empty());
         assert!(search("x", &[], 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_dash_prefixed_query_is_a_literal_pattern_not_a_flag() {
+        if which::which("rg").is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "run with --pre=danger here\n").unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        // If "--pre=danger" were parsed as a flag rather than a pattern, this
+        // would error or do something unexpected; it must just match the text.
+        let hits = search("--pre=danger", &[root], 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.contains("--pre=danger"));
     }
 }
