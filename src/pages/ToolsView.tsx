@@ -1,22 +1,65 @@
 import { useMemo, useState } from "react";
 import { Search, Wrench } from "lucide-react";
-import { TOOLS } from "@/components/tools/registry";
+import { TOOLS, TOOL_CATEGORIES, type ToolCategory } from "@/components/tools/registry";
+import { useSidebarSlot } from "@/lib/sidebar-slot";
+import { cn } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+type Filter = "all" | ToolCategory;
 
 /** Dev Tools — an offline utility belt (UUIDs, encoders, converters, …). */
 export function ToolsView() {
   const [query, setQuery] = useState("");
+  const [category, setCategory] = useState<Filter>("all");
+
+  const q = query.trim().toLowerCase();
+  const searching = q.length > 0;
 
   const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return TOOLS;
-    return TOOLS.filter(
-      (t) =>
-        t.name.toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q) ||
-        t.keywords.some((k) => k.includes(q)),
-    );
-  }, [query]);
+    return TOOLS.filter((t) => {
+      // A search matches anywhere and spans every category; otherwise honour the
+      // selected category filter from the sidebar.
+      if (searching) {
+        return (
+          t.name.toLowerCase().includes(q) ||
+          t.description.toLowerCase().includes(q) ||
+          t.keywords.some((k) => k.includes(q))
+        );
+      }
+      return category === "all" || t.category === category;
+    });
+  }, [q, searching, category]);
+
+  // Sidebar content: filter the grid by category (mirrors Settings' sections).
+  useSidebarSlot(
+    useMemo(
+      () => (
+        <div className="orr-sb-sec">
+          <div className="orr-sb-lead">Categories</div>
+          <button
+            type="button"
+            className={cn("orr-sb-item", category === "all" && "active")}
+            onClick={() => setCategory("all")}
+          >
+            <span className="nm">All tools</span>
+            <span className="count">{TOOLS.length}</span>
+          </button>
+          {TOOL_CATEGORIES.map((c) => (
+            <button
+              key={c}
+              type="button"
+              className={cn("orr-sb-item", category === c && "active")}
+              onClick={() => setCategory(c)}
+            >
+              <span className="nm">{c}</span>
+              <span className="count">{TOOLS.filter((t) => t.category === c).length}</span>
+            </button>
+          ))}
+        </div>
+      ),
+      [category],
+    ),
+  );
 
   return (
     <div className="orr-feed">
@@ -35,26 +78,28 @@ export function ToolsView() {
         </div>
       </header>
 
-      {visible.length === 0 ? (
-        <div className="orr-empty">
-          <Wrench className="size-8 opacity-60" />
-          <p className="t">No tools match “{query}”</p>
-        </div>
-      ) : (
-        <div className="grid gap-3 p-4 pt-2 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
-          {visible.map(({ id, name, description, Component }) => (
-            <Card key={id}>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm">{name}</CardTitle>
-                <CardDescription className="text-xs">{description}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Component />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
+      <div className="orr-feed-scroll">
+        {visible.length === 0 ? (
+          <div className="orr-empty">
+            <Wrench className="size-8 opacity-60" />
+            <p className="t">No tools match “{query}”</p>
+          </div>
+        ) : (
+          <div className="grid gap-3 p-4 pt-2 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
+            {visible.map(({ id, name, description, Component }) => (
+              <Card key={id}>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">{name}</CardTitle>
+                  <CardDescription className="text-xs">{description}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Component />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

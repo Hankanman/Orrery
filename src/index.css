@@ -509,6 +509,20 @@
     gap: 16px;
     overflow: hidden;
     z-index: 1;
+    transition: width var(--dur-base) var(--ease-out);
+  }
+  .orr-sidebar.collapsed {
+    width: 60px;
+    padding: 16px 8px;
+  }
+  /* Icon-only rail: drop labels, contextual slot, and scan text; centre icons. */
+  .orr-sidebar.collapsed .orr-sb-item {
+    justify-content: center;
+    position: relative;
+  }
+  .orr-sidebar.collapsed .orr-sb-item .nm,
+  .orr-sidebar.collapsed .orr-sb-slot {
+    display: none;
   }
   /* Per-screen contextual content; scrolls independently of the fixed nav/foot. */
   .orr-sb-slot {
@@ -593,6 +607,32 @@
     border-radius: 50%;
     flex: none;
   }
+  /* Live count badge on a nav item (attention / inbox / prunable). */
+  .orr-sb-badge {
+    margin-left: auto;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font: var(--text-data-sm);
+    background: color-mix(in oklch, var(--orr-accent) 20%, transparent);
+    color: var(--orr-accent-bright);
+  }
+  /* Collapsed: shrink the badge to a corner dot (the number can't fit). */
+  .orr-sidebar.collapsed .orr-sb-badge {
+    position: absolute;
+    top: 3px;
+    right: 5px;
+    min-width: 0;
+    width: 7px;
+    height: 7px;
+    padding: 0;
+    font-size: 0;
+    color: transparent;
+  }
   .orr-sb-foot {
     margin-top: auto;
     padding: 10px 8px 2px;
@@ -602,6 +642,32 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  .orr-sidebar.collapsed .orr-sb-foot {
+    justify-content: center;
+  }
+  .orr-sb-foot-scan {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .orr-sb-collapse {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--r-sm);
+    border: none;
+    background: transparent;
+    color: var(--orr-fg-3);
+    cursor: pointer;
+    transition: all var(--dur-fast) var(--ease-out);
+  }
+  .orr-sb-collapse:hover {
+    background: var(--orr-glass);
+    color: var(--orr-fg-0);
   }
 
   /* ---- Main column + toolbar ---- */
@@ -1403,6 +1469,15 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+/* Scroll region for non-virtualized .orr-feed pages (Dev Tools, Cleanup):
+   fills the height left under the fixed head and scrolls its own content, so
+   the sidebar and header stay put. Virtualized pages scroll inside their own
+   VirtualList/VirtualGrid instead and don't need this. */
+.orr-feed-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .orr-feed-head {
   flex: none;
