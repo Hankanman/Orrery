@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowUp,
@@ -32,6 +32,7 @@ import {
   type SortKey,
   type Visibility,
 } from "@/lib/repo-filter";
+import { useSavedViews, type SavedView } from "@/lib/saved-views";
 import type { Repo } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -137,7 +138,30 @@ export function GridView() {
   // across filters so the overview doesn't jump when you narrow the grid.
   const allIds = useMemo(() => repos.map((r) => r.id), [repos]);
 
-  // Mission Control's sidebar content: root + language filters.
+  // Saved filter presets (persisted in localStorage). A ref holds the current
+  // filter snapshot so "save view" captures the latest without re-creating the
+  // sidebar node on every filter change.
+  const { views, save: saveView, remove: removeView } = useSavedViews();
+  const filtersRef = useRef<Omit<SavedView, "id" | "name">>(null!);
+  filtersRef.current = {
+    root: activeRoot,
+    lang: langFilter,
+    chips: [...chips],
+    visibility,
+    attention: attentionOnly,
+    sort,
+  };
+  const applyView = useCallback((v: SavedView) => {
+    setActiveRoot(v.root);
+    setLangFilter(v.lang);
+    setChips(new Set(v.chips));
+    setVisibility(v.visibility);
+    setAttentionOnly(v.attention);
+    setSort(v.sort);
+  }, []);
+  const saveCurrentView = useCallback((name: string) => saveView({ name, ...filtersRef.current }), [saveView]);
+
+  // Mission Control's sidebar content: saved views + root + language filters.
   useSidebarSlot(
     useMemo(
       () => (
@@ -147,9 +171,13 @@ export function GridView() {
           onSelectRoot={setActiveRoot}
           langFilter={langFilter}
           onSelectLang={setLangFilter}
+          savedViews={views}
+          onApplyView={applyView}
+          onSaveView={saveCurrentView}
+          onDeleteView={removeView}
         />
       ),
-      [repos, activeRoot, langFilter],
+      [repos, activeRoot, langFilter, views, applyView, saveCurrentView, removeView],
     ),
   );
 
