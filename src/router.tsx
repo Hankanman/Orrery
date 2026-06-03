@@ -37,13 +37,19 @@ const exploreRoute = createRoute({
   component: lazyRouteComponent(() => import("@/pages/ExploreView"), "ExploreView"),
 });
 
+const toolsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/tools",
+  component: lazyRouteComponent(() => import("@/pages/ToolsView"), "ToolsView"),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   component: lazyRouteComponent(() => import("@/pages/SettingsView"), "SettingsView"),
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, feedRoute, exploreRoute, settingsRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, feedRoute, exploreRoute, toolsRoute, settingsRoute]);
 
 export const router = createRouter({ routeTree });
 
