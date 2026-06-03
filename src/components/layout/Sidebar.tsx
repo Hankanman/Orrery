@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { to: "/", icon: LayoutGrid, label: "Mission Control", badge: "attention" },
   { to: "/inbox", icon: Inbox, label: "Inbox", badge: "inbox" },
-  { to: "/feed", icon: Rss, label: "Feed" },
+  { to: "/feed", icon: Rss, label: "Feed", badge: "feedNew" },
   { to: "/explore", icon: Compass, label: "Explore" },
   { to: "/tools", icon: Wrench, label: "Dev Tools" },
   { to: "/janitor", icon: Scissors, label: "Cleanup", badge: "prunable" },

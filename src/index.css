@@ -1529,6 +1529,19 @@
   border-color: var(--orr-border-accent);
   background: var(--orr-glass-hover);
 }
+/* Arrived since your last visit to the Feed. */
+.orr-feed-item.new {
+  border-color: color-mix(in oklch, var(--orr-accent) 40%, var(--orr-border));
+}
+.orr-feed-item .nu {
+  font: var(--text-micro);
+  letter-spacing: var(--tracking-micro);
+  text-transform: uppercase;
+  color: var(--orr-accent-bright);
+  background: color-mix(in oklch, var(--orr-accent) 18%, transparent);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
 .orr-feed-item .row {
   display: flex;
   align-items: center;
