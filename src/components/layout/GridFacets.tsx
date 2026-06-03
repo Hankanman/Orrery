@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { FolderGit2, Plus } from "lucide-react";
+import { Bookmark, FolderGit2, Plus, X } from "lucide-react";
 import type { Repo } from "@/types";
+import type { SavedView } from "@/lib/saved-views";
 import { LangIcon } from "@/components/LangIcon";
 import { cn } from "@/lib/utils";
 
@@ -11,10 +12,24 @@ interface GridFacetsProps {
   onSelectRoot: (root: string) => void;
   langFilter: string | null;
   onSelectLang: (lang: string | null) => void;
+  savedViews: SavedView[];
+  onApplyView: (v: SavedView) => void;
+  onSaveView: (name: string) => void;
+  onDeleteView: (id: string) => void;
 }
 
-/** Mission Control's sidebar content: workspace-root and language filters. */
-export function GridFacets({ repos, activeRoot, onSelectRoot, langFilter, onSelectLang }: GridFacetsProps) {
+/** Mission Control's sidebar content: saved views + workspace-root and language filters. */
+export function GridFacets({
+  repos,
+  activeRoot,
+  onSelectRoot,
+  langFilter,
+  onSelectLang,
+  savedViews,
+  onApplyView,
+  onSaveView,
+  onDeleteView,
+}: GridFacetsProps) {
   const navigate = useNavigate();
 
   const { roots, langs } = useMemo(() => {
@@ -34,6 +49,46 @@ export function GridFacets({ repos, activeRoot, onSelectRoot, langFilter, onSele
 
   return (
     <>
+      <div className="orr-sb-sec">
+        <div className="orr-sb-lead">
+          Views
+          <button
+            type="button"
+            className="add"
+            title="Save the current filters as a view"
+            aria-label="Save the current filters as a view"
+            onClick={() => {
+              const name = window.prompt("Name this view")?.trim();
+              if (name) onSaveView(name);
+            }}
+          >
+            <Plus className="size-3.5" />
+          </button>
+        </div>
+        {savedViews.length === 0 ? (
+          <p className="px-3 py-1 text-xs text-muted-foreground">Save the current filters as a quick view.</p>
+        ) : (
+          savedViews.map((v) => (
+            <button type="button" key={v.id} className="orr-sb-item" onClick={() => onApplyView(v)}>
+              <Bookmark className="size-4" />
+              <span className="nm">{v.name}</span>
+              <span
+                className="count cursor-pointer hover:text-danger"
+                role="button"
+                tabIndex={0}
+                aria-label={`Delete view ${v.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteView(v.id);
+                }}
+              >
+                <X className="size-3" />
+              </span>
+            </button>
+          ))
+        )}
+      </div>
+
       <div className="orr-sb-sec">
         <div className="orr-sb-lead">
           Roots
