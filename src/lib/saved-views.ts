@@ -10,8 +10,6 @@ export interface SavedView {
   name: string;
   root: string; // "all" or a root path
   lang: string | null;
-  /** Project/tag filter, if any. Optional for views saved before tags existed. */
-  tag?: string | null;
   chips: Chip[];
   visibility: Visibility;
   attention: boolean;
