@@ -1,5 +1,5 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { Compass, HardDrive, Inbox, LayoutGrid, Rss, Settings, Wrench } from "lucide-react";
+import { Compass, HardDrive, Inbox, LayoutGrid, Rss, Scissors, Settings, Wrench } from "lucide-react";
 import { timeAgo } from "@/lib/format";
 import { useRepos } from "@/lib/repos-context";
 import { useSidebarSlotValue } from "@/lib/sidebar-slot";
@@ -11,6 +11,7 @@ const NAV = [
   { to: "/feed", icon: Rss, label: "Feed" },
   { to: "/explore", icon: Compass, label: "Explore" },
   { to: "/tools", icon: Wrench, label: "Dev Tools" },
+  { to: "/janitor", icon: Scissors, label: "Cleanup" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;
 

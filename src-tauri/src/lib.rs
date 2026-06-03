@@ -132,6 +132,7 @@ pub fn run() {
             commands::list_branches,
             commands::switch_branch,
             commands::prune_branches,
+            commands::prunable_branches,
             commands::list_worktrees,
             commands::add_worktree,
             commands::remove_worktree,

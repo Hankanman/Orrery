@@ -15,6 +15,12 @@ export interface BranchInfo {
   merged: boolean;
 }
 
+/** Prunable branches for one repo (branch janitor). */
+export interface RepoPrunable {
+  id: string;
+  branches: BranchInfo[];
+}
+
 export interface CommitInfo {
   id: string;
   summary: string;
@@ -186,6 +192,7 @@ export const ipc = {
   listBranches: (id: string) => invoke<BranchInfo[]>("list_branches", { id }),
   switchBranch: (id: string, name: string) => invoke<void>("switch_branch", { id, name }),
   pruneBranches: (id: string) => invoke<string[]>("prune_branches", { id }),
+  prunableBranches: (paths: string[]) => invoke<RepoPrunable[]>("prunable_branches", { paths }),
   listWorktrees: (id: string) => invoke<WorktreeInfo[]>("list_worktrees", { id }),
   addWorktree: (id: string, name: string, dest: string) => invoke<string>("add_worktree", { id, name, dest }),
   removeWorktree: (id: string, name: string) => invoke<void>("remove_worktree", { id, name }),
