@@ -35,6 +35,10 @@ export function VirtualList<T>({
     count: items.length,
     getScrollElement: () => ref.current,
     estimateSize: () => estimateSize,
+    // Key measurements by item identity, not index, so cached row heights follow
+    // their item when the list is filtered/reordered (otherwise rows overlap
+    // until re-measured — e.g. switching the Feed filter).
+    getItemKey: (index) => getKey(items[index]),
     overscan,
     gap,
   });
