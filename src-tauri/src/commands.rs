@@ -386,6 +386,30 @@ pub fn prune_branches(id: String) -> Result<Vec<String>, String> {
     git_ops::prune_branches(&id)
 }
 
+/// Prunable branches per repo, across the given paths — for the branch janitor.
+/// Repos with nothing to prune are omitted. Runs off the UI thread (#64).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoPrunable {
+    pub id: String,
+    pub branches: Vec<BranchInfo>,
+}
+
+#[tauri::command]
+pub async fn prunable_branches(paths: Vec<String>) -> Vec<RepoPrunable> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter_map(|id| match git_ops::prunable(&id) {
+                Ok(branches) if !branches.is_empty() => Some(RepoPrunable { id, branches }),
+                _ => None,
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn list_worktrees(id: String) -> Result<Vec<WorktreeInfo>, String> {
     git_ops::worktrees(&id)

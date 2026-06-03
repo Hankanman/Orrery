@@ -186,22 +186,29 @@ pub fn switch_branch(path: &str, name: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// Delete branches that are merged or whose upstream is gone (never HEAD or
-/// the default branch). Returns the names deleted.
-pub fn prune_branches(path: &str) -> Result<Vec<String>, String> {
-    let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    let protected: Vec<String> = ["main", "master"]
+fn protected_branches(repo: &Repository) -> Vec<String> {
+    ["main", "master"]
         .iter()
         .map(|s| s.to_string())
         .chain(repo.head().ok().and_then(|h| h.shorthand().map(String::from)))
-        .collect();
+        .collect()
+}
 
-    let to_prune: Vec<String> = branches(path)?
+/// Branches that are safe to prune: merged into the default branch, or with a
+/// gone upstream — never HEAD, main, or master.
+pub fn prunable(path: &str) -> Result<Vec<BranchInfo>, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let protected = protected_branches(&repo);
+    Ok(branches(path)?
         .into_iter()
         .filter(|b| !b.is_head && !protected.contains(&b.name) && (b.merged || b.gone))
-        .map(|b| b.name)
-        .collect();
+        .collect())
+}
 
+/// Delete the prunable branches (see `prunable`). Returns the names deleted.
+pub fn prune_branches(path: &str) -> Result<Vec<String>, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let to_prune: Vec<String> = prunable(path)?.into_iter().map(|b| b.name).collect();
     for name in &to_prune {
         if let Ok(mut b) = repo.find_branch(name, BranchType::Local) {
             b.delete().map_err(|e| e.to_string())?;
@@ -490,6 +497,27 @@ mod tests {
         assert!(worktrees(&path).unwrap().is_empty());
 
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn prunable_lists_merged_branches_not_head() {
+        let (dir, path) = init_repo();
+        let repo = Repository::open(&path).unwrap();
+        let first = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &first, false).unwrap();
+
+        // Advance the default branch so `feature` is strictly behind (= merged).
+        fs::write(dir.path().join("b.txt"), "two").unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("b.txt")).unwrap();
+        idx.write().unwrap();
+        let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&first]).unwrap();
+
+        let names: Vec<String> = prunable(&path).unwrap().into_iter().map(|b| b.name).collect();
+        assert!(names.contains(&"feature".to_string()), "merged branch is prunable: {names:?}");
+        assert!(prunable(&path).unwrap().iter().all(|b| !b.is_head), "HEAD is never prunable");
     }
 
     #[test]
