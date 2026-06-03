@@ -53,6 +53,15 @@ export interface SearchHit {
   score: number;
 }
 
+/** A ripgrep content-search hit (cross-repo code search). */
+export interface CodeHit {
+  repo: string;
+  file: string;
+  abs: string;
+  line: number;
+  text: string;
+}
+
 export interface Briefing {
   text: string;
   repoCount: number;
@@ -190,6 +199,7 @@ export const ipc = {
   generateChangelog: (id: string, limit = 20) => invoke<string>("generate_changelog", { id, limit }),
   indexRepos: (repos: Repo[]) => invoke<number>("index_repos", { repos }),
   semanticSearch: (query: string) => invoke<SearchHit[]>("semantic_search", { query }),
+  searchCode: (query: string, paths: string[]) => invoke<CodeHit[]>("search_code", { query, paths }),
   dailyBriefing: (repos: Repo[]) => invoke<Briefing>("daily_briefing", { repos }),
   getInbox: () => invoke<InboxItem[]>("get_inbox"),
   getNotifications: () => invoke<NotificationItem[]>("get_notifications"),
