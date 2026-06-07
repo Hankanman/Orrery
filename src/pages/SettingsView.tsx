@@ -32,6 +32,7 @@ const FALLBACK: AppConfig = {
   gitlabHosts: [],
   aiModel: "qwen3:0.6b",
   aiEnabled: true,
+  aiBackend: "ollama",
   embedModel: "nomic-embed-text:latest",
   ollamaHost: "http://localhost:11434",
   notifyEnabled: true,

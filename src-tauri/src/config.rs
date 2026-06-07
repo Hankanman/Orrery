@@ -62,6 +62,7 @@ impl Default for AppConfig {
             gitlab_hosts: Vec::new(),
             ai_model: crate::model::default_ai_model(),
             ai_enabled: true,
+            ai_backend: crate::model::default_ai_backend(),
             embed_model: crate::model::default_embed_model(),
             ollama_host: crate::model::default_ollama_host(),
             notify_enabled: true,

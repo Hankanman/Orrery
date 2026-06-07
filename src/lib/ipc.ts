@@ -50,6 +50,8 @@ export interface AppConfig {
   gitlabHosts: string[];
   aiModel: string;
   aiEnabled: boolean;
+  /** Inference backend: "ollama" (default) or "llamaCpp" (bundled sidecar, #21). */
+  aiBackend: string;
   embedModel: string;
   ollamaHost: string;
   notifyEnabled: boolean;
