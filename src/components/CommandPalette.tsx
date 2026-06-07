@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Code, FileSearch, FolderGit2, RefreshCw, Settings, Sparkles, SquareTerminal } from "lucide-react";
+import { Code, FileSearch, FolderGit2, Plus, RefreshCw, Settings, Sparkles, SquareTerminal } from "lucide-react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -18,9 +18,11 @@ import type { Repo } from "@/types";
 export function CommandPalette({
   open,
   onOpenChange,
+  onNewProject,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onNewProject: () => void;
 }) {
   const { repos, openIde, openAgent, refresh, aiReady } = useRepos();
   const navigate = useNavigate();
@@ -129,6 +131,10 @@ export function CommandPalette({
         )}
 
         <CommandGroup heading="Actions">
+          <CommandItem value="new project create init clone repository url" onSelect={() => run(onNewProject)}>
+            <Plus />
+            <span>New project / clone URL</span>
+          </CommandItem>
           <CommandItem value="rescan refresh repos" onSelect={() => run(() => refresh(true))}>
             <RefreshCw />
             <span>Rescan repositories</span>
