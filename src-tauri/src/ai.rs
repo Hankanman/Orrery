@@ -1,13 +1,73 @@
-//! Local AI summaries (#23). An `AiBackend` abstraction with the Ollama path
-//! implemented now (talks to the local Ollama HTTP API, GPU-accelerated) and a
-//! bundled-llama.cpp path planned behind the same seam (#21, later).
+//! Local AI summaries (#23). A `Backend` seam selects the inference engine:
+//! the Ollama HTTP path (default, GPU-accelerated) or the bundled llama.cpp
+//! sidecar (#21). The public entry points (`available`, `installed_models`,
+//! `generate`, `embed`, `pull`) dispatch on the configured backend; everything
+//! backend-agnostic (prompts, `pick_model`, `cosine`) stays free-standing.
 //!
-//! Everything degrades gracefully: if Ollama isn't running, summaries are
-//! simply unavailable and the UI shows nothing.
+//! Everything degrades gracefully: if the active backend isn't reachable,
+//! summaries are simply unavailable and the UI shows nothing.
 
 use serde::Deserialize;
 
 use crate::model::Repo;
+
+/// The inference engine serving AI features, from `config.ai_backend`.
+enum Backend {
+    Ollama,
+    LlamaCpp,
+}
+
+fn active_backend() -> Backend {
+    match crate::config::load().ai_backend.as_str() {
+        "llamaCpp" | "llama_cpp" | "llamacpp" => Backend::LlamaCpp,
+        _ => Backend::Ollama,
+    }
+}
+
+// ── Backend-dispatching entry points ───────────────────────────────────────
+// Each delegates to the active backend. The llama.cpp arms are stubs until #21
+// PR2 lands its sidecar implementation — they report "unavailable" so the UI
+// degrades exactly as it does when Ollama is down.
+
+/// Is the active backend reachable?
+pub async fn available() -> bool {
+    match active_backend() {
+        Backend::Ollama => ollama_available().await,
+        Backend::LlamaCpp => false,
+    }
+}
+
+/// Installed/available models as (name, size_bytes) for the active backend.
+pub async fn installed_models() -> Vec<(String, u64)> {
+    match active_backend() {
+        Backend::Ollama => ollama_installed_models().await,
+        Backend::LlamaCpp => Vec::new(),
+    }
+}
+
+/// Generate text from `prompt` using `model` on the active backend.
+pub async fn generate(model: &str, prompt: &str) -> Result<String, String> {
+    match active_backend() {
+        Backend::Ollama => ollama_generate(model, prompt).await,
+        Backend::LlamaCpp => Err("llama.cpp backend is not available yet".into()),
+    }
+}
+
+/// Embed `text` with `model` on the active backend.
+pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
+    match active_backend() {
+        Backend::Ollama => ollama_embed(model, text).await,
+        Backend::LlamaCpp => Err("llama.cpp backend is not available yet".into()),
+    }
+}
+
+/// Download/prepare `model` on the active backend, reporting progress.
+pub async fn pull(model: &str, on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
+    match active_backend() {
+        Backend::Ollama => ollama_pull(model, on_progress).await,
+        Backend::LlamaCpp => Err("llama.cpp backend is not available yet".into()),
+    }
+}
 
 /// Base URL of the Ollama server, from config (default http://localhost:11434).
 /// config::load() is cached, so this is cheap to call per request.
@@ -23,7 +83,7 @@ fn client() -> reqwest::Client {
 }
 
 /// Is a local Ollama server reachable?
-pub async fn available() -> bool {
+async fn ollama_available() -> bool {
     client()
         .get(format!("{}/api/version", base()))
         .send()
@@ -32,8 +92,8 @@ pub async fn available() -> bool {
         .unwrap_or(false)
 }
 
-/// Installed models as (name, size_bytes).
-pub async fn installed_models() -> Vec<(String, u64)> {
+/// Installed Ollama models as (name, size_bytes).
+async fn ollama_installed_models() -> Vec<(String, u64)> {
     #[derive(Deserialize)]
     struct Tags {
         #[serde(default)]
@@ -109,7 +169,7 @@ Summary:",
 /// on hidden reasoning — it retries once with `think:false`. This way the
 /// `think` field is only ever sent to a model that actually needs it, so plain
 /// models that might reject the field are never hit with it.
-pub async fn generate(model: &str, prompt: &str) -> Result<String, String> {
+async fn ollama_generate(model: &str, prompt: &str) -> Result<String, String> {
     let first = generate_once(model, prompt, false).await?;
     if !first.is_empty() {
         return Ok(first);
@@ -148,7 +208,7 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
 /// Pull a model via Ollama (`/api/pull`), streaming NDJSON progress. `on_progress`
 /// is called with (status, completed_bytes, total_bytes) for each update — kept
 /// as a callback so this module stays free of Tauri's event machinery.
-pub async fn pull(model: &str, mut on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
+async fn ollama_pull(model: &str, mut on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
     use futures_util::StreamExt;
 
     // Ollama's /api/pull needs an explicit tag; default to :latest when none.
@@ -218,7 +278,7 @@ async fn ollama_error(resp: reqwest::Response) -> String {
 }
 
 /// Embed `text` with an embedding model via Ollama (`/api/embed`).
-pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
+async fn ollama_embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
     #[derive(Deserialize)]
     struct Resp {
         #[serde(default)]

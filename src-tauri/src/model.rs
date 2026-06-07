@@ -115,6 +115,10 @@ pub struct AppConfig {
     /// Whether to generate local AI summaries.
     #[serde(default = "default_true")]
     pub ai_enabled: bool,
+    /// Which inference backend serves AI features: "ollama" (default, HTTP) or
+    /// "llamaCpp" (bundled llama.cpp sidecar). See #21.
+    #[serde(default = "default_ai_backend")]
+    pub ai_backend: String,
     /// Ollama embedding model for semantic search.
     #[serde(default = "default_embed_model")]
     pub embed_model: String,
@@ -133,6 +137,10 @@ pub struct AppConfig {
     /// Notify on a CI/check-suite alert for one of your repos.
     #[serde(default = "default_true")]
     pub notify_ci_failure: bool,
+}
+
+pub(crate) fn default_ai_backend() -> String {
+    "ollama".to_string()
 }
 
 pub(crate) fn default_ai_model() -> String {
