@@ -709,6 +709,47 @@ pub async fn list_starred() -> Result<Vec<RemoteRepo>, String> {
     inbox::github_starred().await
 }
 
+/// Open PRs for a repo with checks / review / mergeable + allowed merge
+/// methods (#67). Cached briefly since the drawer re-opens often; `refresh`
+/// (used after a merge/approve) forces a re-fetch.
+#[tauri::command]
+pub async fn pr_panel(slug: String, refresh: bool) -> Result<inbox::PrPanel, String> {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Cached {
+        at: i64,
+        panel: inbox::PrPanel,
+    }
+    // Short TTL — PR check/review state is fast-moving, but the cache still
+    // saves a GraphQL round-trip when flicking the drawer open and shut.
+    const TTL: i64 = 60;
+    let key = format!("pr:{slug}");
+    let now = now_unix();
+    if !refresh {
+        if let Some(c) = cache::get_meta(&key).and_then(|r| serde_json::from_str::<Cached>(&r).ok()) {
+            if now - c.at < TTL {
+                return Ok(c.panel);
+            }
+        }
+    }
+    let panel = inbox::github_prs(&slug).await?;
+    if let Ok(blob) = serde_json::to_string(&Cached { at: now, panel: panel.clone() }) {
+        cache::set_meta(&key, &blob);
+    }
+    Ok(panel)
+}
+
+/// Squash/rebase/merge a PR (#67). Branch protection is enforced by GitHub.
+#[tauri::command]
+pub async fn merge_pr(slug: String, number: u64, method: String) -> Result<(), String> {
+    inbox::github_merge_pr(&slug, number, &method).await
+}
+
+/// Approve a PR (#67).
+#[tauri::command]
+pub async fn approve_pr(slug: String, number: u64) -> Result<(), String> {
+    inbox::github_approve_pr(&slug, number).await
+}
+
 /// Activity feed (starred releases + followed-user activity). Cached 30 min
 /// since it hits the GitHub API; `refresh` forces a re-fetch.
 #[tauri::command]
