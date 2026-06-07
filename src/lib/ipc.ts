@@ -52,6 +52,10 @@ export interface AppConfig {
   aiEnabled: boolean;
   embedModel: string;
   ollamaHost: string;
+  notifyEnabled: boolean;
+  notifyNewPr: boolean;
+  notifyReviewRequested: boolean;
+  notifyCiFailure: boolean;
 }
 
 export interface SearchHit {

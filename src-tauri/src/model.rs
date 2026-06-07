@@ -121,6 +121,18 @@ pub struct AppConfig {
     /// Base URL of the Ollama server (supports a remote/non-default host).
     #[serde(default = "default_ollama_host")]
     pub ollama_host: String,
+    /// Master switch for background attention notifications (#70).
+    #[serde(default = "default_true")]
+    pub notify_enabled: bool,
+    /// Notify when a new PR appears in your inbox.
+    #[serde(default = "default_true")]
+    pub notify_new_pr: bool,
+    /// Notify when a review is requested from you.
+    #[serde(default = "default_true")]
+    pub notify_review_requested: bool,
+    /// Notify on a CI/check-suite alert for one of your repos.
+    #[serde(default = "default_true")]
+    pub notify_ci_failure: bool,
 }
 
 pub(crate) fn default_ai_model() -> String {
