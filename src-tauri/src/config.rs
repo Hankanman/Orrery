@@ -64,6 +64,10 @@ impl Default for AppConfig {
             ai_enabled: true,
             embed_model: crate::model::default_embed_model(),
             ollama_host: crate::model::default_ollama_host(),
+            notify_enabled: true,
+            notify_new_pr: true,
+            notify_review_requested: true,
+            notify_ci_failure: true,
         }
     }
 }

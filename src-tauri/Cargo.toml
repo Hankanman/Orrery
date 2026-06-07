@@ -30,6 +30,9 @@ serde_json = "1"
 # (color-scheme + accent-color) and subscribe to live changes over D-Bus.
 zbus = "5"
 futures-util = "0.3"
+# Just the timer for the background attention poller (#70). The runtime itself
+# is provided by Tauri's async runtime; we only need `tokio::time::sleep`.
+tokio = { version = "1", features = ["time"] }
 
 # Repo discovery + metadata
 # Held at 0.20: 0.21 reworks the API (Cred::credential_helper moved, several

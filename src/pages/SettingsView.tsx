@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Check, DownloadCloud, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2, Zap } from "lucide-react";
+import { Bell, Check, DownloadCloud, FolderGit2, LogOut, Plus, Sparkles, Terminal, Trash2, Zap } from "lucide-react";
 import { ipc, isTauri, type AiStatus, type AiTest, type AppConfig, type DeviceStart } from "@/lib/ipc";
 import { reduceMotionEnabled, setReduceMotion } from "@/lib/motion";
 import { useRepos } from "@/lib/repos-context";
@@ -34,6 +34,10 @@ const FALLBACK: AppConfig = {
   aiEnabled: true,
   embedModel: "nomic-embed-text:latest",
   ollamaHost: "http://localhost:11434",
+  notifyEnabled: true,
+  notifyNewPr: true,
+  notifyReviewRequested: true,
+  notifyCiFailure: true,
 };
 
 interface PullState {
@@ -47,6 +51,7 @@ const SETTINGS_SECTIONS = [
   { id: "set-launchers", label: "Launchers" },
   { id: "set-github", label: "GitHub" },
   { id: "set-ai", label: "AI & search" },
+  { id: "set-notifications", label: "Notifications" },
   { id: "set-motion", label: "Motion" },
 ] as const;
 
@@ -575,6 +580,58 @@ export function SettingsView() {
             <p className="text-xs text-muted-foreground">
               Summaries &amp; embeddings are cached in <code>~/.local/share/orrery/cache.sqlite</code>.
             </p>
+          </CardContent>
+        </Card>
+
+        <Card id="set-notifications" className={cn(section !== "set-notifications" && "hidden")}>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Bell className="size-4 text-primary" /> Notifications
+            </CardTitle>
+            <CardDescription>
+              Orrery polls GitHub in the background and shows a desktop notification when something
+              needs your attention. Closing the window keeps it running in the tray; quit from the
+              tray menu. Requires a connected GitHub account.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={config.notifyEnabled}
+                onChange={(e) => patch({ notifyEnabled: e.target.checked })}
+              />
+              Enable background notifications
+            </label>
+            <div className="space-y-2 pl-6">
+              <label className={cn("flex items-center gap-2 text-sm", !config.notifyEnabled && "opacity-50")}>
+                <input
+                  type="checkbox"
+                  checked={config.notifyNewPr}
+                  disabled={!config.notifyEnabled}
+                  onChange={(e) => patch({ notifyNewPr: e.target.checked })}
+                />
+                New pull requests
+              </label>
+              <label className={cn("flex items-center gap-2 text-sm", !config.notifyEnabled && "opacity-50")}>
+                <input
+                  type="checkbox"
+                  checked={config.notifyReviewRequested}
+                  disabled={!config.notifyEnabled}
+                  onChange={(e) => patch({ notifyReviewRequested: e.target.checked })}
+                />
+                Review requested from me
+              </label>
+              <label className={cn("flex items-center gap-2 text-sm", !config.notifyEnabled && "opacity-50")}>
+                <input
+                  type="checkbox"
+                  checked={config.notifyCiFailure}
+                  disabled={!config.notifyEnabled}
+                  onChange={(e) => patch({ notifyCiFailure: e.target.checked })}
+                />
+                CI / check alerts
+              </label>
+            </div>
           </CardContent>
         </Card>
 

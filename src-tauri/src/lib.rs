@@ -10,6 +10,7 @@ mod inbox;
 mod krunner;
 mod launch;
 mod model;
+mod notifier;
 mod oauth;
 mod scan;
 mod search;
@@ -86,6 +87,20 @@ pub fn run() {
             watcher::spawn(app.handle().clone());
             krunner::spawn();
             let _ = tray::build(app.handle());
+            // Poll GitHub for attention events and keep the tray glance fresh.
+            notifier::spawn(app.handle().clone());
+
+            // Close hides to the tray instead of quitting, so the background
+            // poller keeps surfacing notifications. Quit via the tray menu.
+            if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                let hide_target = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = hide_target.hide();
+                    }
+                });
+            }
             // Global hotkey to summon Orrery (best-effort — may be unavailable
             // on native Wayland without a portal).
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
