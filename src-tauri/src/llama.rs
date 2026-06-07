@@ -2,12 +2,15 @@
 //! talks to its native HTTP API (`/health`, `/completion`). The engine binary
 //! is discovered at runtime — a configured path, then the app data dir's
 //! `bin/`, then `PATH` — so the app degrades to "unavailable" (rather than
-//! failing to build/launch) when it isn't present. Models are GGUF files in the
-//! app data dir. Generation only; embeddings stay on the Ollama path.
+//! failing to build/launch) when it isn't present. Release builds ship a
+//! `llama-server` as a bundled resource (fetched in CI); on first use it's
+//! unpacked into the app data `bin/` so it's found by the same lookup. Models
+//! are GGUF files in the app data dir. Generation only; embeddings stay on the
+//! Ollama path.
 
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -21,6 +24,52 @@ struct Server {
 }
 
 static SERVER: LazyLock<Mutex<Option<Server>>> = LazyLock::new(|| Mutex::new(None));
+
+/// The bundled llama runtime dir (`$RESOURCE/llama-runtime`), recorded once at
+/// startup — resolving it needs an `AppHandle`, which the discovery path lacks.
+/// Empty (or absent) in dev/source builds; populated by the release CI fetch.
+static BUNDLED_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record the bundled llama runtime dir. Called from the Tauri setup hook with
+/// the resolved resource path; a no-op if called more than once.
+pub fn set_bundled_dir(dir: PathBuf) {
+    let _ = BUNDLED_DIR.set(dir);
+}
+
+/// Copy a shipped llama runtime into the writable app-data `bin/` on first use,
+/// marking the server executable. We run from app-data rather than straight out
+/// of the bundle so it works even when the bundle is a read-only mount (the
+/// AppImage squashfs) and so the executable bit is guaranteed regardless of how
+/// the bundler copied the resource. Idempotent and cheap: a single stat once the
+/// binary is in place. Does nothing when no runtime was bundled.
+fn materialize_bundled() {
+    let Some(src) = BUNDLED_DIR.get().filter(|d| d.join("llama-server").is_file()) else {
+        return;
+    };
+    let Some(dest) = data_dir().map(|d| d.join("bin")) else {
+        return;
+    };
+    let server = dest.join("llama-server");
+    if server.is_file() {
+        return; // already materialized
+    }
+    if std::fs::create_dir_all(&dest).is_err() {
+        return;
+    }
+    // Copy the binary and its co-located shared libraries ($ORIGIN rpath).
+    if let Ok(entries) = std::fs::read_dir(src) {
+        for e in entries.flatten() {
+            let _ = std::fs::copy(e.path(), dest.join(e.file_name()));
+        }
+    }
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(&server) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = meta.permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&server, perms);
+    }
+}
 
 fn client() -> reqwest::Client {
     static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
@@ -46,6 +95,9 @@ fn server_binary() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    // Unpack a bundled runtime into app-data bin/ on first use, so the check
+    // below finds it just like a user-installed binary.
+    materialize_bundled();
     if let Some(p) = data_dir().map(|d| d.join("bin").join("llama-server")) {
         if p.is_file() {
             return Some(p);

@@ -1,0 +1,8 @@
+# Bundled llama-server runtime drop point.
+#
+# Empty in the repo. The Release workflow fetches a pinned llama.cpp build into
+# this directory (the llama-server binary + its shared libraries) so it gets
+# bundled as a Tauri resource (see tauri.conf.json `bundle.resources`). At
+# runtime the app unpacks it into the app-data `bin/` on first use.
+#
+# Everything here except this file is gitignored — never commit the binaries.

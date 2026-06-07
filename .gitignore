@@ -35,5 +35,10 @@ pnpm-debug.log*
 *.sqlite3
 /models
 
+# Bundled llama-server runtime — fetched by CI into src-tauri/llama-runtime/,
+# never committed (keep only the .gitkeep that holds the directory).
+/src-tauri/llama-runtime/*
+!/src-tauri/llama-runtime/.gitkeep
+
 # Cate IDE local workspace state (machine-specific layout)
 .cate/
