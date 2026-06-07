@@ -35,6 +35,26 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Fetch a pinned llama.cpp build so the llama.cpp AI backend works out of
+      # the box. The binary + its shared libs land in src-tauri/llama-runtime/,
+      # which tauri.conf.json bundles as a resource; the app unpacks it into the
+      # app-data bin/ on first use. Bump LLAMA_TAG to update the shipped engine.
+      - name: Bundle llama-server runtime
+        env:
+          LLAMA_TAG: b9551
+        run: |
+          set -euo pipefail
+          cd src-tauri/llama-runtime
+          asset="llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz"
+          curl -fsSL -o llama.tar.gz \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/${asset}"
+          tar xzf llama.tar.gz
+          cp "llama-${LLAMA_TAG}/llama-server" .
+          cp "llama-${LLAMA_TAG}"/*.so* .
+          chmod +x llama-server
+          rm -rf llama.tar.gz "llama-${LLAMA_TAG}"
+          ls -la
+
       - name: Build bundles & publish release
         uses: tauri-apps/tauri-action@v0
         env:

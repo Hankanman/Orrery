@@ -85,6 +85,15 @@ pub fn run() {
         .manage(commands::AgentSessions::default())
         .manage(commands::BulkCancel::default())
         .setup(|app| {
+            // Record where a bundled llama-server resource lives (release builds
+            // ship one via CI). Resolving the resource dir needs the AppHandle,
+            // so we do it here and stash the path for the llama backend.
+            if let Ok(dir) =
+                tauri::Manager::path(app).resolve("llama-runtime", tauri::path::BaseDirectory::Resource)
+            {
+                llama::set_bundled_dir(dir);
+            }
+
             appearance::spawn_watcher(app.handle().clone());
             watcher::spawn(app.handle().clone());
             krunner::spawn();
