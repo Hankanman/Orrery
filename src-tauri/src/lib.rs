@@ -82,6 +82,7 @@ pub fn run() {
                 .build(),
         )
         .manage(commands::AgentSessions::default())
+        .manage(commands::BulkCancel::default())
         .setup(|app| {
             appearance::spawn_watcher(app.handle().clone());
             watcher::spawn(app.handle().clone());
@@ -179,6 +180,8 @@ pub fn run() {
             commands::active_agents,
             commands::list_agent_sessions,
             commands::kill_agent,
+            commands::bulk_op,
+            commands::cancel_bulk,
             commands::search_code,
             commands::notify
         ])

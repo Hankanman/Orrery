@@ -2,6 +2,7 @@ import { memo } from "react";
 import {
   ArrowDown,
   ArrowUp,
+  CheckSquare,
   CircleDot,
   Clock,
   ExternalLink,
@@ -10,6 +11,7 @@ import {
   Lock,
   RefreshCw,
   Sparkles,
+  Square,
   SquareTerminal,
   Star,
   Tag,
@@ -45,6 +47,10 @@ interface RepoCardProps {
   agentName?: string;
   /** Generate/regenerate this repo's AI summary. */
   onSummarize?: (repo: Repo) => void;
+  /** Whether this repo is part of the current fleet selection. */
+  selected?: boolean;
+  /** Toggle this repo's selection (enables the multi-select checkbox). */
+  onToggleSelect?: (repo: Repo) => void;
 }
 
 /** Mono git-state line: ⎇ branch · ↑↓ divergence · ● changes. Clean repos show
@@ -92,6 +98,8 @@ function RepoCardImpl({
   agentBrand,
   agentName,
   onSummarize,
+  selected,
+  onToggleSelect,
 }: RepoCardProps) {
 
   const launchers = (
@@ -148,9 +156,38 @@ function RepoCardImpl({
   );
 
   return (
-    <button type="button" className="orr-card" onClick={() => onOpen?.(repo)}>
+    <button
+      type="button"
+      className={cn("orr-card", selected && "ring-2 ring-primary ring-inset")}
+      onClick={() => onOpen?.(repo)}
+    >
       <div className="orr-card-head">
         <div className="orr-card-name">
+          {onToggleSelect && (
+            <span
+              role="checkbox"
+              tabIndex={0}
+              aria-checked={!!selected}
+              aria-label={selected ? "Deselect repo" : "Select repo"}
+              className={cn(
+                "shrink-0 cursor-pointer text-muted-foreground hover:text-foreground",
+                selected && "text-primary",
+              )}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleSelect(repo);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === " " || e.key === "Enter") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onToggleSelect(repo);
+                }
+              }}
+            >
+              {selected ? <CheckSquare className="size-4" /> : <Square className="size-4" />}
+            </span>
+          )}
           <LangIcon language={repo.language} />
           <span className="nm">{repo.displayName}</span>
           {agentActive && (

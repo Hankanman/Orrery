@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { ContributionGraph } from "@/components/ContributionGraph";
+import { FleetBar } from "@/components/FleetBar";
 import { type RepoView } from "@/components/RepoCard";
 import { VirtualRepoGrid } from "@/components/VirtualRepoGrid";
 import { GridFacets } from "@/components/layout/GridFacets";
@@ -94,6 +95,17 @@ export function GridView() {
   const [sort, setSort] = useState<SortKey>("activity");
   const [view, setView] = useState<RepoView>("grid");
   const [selected, setSelected] = useState<Repo | null>(null);
+  // Fleet multi-select (repo ids). Local to the grid — see #63.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const toggleSelect = useCallback((repo: Repo) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(repo.id)) next.delete(repo.id);
+      else next.add(repo.id);
+      return next;
+    });
+  }, []);
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
   const [briefing, setBriefing] = useState<Briefing | null>(null);
   const [briefingDismissed, setBriefingDismissed] = useState(false);
   const [showContrib, setShowContrib] = useState(() => {
@@ -137,6 +149,16 @@ export function GridView() {
 
   const attentionCount = useMemo(() => repos.filter(needsAttention).length, [repos]);
   const missingSummaries = useMemo(() => repos.filter((r) => !r.aiSummary).length, [repos]);
+
+  // Fleet select-all toggles over the currently-visible (filtered) repos.
+  const visibleIds = useMemo(() => visible.map((r) => r.id), [visible]);
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+  const selectAllVisible = useCallback(() => {
+    setSelectedIds((prev) => {
+      const all = visibleIds.length > 0 && visibleIds.every((id) => prev.has(id));
+      return all ? new Set() : new Set(visibleIds);
+    });
+  }, [visibleIds]);
 
   // All repo ids (paths) for the workspace-wide contribution graph — stable
   // across filters so the overview doesn't jump when you narrow the grid.
@@ -313,6 +335,14 @@ export function GridView() {
           ))}
         </div>
 
+        <FleetBar
+          selectedIds={selectedIds}
+          visibleCount={visible.length}
+          allSelected={allVisibleSelected}
+          onSelectAllVisible={selectAllVisible}
+          onClear={clearSelection}
+        />
+
         {!ready ? (
           <div className="orr-grid-skel">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -368,6 +398,8 @@ export function GridView() {
             agentBrand={agentBrand}
             agentName={agentName}
             onSummarize={summarizeRepo}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
           />
         )}
       </div>

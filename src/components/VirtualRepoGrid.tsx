@@ -20,6 +20,8 @@ interface VirtualRepoGridProps {
   agentBrand: string;
   agentName: string;
   onSummarize: (repo: Repo) => void;
+  selectedIds: Set<string>;
+  onToggleSelect: (repo: Repo) => void;
 }
 
 /** Windowed repo grid (Mission Control). Thin wrapper over VirtualGrid. */
@@ -40,6 +42,8 @@ export function VirtualRepoGrid({
   agentBrand,
   agentName,
   onSummarize,
+  selectedIds,
+  onToggleSelect,
 }: VirtualRepoGridProps) {
   const list = view === "list";
   return (
@@ -69,6 +73,8 @@ export function VirtualRepoGrid({
           agentBrand={agentBrand}
           agentName={agentName}
           onSummarize={aiReady ? onSummarize : undefined}
+          selected={selectedIds.has(repo.id)}
+          onToggleSelect={onToggleSelect}
         />
       )}
     />
