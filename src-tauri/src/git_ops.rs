@@ -252,6 +252,45 @@ pub fn remove_worktree(path: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Full SHA of the current HEAD commit — the unambiguous cursor stored for the
+/// "resume where I left off" feature (#69).
+pub fn head_sha(path: &str) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let head = repo.head().map_err(|e| e.to_string())?;
+    let oid = head.target().ok_or("HEAD is unborn")?;
+    Ok(oid.to_string())
+}
+
+/// Commits on HEAD that landed *after* `since_sha` (newest first), capped at
+/// `max`. Returns all of HEAD (up to `max`) if `since_sha` can't be resolved —
+/// e.g. it was rewritten by a rebase — so the caller still gets a useful diff.
+pub fn log_since_sha(path: &str, since_sha: &str, max: usize) -> Result<Vec<CommitInfo>, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let since = repo.revparse_single(since_sha).map(|o| o.id()).ok();
+    let mut walk = repo.revwalk().map_err(|e| e.to_string())?;
+    walk.set_sorting(git2::Sort::TIME).map_err(|e| e.to_string())?;
+    walk.push_head().map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for oid in walk.flatten() {
+        // Stop at the last-seen commit (exclusive) — everything newer is "since".
+        if Some(oid) == since {
+            break;
+        }
+        if let Ok(commit) = repo.find_commit(oid) {
+            out.push(CommitInfo {
+                id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
+                summary: commit.summary().unwrap_or("").to_string(),
+                author: commit.author().name().unwrap_or("").to_string(),
+                time_unix: commit.time().seconds(),
+            });
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let mut walk = repo.revwalk().map_err(|e| e.to_string())?;

@@ -289,6 +289,16 @@ changes. No preamble.\n\nCommits:\n{}\n\nChangelog:",
     )
 }
 
+/// Prompt to catch the user up on what changed in a repo since they last looked.
+pub fn resume_prompt(repo_name: &str, commits: &[String]) -> String {
+    format!(
+        "In 2–3 short sentences, catch me up on what changed in the \"{repo_name}\" repository since I \
+last looked, based on these commits (newest first). Be specific and factual, no preamble, no markdown.\n\n\
+Commits:\n{}\n\nWhat changed:",
+        commits.join("\n")
+    )
+}
+
 /// Prompt for a short daily briefing across recently-active repos.
 pub fn briefing_prompt(lines: &[String]) -> String {
     format!(

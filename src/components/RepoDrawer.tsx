@@ -8,17 +8,19 @@ import { useRepos } from "@/lib/repos-context";
 import { setRepoTags, useRepoTags } from "@/lib/repo-tags";
 import { BrandIcon } from "@/components/BrandIcon";
 import { HostIcon } from "@/components/HostIcon";
+import { NotesPanel } from "@/components/NotesPanel";
 import { PrPanel } from "@/components/PrPanel";
 import { VirtualList } from "@/components/VirtualList";
 import { timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-type Tab = "overview" | "changes" | "pr" | "readme";
+type Tab = "overview" | "changes" | "pr" | "notes" | "readme";
 
 const TAB_LABEL: Record<Tab, string> = {
   overview: "Overview",
   changes: "Changes",
   pr: "PRs",
+  notes: "Notes",
   readme: "Readme",
 };
 
@@ -222,7 +224,7 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
 
         {/* Tabs — the PRs tab only applies to GitHub repos with a remote. */}
         <div className="flex gap-1 border-b border-border/70 px-3 py-2 text-sm">
-          {(["overview", "changes", "pr", "readme"] as Tab[])
+          {(["overview", "changes", "pr", "notes", "readme"] as Tab[])
             .filter((t) => t !== "pr" || (repo.host === "github" && !!repo.slug))
             .map((t) => (
               <button
@@ -434,6 +436,8 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
           )}
 
           {tab === "pr" && repo.slug && <PrPanel slug={repo.slug} />}
+
+          {tab === "notes" && <NotesPanel id={repo.id} aiReady={aiReady} />}
 
           {tab === "readme" &&
             (readme ? (

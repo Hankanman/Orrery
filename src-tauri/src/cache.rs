@@ -30,6 +30,7 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS host_cache (slug TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS embeddings (id TEXT PRIMARY KEY, vec TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, text TEXT NOT NULL DEFAULT '', last_seen_sha TEXT NOT NULL DEFAULT '', last_seen_unix INTEGER NOT NULL DEFAULT 0);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
     migrate(conn)
@@ -288,6 +289,62 @@ pub fn set_meta(key: &str, value: &str) {
     }
 }
 
+// ── Per-repo notes + last-seen cursor (#69) ────────────────────────────────
+// The `notes` row holds both a markdown scratchpad and the commit the user had
+// seen last; upserts touch only their own column(s) so the two features don't
+// clobber each other.
+
+fn note_on(conn: &Connection, id: &str) -> Option<String> {
+    let mut stmt = conn.prepare("SELECT text FROM notes WHERE id = ?1").ok()?;
+    stmt.query_row([id], |row| row.get::<_, String>(0)).ok()
+}
+
+fn set_note_on(conn: &Connection, id: &str, text: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO notes (id, text) VALUES (?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET text = excluded.text",
+        rusqlite::params![id, text],
+    )?;
+    Ok(())
+}
+
+fn seen_sha_on(conn: &Connection, id: &str) -> Option<String> {
+    let mut stmt = conn.prepare("SELECT last_seen_sha FROM notes WHERE id = ?1").ok()?;
+    let sha: String = stmt.query_row([id], |row| row.get(0)).ok()?;
+    (!sha.is_empty()).then_some(sha)
+}
+
+fn set_seen_on(conn: &Connection, id: &str, sha: &str, unix: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO notes (id, last_seen_sha, last_seen_unix) VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET last_seen_sha = excluded.last_seen_sha, last_seen_unix = excluded.last_seen_unix",
+        rusqlite::params![id, sha, unix],
+    )?;
+    Ok(())
+}
+
+/// The markdown note pinned to a repo (empty string if none).
+pub fn note(id: &str) -> String {
+    open().ok().and_then(|c| note_on(&c, id)).unwrap_or_default()
+}
+
+/// Persist a repo's markdown note.
+pub fn set_note(id: &str, text: &str) -> Result<(), String> {
+    let conn = open()?;
+    set_note_on(&conn, id, text).map_err(|e| e.to_string())
+}
+
+/// The full SHA of the commit the user had seen last for this repo, if any.
+pub fn seen_sha(id: &str) -> Option<String> {
+    open().ok().and_then(|c| seen_sha_on(&c, id))
+}
+
+/// Record the commit the user has now caught up to.
+pub fn set_seen(id: &str, sha: &str, unix: i64) -> Result<(), String> {
+    let conn = open()?;
+    set_seen_on(&conn, id, sha, unix).map_err(|e| e.to_string())
+}
+
 fn clear_ai_on(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
     let summaries = conn.execute("DELETE FROM ai_cache", [])?;
     let embeddings = conn.execute("DELETE FROM embeddings", [])?;
@@ -336,6 +393,30 @@ mod tests {
             favorite: false,
             ai_summary: None,
         }
+    }
+
+    #[test]
+    fn notes_and_seen_share_a_row_without_clobbering() {
+        let conn = mem();
+        assert_eq!(note_on(&conn, "/a"), None);
+        assert_eq!(seen_sha_on(&conn, "/a"), None);
+
+        // Setting a note must not wipe the (absent) seen cursor, and vice versa.
+        set_note_on(&conn, "/a", "todo: ship it").unwrap();
+        set_seen_on(&conn, "/a", "deadbeef", 1_000).unwrap();
+        assert_eq!(note_on(&conn, "/a").as_deref(), Some("todo: ship it"));
+        assert_eq!(seen_sha_on(&conn, "/a").as_deref(), Some("deadbeef"));
+
+        // Updating one column leaves the other intact.
+        set_note_on(&conn, "/a", "done").unwrap();
+        assert_eq!(seen_sha_on(&conn, "/a").as_deref(), Some("deadbeef"));
+        set_seen_on(&conn, "/a", "cafef00d", 2_000).unwrap();
+        assert_eq!(note_on(&conn, "/a").as_deref(), Some("done"));
+        assert_eq!(seen_sha_on(&conn, "/a").as_deref(), Some("cafef00d"));
+
+        // An empty seen sha reads back as None (no cursor yet).
+        set_seen_on(&conn, "/b", "", 0).unwrap();
+        assert_eq!(seen_sha_on(&conn, "/b"), None);
     }
 
     #[test]

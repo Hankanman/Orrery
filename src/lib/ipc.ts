@@ -77,6 +77,15 @@ export interface Briefing {
   repoCount: number;
 }
 
+export interface ResumeSummary {
+  /** AI catch-up text; empty when AI is off or nothing changed. */
+  text: string;
+  /** Commits since the user last looked. */
+  commitCount: number;
+  /** First time opening this repo — no prior cursor, nothing to catch up on. */
+  firstVisit: boolean;
+}
+
 export interface InboxItem {
   kind: "pr" | "review" | "issue";
   title: string;
@@ -241,6 +250,10 @@ export const ipc = {
   generateCommitMessage: (id: string) => invoke<string>("generate_commit_message", { id }),
   commitStaged: (id: string, message: string) => invoke<string>("commit_staged", { id, message }),
   generateChangelog: (id: string, limit = 20) => invoke<string>("generate_changelog", { id, limit }),
+  getNote: (id: string) => invoke<string>("get_note", { id }),
+  setNote: (id: string, text: string) => invoke<void>("set_note", { id, text }),
+  markSeen: (id: string) => invoke<void>("mark_seen", { id }),
+  resumeSummary: (id: string) => invoke<ResumeSummary>("resume_summary", { id }),
   indexRepos: (repos: Repo[]) => invoke<number>("index_repos", { repos }),
   semanticSearch: (query: string) => invoke<SearchHit[]>("semantic_search", { query }),
   searchCode: (query: string, paths: string[]) => invoke<CodeHit[]>("search_code", { query, paths }),

@@ -552,6 +552,72 @@ pub async fn generate_changelog(id: String, limit: usize) -> Result<String, Stri
     ai::generate(&model, &ai::changelog_prompt(&lines)).await
 }
 
+// ── Per-repo notes + "resume where I left off" (#69) ───────────────────────
+
+/// AI-free summary of what landed since the user last looked, returned to the
+/// drawer. `text` is the AI catch-up (empty when AI is off or nothing changed);
+/// `commitCount` lets the UI show "N commits since you last looked" regardless.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeSummary {
+    pub text: String,
+    pub commit_count: usize,
+    /// True the first time a repo is opened (no prior cursor) — nothing to catch
+    /// up on yet, so the UI shows a neutral state rather than "0 commits".
+    pub first_visit: bool,
+}
+
+/// The markdown note pinned to a repo.
+#[tauri::command]
+pub fn get_note(id: String) -> String {
+    cache::note(&id)
+}
+
+/// Persist a repo's markdown note.
+#[tauri::command]
+pub fn set_note(id: String, text: String) -> Result<(), String> {
+    cache::set_note(&id, &text)
+}
+
+/// Record that the user has caught up to the repo's current HEAD.
+#[tauri::command]
+pub fn mark_seen(id: String) -> Result<(), String> {
+    let sha = git_ops::head_sha(&id)?;
+    cache::set_seen(&id, &sha, now_unix())
+}
+
+/// Summarize what changed in a repo since the user last looked. Does NOT advance
+/// the cursor — the frontend calls `mark_seen` once the user has seen this.
+#[tauri::command]
+pub async fn resume_summary(id: String) -> Result<ResumeSummary, String> {
+    let Some(since) = cache::seen_sha(&id) else {
+        return Ok(ResumeSummary { text: String::new(), commit_count: 0, first_visit: true });
+    };
+    let id2 = id.clone();
+    let commits = tauri::async_runtime::spawn_blocking(move || git_ops::log_since_sha(&id2, &since, 50))
+        .await
+        .map_err(|e| e.to_string())??;
+    if commits.is_empty() {
+        return Ok(ResumeSummary { text: String::new(), commit_count: 0, first_visit: false });
+    }
+    let commit_count = commits.len();
+    // The catch-up text is best-effort: if AI is off/unreachable, the count
+    // alone is still useful, so we don't fail the whole command.
+    let text = match resolve_ai_model().await {
+        Ok(model) => {
+            let name = cache::load_repos()
+                .into_iter()
+                .find(|r| r.id == id)
+                .map(|r| r.display_name)
+                .unwrap_or_else(|| id.rsplit('/').next().unwrap_or(&id).to_string());
+            let lines: Vec<String> = commits.iter().map(|c| format!("- {} ({})", c.summary, c.id)).collect();
+            ai::generate(&model, &ai::resume_prompt(&name, &lines)).await.unwrap_or_default()
+        }
+        Err(_) => String::new(),
+    };
+    Ok(ResumeSummary { text, commit_count, first_visit: false })
+}
+
 /// Build/refresh the semantic-search embedding index for the given repos (#41).
 #[tauri::command]
 pub async fn index_repos(repos: Vec<Repo>) -> usize {
