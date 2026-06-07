@@ -160,6 +160,22 @@ export interface AgentSession {
   startedAt: number;
 }
 
+/** A fleet bulk action (mirrors the Rust `BulkOp` serde-tagged enum). */
+export type BulkOp =
+  | { kind: "fetch" }
+  | { kind: "pull" }
+  | { kind: "stash" }
+  | { kind: "checkoutDefault" }
+  | { kind: "runCommand"; command: string };
+
+/** Per-repo result streamed as a `bulk-progress` event during a bulk run. */
+export interface BulkProgress {
+  runId: string;
+  id: string;
+  status: "ok" | "skipped" | "error";
+  detail: string;
+}
+
 export interface FeedItem {
   kind: "release" | "starred" | "created" | "forked" | "public";
   actor: string | null;
@@ -287,6 +303,8 @@ export const ipc = {
     firstCommit?: string,
   ) => invoke<string>("init_repo", { destRoot, name, template, remote, firstCommit }),
   activeAgents: () => invoke<string[]>("active_agents"),
+  bulkOp: (runId: string, ids: string[], op: BulkOp) => invoke<void>("bulk_op", { runId, ids, op }),
+  cancelBulk: () => invoke<void>("cancel_bulk"),
   listAgentSessions: () => invoke<AgentSession[]>("list_agent_sessions"),
   killAgent: (id: string) => invoke<void>("kill_agent", { id }),
   notify: (title: string, body: string) => invoke<void>("notify", { title, body }),

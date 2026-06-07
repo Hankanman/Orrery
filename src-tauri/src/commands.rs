@@ -164,6 +164,120 @@ pub fn kill_agent(id: String, sessions: tauri::State<AgentSessions>) -> Result<(
     Ok(())
 }
 
+// ── Fleet bulk actions (#63) ───────────────────────────────────────────────
+
+/// Cooperative cancel flag for the in-flight bulk run, checked between repos.
+#[derive(Default)]
+pub struct BulkCancel(pub std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+/// A batch operation to run across selected repos. Serde-tagged so the
+/// frontend sends `{ kind: "runCommand", command: "pnpm install" }` etc.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum BulkOp {
+    Fetch,
+    Pull,
+    Stash,
+    CheckoutDefault,
+    RunCommand { command: String },
+}
+
+/// Per-repo result, emitted as a `bulk-progress` event as each repo finishes.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BulkProgress {
+    run_id: String,
+    id: String,
+    /// "ok" | "skipped" | "error"
+    status: String,
+    detail: String,
+}
+
+fn outcome_to_progress(res: Result<git_ops::OpOutcome, String>) -> (String, String) {
+    match res {
+        Ok(git_ops::OpOutcome::Done(d)) => ("ok".into(), d),
+        Ok(git_ops::OpOutcome::Skipped(r)) => ("skipped".into(), r),
+        Err(e) => ("error".into(), e),
+    }
+}
+
+fn run_bulk_one(op: &BulkOp, id: &str) -> (String, String) {
+    match op {
+        BulkOp::Fetch => match git_ops::fetch(id) {
+            Ok(s) if s.behind > 0 => ("ok".into(), format!("{} behind", s.behind)),
+            Ok(_) => ("ok".into(), "up to date".into()),
+            Err(e) => ("error".into(), e),
+        },
+        BulkOp::Pull => outcome_to_progress(git_ops::pull(id)),
+        BulkOp::Stash => outcome_to_progress(git_ops::stash(id)),
+        BulkOp::CheckoutDefault => outcome_to_progress(git_ops::checkout_default(id)),
+        BulkOp::RunCommand { command } => match git_ops::run_command(id, command) {
+            Ok(r) if r.ok => ("ok".into(), r.output_tail),
+            Ok(r) => ("error".into(), format!("exit {}: {}", r.code.unwrap_or(-1), r.output_tail)),
+            Err(e) => ("error".into(), e),
+        },
+    }
+}
+
+/// Run `op` across `ids` concurrently, streaming a `bulk-progress` event per
+/// repo and a final `bulk-done`. Cooperatively cancellable via `cancel_bulk`.
+#[tauri::command]
+pub async fn bulk_op(
+    app: tauri::AppHandle,
+    run_id: String,
+    ids: Vec<String>,
+    op: BulkOp,
+    cancel: tauri::State<'_, BulkCancel>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tauri::Emitter;
+
+    let flag = cancel.0.clone();
+    flag.store(false, Ordering::Relaxed); // fresh run
+
+    tauri::async_runtime::spawn_blocking(move || {
+        // Repos are independent working trees, so bulk ops parallelize safely;
+        // cap concurrency so e.g. several `pnpm install`s don't swamp the box.
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(6)
+            .min(ids.len().max(1));
+        let next = AtomicUsize::new(0);
+        let (op, ids, app, flag, next) = (&op, &ids, &app, &flag, &next);
+        let run_id = run_id.as_str();
+
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(move || loop {
+                    if flag.load(Ordering::Relaxed) {
+                        break; // cancelled — stop claiming work
+                    }
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(id) = ids.get(i) else { break };
+                    let (status, detail) = run_bulk_one(op, id);
+                    let _ = app.emit(
+                        "bulk-progress",
+                        BulkProgress { run_id: run_id.to_string(), id: id.clone(), status, detail },
+                    );
+                });
+            }
+        });
+
+        let cancelled = flag.load(Ordering::Relaxed);
+        let _ = app.emit("bulk-done", serde_json::json!({ "runId": run_id, "cancelled": cancelled }));
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Signal the in-flight bulk run to stop (checked between repos).
+#[tauri::command]
+pub fn cancel_bulk(cancel: tauri::State<BulkCancel>) {
+    cancel.0.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Send a native desktop notification (#50).
 #[tauri::command]
 pub fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {

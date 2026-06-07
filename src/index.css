@@ -1453,6 +1453,16 @@
   color: var(--foreground);
 }
 
+/* Fleet bulk-action bar (#63): selection actions above the grid. */
+.orr-fleetbar {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--border));
+  background: color-mix(in oklch, var(--primary) 8%, var(--card));
+  border-radius: 10px;
+  animation: orr-fade-in var(--dur-base) var(--ease-out);
+}
+
 /* Dev inbox */
 .orr-inbox {
   flex: 1;

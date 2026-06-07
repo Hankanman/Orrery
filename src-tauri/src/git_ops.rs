@@ -186,6 +186,151 @@ pub fn switch_branch(path: &str, name: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Outcome of a fleet write op: either it did something, or it was safely
+/// skipped (e.g. a dirty tree). A hard `Err` is reserved for real failures.
+pub enum OpOutcome {
+    Done(String),
+    Skipped(String),
+}
+
+/// Fast-forward-only pull: fetch `origin`, then advance HEAD to its upstream
+/// iff that's a clean fast-forward on a clean tree. Diverged/dirty/no-upstream
+/// are reported as skips, not errors, so a fleet pull is safe by default.
+pub fn pull(path: &str) -> Result<OpOutcome, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    if let Ok(mut remote) = repo.find_remote("origin") {
+        let mut opts = FetchOptions::new();
+        opts.remote_callbacks(remote_callbacks());
+        let refspecs: Vec<String> = remote
+            .fetch_refspecs()
+            .map(|r| r.iter().flatten().map(String::from).collect())
+            .unwrap_or_default();
+        remote.fetch(&refspecs, Some(&mut opts), None).map_err(|e| e.to_string())?;
+    }
+
+    let (branch, local_oid) = {
+        let head = repo.head().map_err(|e| e.to_string())?;
+        if !head.is_branch() {
+            return Ok(OpOutcome::Skipped("detached HEAD".into()));
+        }
+        match (head.shorthand().map(String::from), head.target()) {
+            (Some(b), Some(o)) => (b, o),
+            _ => return Ok(OpOutcome::Skipped("unborn branch".into())),
+        }
+    };
+    let upstream = match repo.find_branch(&branch, BranchType::Local).ok().and_then(|b| b.upstream().ok()) {
+        Some(u) => u,
+        None => return Ok(OpOutcome::Skipped("no upstream".into())),
+    };
+    let Some(up_oid) = upstream.get().target() else {
+        return Ok(OpOutcome::Skipped("no upstream".into()));
+    };
+    if up_oid == local_oid {
+        return Ok(OpOutcome::Done("up to date".into()));
+    }
+    let (ahead, behind) = repo.graph_ahead_behind(local_oid, up_oid).map_err(|e| e.to_string())?;
+    if ahead > 0 {
+        return Ok(OpOutcome::Skipped("diverged".into()));
+    }
+    if behind == 0 {
+        return Ok(OpOutcome::Done("up to date".into()));
+    }
+    if status_of(&repo).dirty > 0 {
+        return Ok(OpOutcome::Skipped("uncommitted changes".into()));
+    }
+    let refname = format!("refs/heads/{branch}");
+    repo.find_reference(&refname)
+        .and_then(|mut r| r.set_target(up_oid, "pull: fast-forward"))
+        .map_err(|e| e.to_string())?;
+    repo.set_head(&refname).map_err(|e| e.to_string())?;
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).map_err(|e| e.to_string())?;
+    Ok(OpOutcome::Done(format!("fast-forwarded {behind}")))
+}
+
+/// Stash uncommitted changes (including untracked). A clean tree is a skip.
+pub fn stash(path: &str) -> Result<OpOutcome, String> {
+    let mut repo = Repository::open(path).map_err(|e| e.to_string())?;
+    if status_of(&repo).dirty == 0 {
+        return Ok(OpOutcome::Skipped("clean".into()));
+    }
+    let sig = repo.signature().map_err(|_| "set git user.name and user.email first".to_string())?;
+    repo.stash_save(&sig, "orrery: fleet stash", Some(git2::StashFlags::INCLUDE_UNTRACKED))
+        .map_err(|e| e.to_string())?;
+    Ok(OpOutcome::Done("stashed".into()))
+}
+
+/// The default branch name, preferring `origin/HEAD`, then a local main/master.
+fn default_branch_name(repo: &Repository) -> Option<String> {
+    if let Ok(r) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Some(name) = r.symbolic_target().and_then(|t| t.rsplit('/').next()) {
+            return Some(name.to_string());
+        }
+    }
+    ["main", "master"]
+        .into_iter()
+        .find(|n| repo.find_branch(n, BranchType::Local).is_ok())
+        .map(String::from)
+}
+
+/// Switch to the default branch. A dirty tree is skipped (don't clobber work).
+pub fn checkout_default(path: &str) -> Result<OpOutcome, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    if status_of(&repo).dirty > 0 {
+        return Ok(OpOutcome::Skipped("uncommitted changes".into()));
+    }
+    let branch = default_branch_name(&repo).ok_or("no default branch")?;
+    let on_default = repo.head().ok().and_then(|h| h.shorthand().map(String::from)).as_deref() == Some(branch.as_str());
+    if on_default {
+        return Ok(OpOutcome::Skipped(format!("already on {branch}")));
+    }
+    drop(repo); // switch_branch reopens the repo
+    switch_branch(path, &branch)?;
+    Ok(OpOutcome::Done(format!("on {branch}")))
+}
+
+/// Result of running a command in a repo (captured, not streamed live).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CmdResult {
+    pub code: Option<i32>,
+    pub ok: bool,
+    /// Last few lines of combined stdout+stderr.
+    pub output_tail: String,
+}
+
+/// The last `n` non-empty-trimmed lines of `s`, capped for display.
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    let tail = lines[start..].join("\n");
+    if tail.chars().count() > 400 {
+        tail.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect()
+    } else {
+        tail
+    }
+}
+
+/// Run a command in a repo's directory and capture its result. The command is
+/// NOT shell-interpreted: the first whitespace token is the executable, the
+/// rest are literal args — so there's no pipe/`&&`/glob/injection surface.
+pub fn run_command(path: &str, command: &str) -> Result<CmdResult, String> {
+    let mut parts = command.split_whitespace();
+    let program = parts.next().ok_or("empty command")?;
+    let args: Vec<&str> = parts.collect();
+    let output = std::process::Command::new(program)
+        .args(&args)
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("{program}: {e}"))?;
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(CmdResult {
+        code: output.status.code(),
+        ok: output.status.success(),
+        output_tail: tail_lines(&combined, 6),
+    })
+}
+
 fn protected_branches(repo: &Repository) -> Vec<String> {
     ["main", "master"]
         .iter()
@@ -581,6 +726,38 @@ mod tests {
         repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
         let path = dir.path().to_string_lossy().into_owned();
         (dir, path)
+    }
+
+    #[test]
+    fn stash_skips_clean_then_stashes_dirty() {
+        let (_dir, path) = init_repo();
+        // Clean tree → skipped.
+        assert!(matches!(stash(&path), Ok(OpOutcome::Skipped(_))));
+        // Make it dirty, then stash succeeds.
+        fs::write(std::path::Path::new(&path).join("README.md"), "# changed").unwrap();
+        assert!(matches!(stash(&path), Ok(OpOutcome::Done(_))));
+        // Tree is clean again after stashing.
+        assert_eq!(status_of(&Repository::open(&path).unwrap()).dirty, 0);
+    }
+
+    #[test]
+    fn run_command_captures_exit_and_output() {
+        let (_dir, path) = init_repo();
+        let ok = run_command(&path, "git rev-parse --is-inside-work-tree").unwrap();
+        assert!(ok.ok && ok.code == Some(0));
+        assert!(ok.output_tail.contains("true"));
+        // A failing command reports a non-zero code, not an Err.
+        let bad = run_command(&path, "git not-a-real-subcommand").unwrap();
+        assert!(!bad.ok);
+        // A missing executable is a hard error.
+        assert!(run_command(&path, "definitely-not-a-real-binary-xyz").is_err());
+    }
+
+    #[test]
+    fn pull_skips_repo_without_upstream() {
+        let (_dir, path) = init_repo();
+        // No origin / no upstream → safe skip, not an error.
+        assert!(matches!(pull(&path), Ok(OpOutcome::Skipped(_))));
     }
 
     #[test]
