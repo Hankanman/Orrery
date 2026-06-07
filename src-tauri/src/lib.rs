@@ -177,6 +177,8 @@ pub fn run() {
             commands::clone_repo,
             commands::init_repo,
             commands::active_agents,
+            commands::list_agent_sessions,
+            commands::kill_agent,
             commands::search_code,
             commands::notify
         ])

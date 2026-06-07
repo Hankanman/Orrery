@@ -3,7 +3,7 @@
 // so the web demo — and the documentation screenshots — show realistic data.
 // All entries are invented and public; nothing here reflects real accounts.
 
-import type { FeedItem, InboxItem, NotificationItem, PrPanel, RemoteRepo, RepoPrunable } from "@/lib/ipc";
+import type { AgentSession, FeedItem, InboxItem, NotificationItem, PrPanel, RemoteRepo, RepoPrunable } from "@/lib/ipc";
 
 const NOW = Math.floor(Date.now() / 1000);
 const HOUR = 3600;
@@ -106,6 +106,11 @@ export const MOCK_PR_PANELS: Record<string, PrPanel> = {
     ],
   },
 };
+
+export const MOCK_AGENT_SESSIONS: AgentSession[] = [
+  { id: "/home/seb/dev/personal/Orrery", pid: 48213, command: "kitty --working-directory {path} -e claude", startedAt: NOW - 22 * 60 },
+  { id: "/home/seb/dev/play/raymarcher", pid: 49002, command: "kitty --working-directory {path} -e claude", startedAt: NOW - 5 * 60 },
+];
 
 export const MOCK_STARRED: RemoteRepo[] = [
   { slug: "tauri-apps/tauri", description: "Build smaller, faster, and more secure desktop applications with a web frontend.", stars: 82000, language: "Rust", cloneUrl: "https://github.com/tauri-apps/tauri.git", host: "github" },

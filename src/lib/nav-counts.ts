@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ipc, isTauri, type FeedItem } from "@/lib/ipc";
 import { useLastVisit } from "@/lib/last-visit";
-import { MOCK_FEED, MOCK_INBOX, MOCK_PRUNABLE } from "@/lib/mock-activity";
+import { MOCK_AGENT_SESSIONS, MOCK_FEED, MOCK_INBOX, MOCK_PRUNABLE } from "@/lib/mock-activity";
 import { needsAttention } from "@/lib/repo-filter";
 import { useRepos } from "@/lib/repos-context";
 
@@ -14,6 +14,8 @@ export interface NavCounts {
   feedNew: number;
   /** Branches safe to prune (merged or gone upstream) across all repos. */
   prunable: number;
+  /** Repos with a running terminal-agent session. */
+  agents: number;
 }
 
 const branchTotal = (groups: { branches: unknown[] }[]) =>
@@ -33,7 +35,7 @@ const newSince = (items: FeedItem[], since: number) =>
  * compete with first paint.
  */
 export function useNavCounts(): NavCounts {
-  const { repos, lastScan } = useRepos();
+  const { repos, lastScan, activeAgents } = useRepos();
   const feedSeen = useLastVisit("feed");
   const attention = useMemo(() => repos.filter(needsAttention).length, [repos]);
 
@@ -78,6 +80,7 @@ export function useNavCounts(): NavCounts {
   }, [idsKey, lastScan]);
 
   const feedNew = useMemo(() => newSince(feed, feedSeen), [feed, feedSeen]);
+  const agents = isTauri() ? activeAgents.length : MOCK_AGENT_SESSIONS.length;
 
-  return { attention, inbox, feedNew, prunable };
+  return { attention, inbox, feedNew, prunable, agents };
 }
