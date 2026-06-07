@@ -10,6 +10,7 @@ import {
   Rss,
   Scissors,
   Settings,
+  SquareTerminal,
   Wrench,
 } from "lucide-react";
 import { timeAgo } from "@/lib/format";
@@ -25,6 +26,7 @@ const NAV = [
   { to: "/inbox", icon: Inbox, label: "Inbox", badge: "inbox" },
   { to: "/feed", icon: Rss, label: "Feed", badge: "feedNew" },
   { to: "/explore", icon: Compass, label: "Explore" },
+  { to: "/agents", icon: SquareTerminal, label: "Agents", badge: "agents" },
   { to: "/tools", icon: Wrench, label: "Dev Tools" },
   { to: "/janitor", icon: Scissors, label: "Cleanup", badge: "prunable" },
   { to: "/settings", icon: Settings, label: "Settings" },

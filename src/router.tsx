@@ -49,13 +49,19 @@ const janitorRoute = createRoute({
   component: lazyRouteComponent(() => import("@/pages/JanitorView"), "JanitorView"),
 });
 
+const agentsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/agents",
+  component: lazyRouteComponent(() => import("@/pages/AgentsView"), "AgentsView"),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   component: lazyRouteComponent(() => import("@/pages/SettingsView"), "SettingsView"),
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, feedRoute, exploreRoute, toolsRoute, janitorRoute, settingsRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, inboxRoute, feedRoute, exploreRoute, toolsRoute, janitorRoute, agentsRoute, settingsRoute]);
 
 export const router = createRouter({ routeTree });
 

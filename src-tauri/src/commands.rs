@@ -76,16 +76,53 @@ pub fn open_folder(app: tauri::AppHandle, id: String) -> Result<(), String> {
     app.opener().open_path(id, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// A live terminal-agent process plus the metadata the dashboard shows.
+pub struct AgentEntry {
+    pub child: std::process::Child,
+    /// The command template it was launched with (e.g. the agent_command).
+    pub command: String,
+    /// Unix seconds when it was launched.
+    pub started_at: i64,
+}
+
 /// Tracks live terminal-agent child processes, keyed by repo id (#51).
 #[derive(Default)]
-pub struct AgentSessions(pub std::sync::Mutex<std::collections::HashMap<String, std::process::Child>>);
+pub struct AgentSessions(pub std::sync::Mutex<std::collections::HashMap<String, AgentEntry>>);
+
+/// A running session, serialized for the agent dashboard (#68).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionInfo {
+    /// Repo id (absolute path) the agent runs in.
+    pub id: String,
+    /// OS process id of the spawned terminal.
+    pub pid: u32,
+    pub command: String,
+    pub started_at: i64,
+}
+
+/// Drop exited children, calling `try_wait` (and a blocking `wait` on error) so
+/// they don't linger as zombies. Shared by the listing commands — listing is
+/// also the GC pass.
+fn reap(map: &mut std::collections::HashMap<String, AgentEntry>) {
+    map.retain(|_, e| match e.child.try_wait() {
+        Ok(None) => true,        // still running
+        Ok(Some(_)) => false,    // exited, reaped by try_wait
+        Err(_) => {
+            let _ = e.child.wait(); // best-effort reap before drop
+            false
+        }
+    });
+}
 
 #[tauri::command]
 pub fn open_agent(id: String, sessions: tauri::State<AgentSessions>) -> Result<(), String> {
-    let child = launch::spawn(&config::load().agent_command, &id)?;
+    let command = config::load().agent_command;
+    let child = launch::spawn(&command, &id)?;
+    let entry = AgentEntry { child, command, started_at: now_unix() };
     let mut map = sessions.0.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mut old) = map.insert(id, child) {
-        let _ = old.try_wait(); // reap a prior (possibly exited) session
+    if let Some(mut old) = map.insert(id, entry) {
+        let _ = old.child.try_wait(); // reap a prior (possibly exited) session
     }
     Ok(())
 }
@@ -94,19 +131,37 @@ pub fn open_agent(id: String, sessions: tauri::State<AgentSessions>) -> Result<(
 #[tauri::command]
 pub fn active_agents(sessions: tauri::State<AgentSessions>) -> Vec<String> {
     let mut map = sessions.0.lock().unwrap_or_else(|e| e.into_inner());
-    let mut alive = Vec::new();
-    map.retain(|id, child| match child.try_wait() {
-        Ok(None) => {
-            alive.push(id.clone());
-            true
-        }
-        Ok(Some(_)) => false, // exited and reaped by try_wait
-        Err(_) => {
-            let _ = child.wait(); // best-effort reap before drop
-            false
-        }
-    });
-    alive
+    reap(&mut map);
+    map.keys().cloned().collect()
+}
+
+/// Full session list for the agent dashboard (reaps exited), newest first.
+#[tauri::command]
+pub fn list_agent_sessions(sessions: tauri::State<AgentSessions>) -> Vec<AgentSessionInfo> {
+    let mut map = sessions.0.lock().unwrap_or_else(|e| e.into_inner());
+    reap(&mut map);
+    let mut out: Vec<AgentSessionInfo> = map
+        .iter()
+        .map(|(id, e)| AgentSessionInfo {
+            id: id.clone(),
+            pid: e.child.id(),
+            command: e.command.clone(),
+            started_at: e.started_at,
+        })
+        .collect();
+    out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    out
+}
+
+/// Terminate a repo's agent session (kills the spawned terminal + its agent).
+#[tauri::command]
+pub fn kill_agent(id: String, sessions: tauri::State<AgentSessions>) -> Result<(), String> {
+    let mut map = sessions.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mut entry) = map.remove(&id) {
+        let _ = entry.child.kill();
+        let _ = entry.child.wait(); // reap so no zombie remains
+    }
+    Ok(())
 }
 
 /// Send a native desktop notification (#50).

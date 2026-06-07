@@ -149,6 +149,17 @@ export interface PrPanel {
   prs: PrDetail[];
 }
 
+export interface AgentSession {
+  /** Repo id (absolute path) the agent runs in. */
+  id: string;
+  /** OS process id of the spawned terminal. */
+  pid: number;
+  /** Command template it was launched with. */
+  command: string;
+  /** Unix seconds when it was launched. */
+  startedAt: number;
+}
+
 export interface FeedItem {
   kind: "release" | "starred" | "created" | "forked" | "public";
   actor: string | null;
@@ -276,5 +287,7 @@ export const ipc = {
     firstCommit?: string,
   ) => invoke<string>("init_repo", { destRoot, name, template, remote, firstCommit }),
   activeAgents: () => invoke<string[]>("active_agents"),
+  listAgentSessions: () => invoke<AgentSession[]>("list_agent_sessions"),
+  killAgent: (id: string) => invoke<void>("kill_agent", { id }),
   notify: (title: string, body: string) => invoke<void>("notify", { title, body }),
 };
