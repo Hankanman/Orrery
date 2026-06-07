@@ -8,11 +8,19 @@ import { useRepos } from "@/lib/repos-context";
 import { setRepoTags, useRepoTags } from "@/lib/repo-tags";
 import { BrandIcon } from "@/components/BrandIcon";
 import { HostIcon } from "@/components/HostIcon";
+import { PrPanel } from "@/components/PrPanel";
 import { VirtualList } from "@/components/VirtualList";
 import { timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-type Tab = "overview" | "changes" | "readme";
+type Tab = "overview" | "changes" | "pr" | "readme";
+
+const TAB_LABEL: Record<Tab, string> = {
+  overview: "Overview",
+  changes: "Changes",
+  pr: "PRs",
+  readme: "Readme",
+};
 
 export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () => void }) {
   const { refresh, openIde, openAgent, aiReady, ideBrand, ideName, agentBrand, agentName } = useRepos();
@@ -54,6 +62,13 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
       alive = false;
     };
   }, [id]);
+
+  // The PRs tab is GitHub-only; fall back to overview if the current repo
+  // can't show it (e.g. after switching to a repo with no GitHub remote).
+  const showPr = repo?.host === "github" && !!repo?.slug;
+  useEffect(() => {
+    if (tab === "pr" && !showPr) setTab("overview");
+  }, [tab, showPr]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -205,21 +220,23 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
           </button>
         </div>
 
-        {/* Tabs */}
+        {/* Tabs — the PRs tab only applies to GitHub repos with a remote. */}
         <div className="flex gap-1 border-b border-border/70 px-3 py-2 text-sm">
-          {(["overview", "changes", "readme"] as Tab[]).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={cn(
-                "rounded-md px-3 py-1 capitalize",
-                tab === t ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {t}
-            </button>
-          ))}
+          {(["overview", "changes", "pr", "readme"] as Tab[])
+            .filter((t) => t !== "pr" || (repo.host === "github" && !!repo.slug))
+            .map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setTab(t)}
+                className={cn(
+                  "rounded-md px-3 py-1",
+                  tab === t ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {TAB_LABEL[t]}
+              </button>
+            ))}
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -415,6 +432,8 @@ export function RepoDrawer({ repo, onClose }: { repo: Repo | null; onClose: () =
               )}
             </div>
           )}
+
+          {tab === "pr" && repo.slug && <PrPanel slug={repo.slug} />}
 
           {tab === "readme" &&
             (readme ? (

@@ -3,7 +3,7 @@
 // so the web demo — and the documentation screenshots — show realistic data.
 // All entries are invented and public; nothing here reflects real accounts.
 
-import type { FeedItem, InboxItem, NotificationItem, RemoteRepo, RepoPrunable } from "@/lib/ipc";
+import type { FeedItem, InboxItem, NotificationItem, PrPanel, RemoteRepo, RepoPrunable } from "@/lib/ipc";
 
 const NOW = Math.floor(Date.now() / 1000);
 const HOUR = 3600;
@@ -45,6 +45,67 @@ export const MOCK_FEED: FeedItem[] = [
   { kind: "created", actor: "torvalds", repo: "torvalds/uemacs", title: "", tag: "", detail: "A tiny, fast Emacs clone.", url: "#", timestamp: NOW - 2 * DAY, prerelease: false, host: "github" },
   { kind: "forked", actor: "octocat", repo: "tldr-pages/tldr", title: "", tag: "", detail: "Collaborative cheatsheets for console commands.", url: "#", timestamp: NOW - 3 * DAY, prerelease: false, host: "github" },
 ];
+
+// Keyed by repo slug so the drawer's PR tab can look up a fixture in the demo.
+export const MOCK_PR_PANELS: Record<string, PrPanel> = {
+  "Hankanman/Orrery": {
+    mergeMethods: ["squash", "rebase"],
+    prs: [
+      {
+        number: 142,
+        title: "Borrow desktop surfaces from kdeglobals",
+        url: "#",
+        draft: false,
+        base: "main",
+        head: "feat/kde-surfaces",
+        author: "hankanman",
+        mergeable: "clean",
+        reviewDecision: "approved",
+        checksState: "success",
+        checks: [
+          { name: "build", state: "success", url: "#" },
+          { name: "test", state: "success", url: "#" },
+          { name: "clippy", state: "success", url: "#" },
+        ],
+        reviews: [{ author: "octocat", state: "approved" }],
+      },
+      {
+        number: 138,
+        title: "Virtualize the repo grid and branch lists",
+        url: "#",
+        draft: false,
+        base: "main",
+        head: "perf/virtual-lists",
+        author: "octocat",
+        mergeable: "clean",
+        reviewDecision: "review_required",
+        checksState: "pending",
+        checks: [
+          { name: "build", state: "success", url: "#" },
+          { name: "test", state: "pending", url: "#" },
+        ],
+        reviews: [],
+      },
+      {
+        number: 131,
+        title: "Card actions need distinct colours per launcher",
+        url: "#",
+        draft: true,
+        base: "main",
+        head: "fix/card-action-colours",
+        author: "hankanman",
+        mergeable: "conflicting",
+        reviewDecision: "changes_requested",
+        checksState: "failure",
+        checks: [
+          { name: "build", state: "success", url: "#" },
+          { name: "test", state: "failure", url: "#" },
+        ],
+        reviews: [{ author: "octocat", state: "changes_requested" }],
+      },
+    ],
+  },
+};
 
 export const MOCK_STARRED: RemoteRepo[] = [
   { slug: "tauri-apps/tauri", description: "Build smaller, faster, and more secure desktop applications with a web frontend.", stars: 82000, language: "Rust", cloneUrl: "https://github.com/tauri-apps/tauri.git", host: "github" },

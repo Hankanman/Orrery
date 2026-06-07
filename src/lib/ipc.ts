@@ -103,6 +103,39 @@ export interface CiStatus {
   state: "success" | "failure" | "pending" | "none";
 }
 
+export interface CheckRun {
+  name: string;
+  state: "success" | "failure" | "pending" | "neutral";
+  url: string | null;
+}
+
+export interface PrReview {
+  author: string;
+  state: "approved" | "changes_requested";
+}
+
+export interface PrDetail {
+  number: number;
+  title: string;
+  url: string;
+  draft: boolean;
+  base: string;
+  head: string;
+  author: string | null;
+  mergeable: "clean" | "conflicting" | "unknown";
+  reviewDecision: "approved" | "changes_requested" | "review_required" | "none";
+  checksState: "success" | "failure" | "pending" | "none";
+  checks: CheckRun[];
+  reviews: PrReview[];
+}
+
+export type MergeMethod = "squash" | "rebase" | "merge";
+
+export interface PrPanel {
+  mergeMethods: MergeMethod[];
+  prs: PrDetail[];
+}
+
 export interface FeedItem {
   kind: "release" | "starred" | "created" | "forked" | "public";
   actor: string | null;
@@ -211,6 +244,10 @@ export const ipc = {
   getInbox: () => invoke<InboxItem[]>("get_inbox"),
   getNotifications: () => invoke<NotificationItem[]>("get_notifications"),
   ciStatus: (slug: string) => invoke<CiStatus>("ci_status", { slug }),
+  prPanel: (slug: string, refresh = false) => invoke<PrPanel>("pr_panel", { slug, refresh }),
+  mergePr: (slug: string, number: number, method: MergeMethod) =>
+    invoke<void>("merge_pr", { slug, number, method }),
+  approvePr: (slug: string, number: number) => invoke<void>("approve_pr", { slug, number }),
   listStarred: () => invoke<RemoteRepo[]>("list_starred"),
   getFeed: (refresh = false) => invoke<FeedItem[]>("get_feed", { refresh }),
   cloneRepo: (url: string, destRoot: string) => invoke<string>("clone_repo", { url, destRoot }),

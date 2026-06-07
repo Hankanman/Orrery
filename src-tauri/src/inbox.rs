@@ -398,12 +398,37 @@ fn repo_from_url(repository_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::repo_from_url;
+    use super::{check_run_state, repo_from_url, rollup_state, split_slug, status_context_state};
 
     #[test]
     fn repo_from_url_extracts_owner_repo() {
         assert_eq!(repo_from_url("https://api.github.com/repos/Hankanman/Orrery"), "Hankanman/Orrery");
         assert_eq!(repo_from_url("https://api.github.com/repos/a/b"), "a/b");
+    }
+
+    #[test]
+    fn split_slug_splits_owner_and_name() {
+        assert_eq!(split_slug("Hankanman/Orrery"), Ok(("Hankanman", "Orrery")));
+        assert!(split_slug("noslash").is_err());
+    }
+
+    #[test]
+    fn check_run_state_maps_status_and_conclusion() {
+        assert_eq!(check_run_state(Some("IN_PROGRESS"), None), "pending");
+        assert_eq!(check_run_state(Some("COMPLETED"), Some("SUCCESS")), "success");
+        assert_eq!(check_run_state(Some("COMPLETED"), Some("FAILURE")), "failure");
+        assert_eq!(check_run_state(Some("COMPLETED"), Some("CANCELLED")), "failure");
+        assert_eq!(check_run_state(Some("COMPLETED"), Some("SKIPPED")), "neutral");
+    }
+
+    #[test]
+    fn rollup_and_status_context_states() {
+        assert_eq!(rollup_state("SUCCESS"), "success");
+        assert_eq!(rollup_state("ERROR"), "failure");
+        assert_eq!(rollup_state("EXPECTED"), "pending");
+        assert_eq!(status_context_state(Some("SUCCESS")), "success");
+        assert_eq!(status_context_state(Some("ERROR")), "failure");
+        assert_eq!(status_context_state(None), "pending");
     }
 }
 
@@ -519,6 +544,382 @@ pub async fn github_starred() -> Result<Vec<RemoteRepo>, String> {
             host: Host::Github,
         })
         .collect())
+}
+
+// ── PR action panel (#67): per-repo checks / review / mergeable + merge ──────
+
+/// One open PR for a repo, with enough detail to decide whether to merge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrDetail {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub draft: bool,
+    pub base: String,
+    pub head: String,
+    pub author: Option<String>,
+    /// "clean" | "conflicting" | "unknown"
+    pub mergeable: String,
+    /// "approved" | "changes_requested" | "review_required" | "none"
+    pub review_decision: String,
+    /// Aggregate check rollup: "success" | "failure" | "pending" | "none"
+    pub checks_state: String,
+    pub checks: Vec<CheckRun>,
+    pub reviews: Vec<PrReview>,
+}
+
+/// One status check / CI context on a PR's head commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckRun {
+    pub name: String,
+    /// "success" | "failure" | "pending" | "neutral"
+    pub state: String,
+    pub url: Option<String>,
+}
+
+/// A submitted review that affects mergeability (approval or change request).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrReview {
+    pub author: String,
+    /// "approved" | "changes_requested"
+    pub state: String,
+}
+
+/// A repo's open PRs plus the merge methods the repo actually permits, so the
+/// UI can offer only valid choices (squash / rebase / merge).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrPanel {
+    /// Subset of ["squash", "rebase", "merge"] allowed by repo settings.
+    pub merge_methods: Vec<String>,
+    pub prs: Vec<PrDetail>,
+}
+
+fn split_slug(slug: &str) -> Result<(&str, &str), String> {
+    slug.split_once('/').ok_or_else(|| format!("not an owner/name slug: {slug}"))
+}
+
+/// Open PRs for a repo with checks, reviews, and mergeable state — one GraphQL
+/// round-trip. Also reports which merge methods the repo allows.
+pub async fn github_prs(slug: &str) -> Result<PrPanel, String> {
+    const QUERY: &str = r#"query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        mergeCommitAllowed
+        squashMergeAllowed
+        rebaseMergeAllowed
+        pullRequests(first: 20, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          nodes {
+            number title url isDraft baseRefName headRefName
+            mergeable reviewDecision
+            author { login }
+            commits(last: 1) {
+              nodes {
+                commit {
+                  statusCheckRollup {
+                    state
+                    contexts(first: 50) {
+                      nodes {
+                        __typename
+                        ... on CheckRun { name conclusion status detailsUrl }
+                        ... on StatusContext { context state targetUrl }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            reviews(last: 30, states: [APPROVED, CHANGES_REQUESTED]) {
+              nodes { author { login } state }
+            }
+          }
+        }
+      }
+    }"#;
+
+    #[derive(Deserialize)]
+    struct Resp {
+        data: Option<Data>,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<RepoNode>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RepoNode {
+        merge_commit_allowed: bool,
+        squash_merge_allowed: bool,
+        rebase_merge_allowed: bool,
+        pull_requests: PrNodes,
+    }
+    #[derive(Deserialize)]
+    struct PrNodes {
+        nodes: Vec<PrNode>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PrNode {
+        number: u64,
+        title: String,
+        url: String,
+        is_draft: bool,
+        base_ref_name: String,
+        head_ref_name: String,
+        mergeable: Option<String>,
+        review_decision: Option<String>,
+        author: Option<Login>,
+        commits: Commits,
+        reviews: ReviewNodes,
+    }
+    #[derive(Deserialize)]
+    struct Login {
+        login: String,
+    }
+    #[derive(Deserialize)]
+    struct Commits {
+        nodes: Vec<CommitNode>,
+    }
+    #[derive(Deserialize)]
+    struct CommitNode {
+        commit: Commit,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Commit {
+        status_check_rollup: Option<Rollup>,
+    }
+    #[derive(Deserialize)]
+    struct Rollup {
+        state: Option<String>,
+        contexts: Contexts,
+    }
+    #[derive(Deserialize)]
+    struct Contexts {
+        nodes: Vec<ContextNode>,
+    }
+    // A union of CheckRun and StatusContext — fields are optional per variant.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ContextNode {
+        #[serde(rename = "__typename")]
+        typename: String,
+        // CheckRun
+        name: Option<String>,
+        conclusion: Option<String>,
+        status: Option<String>,
+        details_url: Option<String>,
+        // StatusContext
+        context: Option<String>,
+        state: Option<String>,
+        target_url: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct ReviewNodes {
+        nodes: Vec<ReviewNode>,
+    }
+    #[derive(Deserialize)]
+    struct ReviewNode {
+        author: Option<Login>,
+        state: String,
+    }
+
+    let token = oauth::github_token().ok_or("connect GitHub to view PRs")?;
+    let (owner, name) = split_slug(slug)?;
+    let body = serde_json::json!({
+        "query": QUERY,
+        "variables": { "owner": owner, "name": name },
+    });
+    let resp = client()
+        .post(format!("{GH}/graphql"))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub GraphQL {}", resp.status()));
+    }
+    let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
+    let repo = parsed
+        .data
+        .and_then(|d| d.repository)
+        .ok_or("repository not found (or no access)")?;
+
+    let mut merge_methods = Vec::new();
+    if repo.squash_merge_allowed {
+        merge_methods.push("squash".to_string());
+    }
+    if repo.rebase_merge_allowed {
+        merge_methods.push("rebase".to_string());
+    }
+    if repo.merge_commit_allowed {
+        merge_methods.push("merge".to_string());
+    }
+
+    let prs = repo
+        .pull_requests
+        .nodes
+        .into_iter()
+        .map(|p| {
+            let rollup = p.commits.nodes.into_iter().next().and_then(|c| c.commit.status_check_rollup);
+            let checks_state = rollup
+                .as_ref()
+                .and_then(|r| r.state.as_deref())
+                .map(rollup_state)
+                .unwrap_or("none")
+                .to_string();
+            let checks = rollup
+                .map(|r| {
+                    r.contexts
+                        .nodes
+                        .into_iter()
+                        .map(|c| {
+                            if c.typename == "CheckRun" {
+                                CheckRun {
+                                    name: c.name.unwrap_or_default(),
+                                    state: check_run_state(c.status.as_deref(), c.conclusion.as_deref()).to_string(),
+                                    url: c.details_url,
+                                }
+                            } else {
+                                CheckRun {
+                                    name: c.context.unwrap_or_default(),
+                                    state: status_context_state(c.state.as_deref()).to_string(),
+                                    url: c.target_url,
+                                }
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let reviews = p
+                .reviews
+                .nodes
+                .into_iter()
+                .map(|r| PrReview {
+                    author: r.author.map(|a| a.login).unwrap_or_default(),
+                    state: if r.state == "APPROVED" { "approved" } else { "changes_requested" }.to_string(),
+                })
+                .collect();
+            PrDetail {
+                number: p.number,
+                title: p.title,
+                url: p.url,
+                draft: p.is_draft,
+                base: p.base_ref_name,
+                head: p.head_ref_name,
+                author: p.author.map(|a| a.login),
+                mergeable: match p.mergeable.as_deref() {
+                    Some("MERGEABLE") => "clean",
+                    Some("CONFLICTING") => "conflicting",
+                    _ => "unknown",
+                }
+                .to_string(),
+                review_decision: match p.review_decision.as_deref() {
+                    Some("APPROVED") => "approved",
+                    Some("CHANGES_REQUESTED") => "changes_requested",
+                    Some("REVIEW_REQUIRED") => "review_required",
+                    _ => "none",
+                }
+                .to_string(),
+                checks_state,
+                checks,
+                reviews,
+            }
+        })
+        .collect();
+
+    Ok(PrPanel { merge_methods, prs })
+}
+
+/// Map GitHub's StatusState rollup enum to our four-state vocabulary.
+fn rollup_state(s: &str) -> &'static str {
+    match s {
+        "SUCCESS" => "success",
+        "FAILURE" | "ERROR" => "failure",
+        "PENDING" | "EXPECTED" => "pending",
+        _ => "none",
+    }
+}
+
+/// Map a CheckRun's (status, conclusion) to our four-state vocabulary.
+fn check_run_state(status: Option<&str>, conclusion: Option<&str>) -> &'static str {
+    if status != Some("COMPLETED") {
+        return "pending";
+    }
+    match conclusion {
+        Some("SUCCESS") => "success",
+        Some("FAILURE") | Some("TIMED_OUT") | Some("STARTUP_FAILURE") | Some("CANCELLED") | Some("ACTION_REQUIRED") => {
+            "failure"
+        }
+        Some("NEUTRAL") | Some("SKIPPED") => "neutral",
+        _ => "pending",
+    }
+}
+
+/// Map a legacy commit-status StatusState to our four-state vocabulary.
+fn status_context_state(s: Option<&str>) -> &'static str {
+    match s {
+        Some("SUCCESS") => "success",
+        Some("FAILURE") | Some("ERROR") => "failure",
+        _ => "pending",
+    }
+}
+
+/// Squash/rebase/merge a PR via REST. GitHub enforces branch protection and
+/// rejects with a descriptive error if the merge isn't permitted — we surface
+/// that rather than pre-judging it client-side.
+pub async fn github_merge_pr(slug: &str, number: u64, method: &str) -> Result<(), String> {
+    let method = match method {
+        "squash" | "rebase" | "merge" => method,
+        other => return Err(format!("invalid merge method: {other}")),
+    };
+    let token = oauth::github_token().ok_or("connect GitHub to merge")?;
+    let resp = client()
+        .put(format!("{GH}/repos/{slug}/pulls/{number}/merge"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "merge_method": method }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    // GitHub returns a JSON { message } explaining why (e.g. "Required status
+    // checks must pass"); prefer it over the bare status code.
+    let status = resp.status();
+    let msg = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| format!("GitHub merge {status}"));
+    Err(msg)
+}
+
+/// Approve a PR (submit an APPROVE review with no body).
+pub async fn github_approve_pr(slug: &str, number: u64) -> Result<(), String> {
+    let token = oauth::github_token().ok_or("connect GitHub to approve")?;
+    let resp = client()
+        .post(format!("{GH}/repos/{slug}/pulls/{number}/reviews"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "event": "APPROVE" }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let status = resp.status();
+    let msg = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| format!("GitHub approve {status}"));
+    Err(msg)
 }
 
 /// Latest GitHub Actions run conclusion for a repo's default branch.
