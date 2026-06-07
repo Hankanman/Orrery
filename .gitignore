@@ -34,3 +34,6 @@ pnpm-debug.log*
 *.sqlite
 *.sqlite3
 /models
+
+# Cate IDE local workspace state (machine-specific layout)
+.cate/
