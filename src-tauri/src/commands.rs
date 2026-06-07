@@ -553,11 +553,17 @@ pub async fn ai_test() -> AiTest {
         },
         None => false,
     };
-    let embed_ok = match ai::embed(&cfg.embed_model, "orrery connectivity test").await {
-        Ok(_) => true,
-        Err(e) => {
-            error.get_or_insert(format!("embed: {e}"));
-            false
+    // Embeddings are intentionally Ollama-only; on the llama.cpp backend the
+    // embed leg is N/A, not a failure — skip it so a working chat test reads green.
+    let embed_ok = if is_llama_backend(&cfg) {
+        false
+    } else {
+        match ai::embed(&cfg.embed_model, "orrery connectivity test").await {
+            Ok(_) => true,
+            Err(e) => {
+                error.get_or_insert(format!("embed: {e}"));
+                false
+            }
         }
     };
 

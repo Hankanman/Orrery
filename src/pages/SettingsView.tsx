@@ -244,6 +244,22 @@ export function SettingsView() {
     setSaved(false);
   };
 
+  // Switching inference engine is a mode change, not a form edit: persist it
+  // immediately (like the model download does) so summaries/commit messages
+  // route to the chosen backend right away, without a separate Save click.
+  const selectBackend = async (aiBackend: string) => {
+    if ((config.aiBackend || "ollama") === aiBackend) return;
+    const next = { ...config, aiBackend };
+    setConfig(next);
+    if (!isTauri()) return;
+    try {
+      await ipc.setConfig(next);
+      refreshAiStatus(); // app-wide AI gate may flip (Ollama ↔ llama.cpp)
+    } catch (e) {
+      setSaveError(String(e));
+    }
+  };
+
   const save = async () => {
     try {
       if (isTauri()) await ipc.setConfig(config);
@@ -511,7 +527,7 @@ export function SettingsView() {
               <Sparkles className="size-4 text-primary" /> AI &amp; semantic search
             </CardTitle>
             <CardDescription>
-              Local-only via Ollama — powers repo summaries, commit messages, the daily briefing, and
+              Runs locally — powers repo summaries, commit messages, the daily briefing, and
               semantic search.
             </CardDescription>
           </CardHeader>
@@ -531,7 +547,7 @@ export function SettingsView() {
                     key={key}
                     className={cn((config.aiBackend || "ollama") === key && "on")}
                     aria-pressed={(config.aiBackend || "ollama") === key}
-                    onClick={() => patch({ aiBackend: key })}
+                    onClick={() => selectBackend(key)}
                   >
                     {label}
                   </button>
@@ -604,23 +620,31 @@ export function SettingsView() {
                 <p className="text-sm text-danger">Test failed: {aiTest.error}</p>
               ) : (
                 <p className="text-sm text-ok">
-                  Chat {aiTest.chatOk ? "✓" : "✗"} · Embeddings {aiTest.embedOk ? "✓" : "✗"} · {aiTest.ms} ms
+                  Chat {aiTest.chatOk ? "✓" : "✗"} · Embeddings{" "}
+                  {(config.aiBackend || "ollama") === "llamaCpp"
+                    ? "n/a"
+                    : aiTest.embedOk
+                      ? "✓"
+                      : "✗"}{" "}
+                  · {aiTest.ms} ms
                 </p>
               ))}
 
-            {/* Endpoint */}
-            <div className="space-y-1.5">
-              <label className="text-sm text-muted-foreground" htmlFor="ollama">
-                Ollama endpoint
-              </label>
-              <Input
-                id="ollama"
-                spellCheck={false}
-                placeholder="http://localhost:11434"
-                value={config.ollamaHost}
-                onChange={(e) => patch({ ollamaHost: e.target.value })}
-              />
-            </div>
+            {/* Endpoint (Ollama only) */}
+            {(config.aiBackend || "ollama") === "ollama" && (
+              <div className="space-y-1.5">
+                <label className="text-sm text-muted-foreground" htmlFor="ollama">
+                  Ollama endpoint
+                </label>
+                <Input
+                  id="ollama"
+                  spellCheck={false}
+                  placeholder="http://localhost:11434"
+                  value={config.ollamaHost}
+                  onChange={(e) => patch({ ollamaHost: e.target.value })}
+                />
+              </div>
+            )}
 
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -631,36 +655,40 @@ export function SettingsView() {
               Enable AI features (summaries, commit messages, briefing, search)
             </label>
 
-            {/* Chat model */}
-            <div className="space-y-1.5">
-              <label className="text-sm text-muted-foreground" htmlFor="aimodel">
-                Chat model
-              </label>
-              <ModelSelect
-                id="aimodel"
-                models={installedModels}
-                value={config.aiModel}
-                onChange={(aiModel) => patch({ aiModel })}
-                disabled={!config.aiEnabled}
-                placeholder="qwen3:0.6b"
-              />
-              {modelStatus(config.aiModel)}
-            </div>
+            {/* Chat + embedding models (Ollama only; llama.cpp serves the
+                downloaded GGUF and doesn't do embeddings) */}
+            {(config.aiBackend || "ollama") === "ollama" && (
+              <>
+                <div className="space-y-1.5">
+                  <label className="text-sm text-muted-foreground" htmlFor="aimodel">
+                    Chat model
+                  </label>
+                  <ModelSelect
+                    id="aimodel"
+                    models={installedModels}
+                    value={config.aiModel}
+                    onChange={(aiModel) => patch({ aiModel })}
+                    disabled={!config.aiEnabled}
+                    placeholder="qwen3:0.6b"
+                  />
+                  {modelStatus(config.aiModel)}
+                </div>
 
-            {/* Embedding model */}
-            <div className="space-y-1.5">
-              <label className="text-sm text-muted-foreground" htmlFor="embedmodel">
-                Embedding model (semantic search)
-              </label>
-              <ModelSelect
-                id="embedmodel"
-                models={installedModels}
-                value={config.embedModel}
-                onChange={(embedModel) => patch({ embedModel })}
-                placeholder="nomic-embed-text:latest"
-              />
-              {modelStatus(config.embedModel)}
-            </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm text-muted-foreground" htmlFor="embedmodel">
+                    Embedding model (semantic search)
+                  </label>
+                  <ModelSelect
+                    id="embedmodel"
+                    models={installedModels}
+                    value={config.embedModel}
+                    onChange={(embedModel) => patch({ embedModel })}
+                    placeholder="nomic-embed-text:latest"
+                  />
+                  {modelStatus(config.embedModel)}
+                </div>
+              </>
+            )}
 
             <p className="text-xs text-muted-foreground">
               Installed: {installedModels.join(", ") || "none — run `ollama pull <model>`"}
@@ -758,7 +786,7 @@ export function SettingsView() {
 
         <div className={cn("flex items-center gap-3", section === "set-motion" && "hidden")}>
           <Button onClick={save}>
-            <Check className="size-4" /> Save & rescan
+            <Check className="size-4" /> Save
           </Button>
           {saved && <span className="text-sm text-ok">Saved.</span>}
           {saveError && <span className="text-sm text-danger">Couldn’t save: {saveError}</span>}
