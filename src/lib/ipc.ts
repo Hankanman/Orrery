@@ -52,6 +52,10 @@ export interface AppConfig {
   aiEnabled: boolean;
   /** Inference backend: "ollama" (default) or "llamaCpp" (bundled sidecar, #21). */
   aiBackend: string;
+  /** Optional override path to the llama-server binary (empty → auto-discover). */
+  llamaServerPath: string;
+  /** Path to the GGUF the llama.cpp backend serves (set by the download flow). */
+  llamaModelPath: string;
   embedModel: string;
   ollamaHost: string;
   notifyEnabled: boolean;
@@ -260,6 +264,7 @@ export const ipc = {
   aiStatus: () => invoke<AiStatus>("ai_status"),
   aiTest: () => invoke<AiTest>("ai_test"),
   pullModel: (model: string) => invoke<void>("pull_model", { model }),
+  downloadLlamaModel: (url = "") => invoke<string>("download_llama_model", { url }),
   clearAiCache: () => invoke<ClearResult>("clear_ai_cache"),
   summarizeRepo: (repo: Repo, refresh = false) => invoke<string>("summarize_repo", { repo, refresh }),
   fetchAll: (ids: string[]) => invoke<FetchOutcome[]>("fetch_all", { ids }),

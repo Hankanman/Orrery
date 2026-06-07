@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::git_ops::{self, BranchInfo, CommitInfo, WorktreeInfo};
 use crate::inbox::{self, CiStatus, InboxItem, Notification, RemoteRepo};
 use crate::model::{AppConfig, GitStatus, Host, HostInfo, Repo};
-use crate::{ai, cache, config, forge, launch, oauth, scan};
+use crate::{ai, cache, config, forge, launch, llama, oauth, scan};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -373,6 +373,33 @@ pub struct AiStatus {
 #[tauri::command]
 pub async fn ai_status() -> AiStatus {
     let cfg = config::load();
+
+    // The llama.cpp backend reports against the bundled sidecar, not Ollama.
+    if is_llama_backend(&cfg) {
+        let models: Vec<String> = llama::installed_models().into_iter().map(|(n, _)| n).collect();
+        let reachable = ai::available().await; // binary + model both present
+        let model = (!cfg.llama_model_path.is_empty())
+            .then(|| std::path::Path::new(&cfg.llama_model_path).file_name().map(|f| f.to_string_lossy().into_owned()))
+            .flatten();
+        let error = if reachable {
+            None
+        } else if model.is_none() {
+            Some("No model downloaded — fetch one in Settings.".into())
+        } else {
+            Some("llama-server binary not found (config path, app data bin/, or PATH).".into())
+        };
+        return AiStatus {
+            reachable,
+            enabled: cfg.ai_enabled,
+            endpoint: "llama.cpp (bundled)".into(),
+            model,
+            embed_model: cfg.embed_model,
+            embed_installed: false, // embeddings stay on the Ollama backend
+            models,
+            error,
+        };
+    }
+
     let endpoint = cfg.ollama_host.clone();
     if !ai::available().await {
         return AiStatus {
@@ -435,6 +462,57 @@ pub async fn pull_model(app: tauri::AppHandle, model: String) -> Result<(), Stri
         );
     })
     .await
+}
+
+/// Default GGUF for the llama.cpp backend: tiny, instruction-tuned, ~400 MB.
+const DEFAULT_LLAMA_MODEL_URL: &str =
+    "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf";
+
+/// Download a GGUF model for the llama.cpp backend into the app data dir,
+/// emitting `llama-download-progress` ({completed, total}) events, then point
+/// config at it. Empty `url` uses the default tiny model (#21).
+#[tauri::command]
+pub async fn download_llama_model(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+    use tauri::Emitter;
+
+    let url = if url.trim().is_empty() { DEFAULT_LLAMA_MODEL_URL.to_string() } else { url.trim().to_string() };
+    let filename = url
+        .rsplit('/')
+        .next()
+        .filter(|s| s.ends_with(".gguf"))
+        .ok_or("URL must point to a .gguf file")?
+        .to_string();
+    let dir = llama::models_dir().ok_or("no data directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(&filename);
+    // Download to a .part file so an interrupted download can't masquerade as a
+    // complete model.
+    let tmp = dir.join(format!("{filename}.part"));
+
+    let resp = reqwest::Client::new().get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("download failed: HTTP {}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    let mut downloaded: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        let _ = app.emit("llama-download-progress", serde_json::json!({ "completed": downloaded, "total": total }));
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    drop(file);
+    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+
+    let mut cfg = config::load();
+    cfg.llama_model_path = dest.to_string_lossy().into_owned();
+    config::save(&cfg)?;
+    Ok(cfg.llama_model_path)
 }
 
 #[derive(serde::Serialize)]
@@ -674,10 +752,23 @@ pub fn repo_readme(id: String) -> Option<String> {
 
 // ── Phase 6: local-AI superpowers ──────────────────────────────────────────
 
+fn is_llama_backend(cfg: &AppConfig) -> bool {
+    matches!(cfg.ai_backend.as_str(), "llamaCpp" | "llama_cpp" | "llamacpp")
+}
+
 async fn resolve_ai_model() -> Result<String, String> {
     let cfg = config::load();
     if !cfg.ai_enabled {
         return Err("AI is disabled".into());
+    }
+    // The llama.cpp backend serves the configured GGUF; `generate` ignores the
+    // model string, so any non-empty value just signals "engine is ready".
+    if is_llama_backend(&cfg) {
+        return if ai::available().await {
+            Ok(cfg.llama_model_path)
+        } else {
+            Err("llama.cpp engine or model not available".into())
+        };
     }
     let installed = ai::installed_models().await;
     ai::pick_model(&cfg.ai_model, &installed).ok_or_else(|| "no Ollama model available".to_string())

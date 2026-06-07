@@ -9,6 +9,7 @@ mod git_ops;
 mod inbox;
 mod krunner;
 mod launch;
+mod llama;
 mod model;
 mod notifier;
 mod oauth;
@@ -141,6 +142,7 @@ pub fn run() {
             commands::ai_status,
             commands::ai_test,
             commands::pull_model,
+            commands::download_llama_model,
             commands::clear_ai_cache,
             commands::summarize_repo,
             commands::fetch_all,
@@ -185,6 +187,12 @@ pub fn run() {
             commands::search_code,
             commands::notify
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Don't leave the llama.cpp sidecar orphaned when Orrery quits.
+            if let tauri::RunEvent::Exit = event {
+                llama::shutdown();
+            }
+        });
 }

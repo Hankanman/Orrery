@@ -119,6 +119,14 @@ pub struct AppConfig {
     /// "llamaCpp" (bundled llama.cpp sidecar). See #21.
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
+    /// Optional override path to the `llama-server` binary. Empty → auto-discover
+    /// (app data `bin/`, then PATH).
+    #[serde(default)]
+    pub llama_server_path: String,
+    /// Path to the GGUF model the llama.cpp backend serves. Set by the download
+    /// flow; empty until a model is fetched.
+    #[serde(default)]
+    pub llama_model_path: String,
     /// Ollama embedding model for semantic search.
     #[serde(default = "default_embed_model")]
     pub embed_model: String,

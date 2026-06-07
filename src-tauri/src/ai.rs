@@ -33,7 +33,7 @@ fn active_backend() -> Backend {
 pub async fn available() -> bool {
     match active_backend() {
         Backend::Ollama => ollama_available().await,
-        Backend::LlamaCpp => false,
+        Backend::LlamaCpp => crate::llama::available(),
     }
 }
 
@@ -41,31 +41,34 @@ pub async fn available() -> bool {
 pub async fn installed_models() -> Vec<(String, u64)> {
     match active_backend() {
         Backend::Ollama => ollama_installed_models().await,
-        Backend::LlamaCpp => Vec::new(),
+        Backend::LlamaCpp => crate::llama::installed_models(),
     }
 }
 
-/// Generate text from `prompt` using `model` on the active backend.
+/// Generate text from `prompt` using `model` on the active backend. The
+/// llama.cpp backend serves the configured GGUF, so it ignores `model`.
 pub async fn generate(model: &str, prompt: &str) -> Result<String, String> {
     match active_backend() {
         Backend::Ollama => ollama_generate(model, prompt).await,
-        Backend::LlamaCpp => Err("llama.cpp backend is not available yet".into()),
+        Backend::LlamaCpp => crate::llama::generate(prompt).await,
     }
 }
 
-/// Embed `text` with `model` on the active backend.
+/// Embed `text` with `model` on the active backend. Embeddings are Ollama-only
+/// for now — semantic search stays hidden on the llama.cpp backend.
 pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
     match active_backend() {
         Backend::Ollama => ollama_embed(model, text).await,
-        Backend::LlamaCpp => Err("llama.cpp backend is not available yet".into()),
+        Backend::LlamaCpp => Err("embeddings are not supported on the llama.cpp backend".into()),
     }
 }
 
-/// Download/prepare `model` on the active backend, reporting progress.
+/// Download/prepare `model` on the active backend, reporting progress. The
+/// llama.cpp model download has its own command (`download_llama_model`).
 pub async fn pull(model: &str, on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
     match active_backend() {
         Backend::Ollama => ollama_pull(model, on_progress).await,
-        Backend::LlamaCpp => Err("llama.cpp backend is not available yet".into()),
+        Backend::LlamaCpp => Err("use the model download in Settings for the llama.cpp backend".into()),
     }
 }
 

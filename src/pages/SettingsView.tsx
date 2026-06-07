@@ -33,6 +33,8 @@ const FALLBACK: AppConfig = {
   aiModel: "qwen3:0.6b",
   aiEnabled: true,
   aiBackend: "ollama",
+  llamaServerPath: "",
+  llamaModelPath: "",
   embedModel: "nomic-embed-text:latest",
   ollamaHost: "http://localhost:11434",
   notifyEnabled: true,
@@ -74,6 +76,9 @@ export function SettingsView() {
   const [pullError, setPullError] = useState<string | null>(null);
   const [cleared, setCleared] = useState<string | null>(null);
   const [reduceMotion, setReduceMotionState] = useState(reduceMotionEnabled);
+  const [llamaDl, setLlamaDl] = useState<{ completed: number; total: number } | null>(null);
+  const [llamaBusy, setLlamaBusy] = useState(false);
+  const [llamaError, setLlamaError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -130,6 +135,33 @@ export function SettingsView() {
       .catch(() => {});
     return () => unlisten?.();
   }, []);
+
+  // Live GGUF download progress for the llama.cpp backend.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    listen<{ completed: number; total: number }>("llama-download-progress", (e) => setLlamaDl(e.payload))
+      .then((fn) => (unlisten = fn))
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
+
+  const downloadLlamaModel = async () => {
+    if (!config || llamaBusy) return;
+    setLlamaBusy(true);
+    setLlamaError(null);
+    setLlamaDl(null);
+    try {
+      const path = await ipc.downloadLlamaModel("");
+      setConfig({ ...config, llamaModelPath: path });
+      refreshAiStatus();
+    } catch (e) {
+      setLlamaError(String(e));
+    } finally {
+      setLlamaBusy(false);
+      setLlamaDl(null);
+    }
+  };
 
   // Settings' sidebar content: switch the visible section (tab-style).
   useSidebarSlot(
@@ -484,6 +516,69 @@ export function SettingsView() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* Inference backend */}
+            <div className="space-y-1.5">
+              <label className="text-sm text-muted-foreground">Inference backend</label>
+              <div className="orr-seg text" role="group" aria-label="Inference backend">
+                {(
+                  [
+                    ["ollama", "Ollama"],
+                    ["llamaCpp", "llama.cpp (bundled)"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    type="button"
+                    key={key}
+                    className={cn((config.aiBackend || "ollama") === key && "on")}
+                    aria-pressed={(config.aiBackend || "ollama") === key}
+                    onClick={() => patch({ aiBackend: key })}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {config.aiBackend === "llamaCpp" && (
+              <div className="space-y-2 rounded-md border border-border bg-background/40 p-3 text-sm">
+                <p className="text-muted-foreground">
+                  Runs a bundled <code>llama-server</code> sidecar — no Ollama needed. Generation only;
+                  semantic search stays on the Ollama backend. The engine binary is found via the path
+                  below, the app data <code>bin/</code> dir, or <code>PATH</code>.
+                </p>
+                <div className="space-y-1.5">
+                  <label className="text-xs text-muted-foreground" htmlFor="llamabin">
+                    llama-server path (optional)
+                  </label>
+                  <Input
+                    id="llamabin"
+                    spellCheck={false}
+                    placeholder="auto-discover"
+                    value={config.llamaServerPath}
+                    onChange={(e) => patch({ llamaServerPath: e.target.value })}
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={downloadLlamaModel} disabled={llamaBusy}>
+                    <DownloadCloud className="size-4" />
+                    {llamaBusy ? "Downloading…" : config.llamaModelPath ? "Re-download model" : "Download model (~400 MB)"}
+                  </Button>
+                  {config.llamaModelPath && !llamaBusy && (
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {config.llamaModelPath.split("/").pop()}
+                    </span>
+                  )}
+                </div>
+                {llamaBusy && llamaDl && llamaDl.total > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {Math.round((llamaDl.completed / llamaDl.total) * 100)}% ·{" "}
+                    {(llamaDl.completed / 1e6).toFixed(0)}/{(llamaDl.total / 1e6).toFixed(0)} MB
+                  </p>
+                )}
+                {llamaError && <p className="text-xs text-danger">{llamaError}</p>}
+              </div>
+            )}
+
             {/* Connection status + live test */}
             <div className="flex items-center gap-2 rounded-md border border-border bg-background/40 px-3 py-2 text-sm">
               <span
