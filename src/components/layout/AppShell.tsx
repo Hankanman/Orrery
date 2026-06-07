@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
-import { Folder, Orbit, RefreshCw, Search } from "lucide-react";
+import { Folder, Orbit, Plus, RefreshCw, Search } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ScanProgress } from "@/components/ScanProgress";
+import { NewProjectDialog } from "@/components/NewProjectDialog";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { ReposProvider, useRepos } from "@/lib/repos-context";
 import { SidebarSlotProvider } from "@/lib/sidebar-slot";
@@ -17,6 +18,7 @@ const CommandPalette = lazy(() =>
 function Shell() {
   const { repos, loading, refresh } = useRepos();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
 
   const rootCount = useMemo(() => new Set(repos.map((r) => r.root)).size, [repos]);
 
@@ -77,6 +79,16 @@ function Shell() {
         <button
           type="button"
           className="orr-iconbtn"
+          title="New project / clone"
+          aria-label="New project or clone"
+          onClick={() => setNewOpen(true)}
+        >
+          <Plus className="size-4" />
+        </button>
+
+        <button
+          type="button"
+          className="orr-iconbtn"
           title="Rescan"
           aria-label="Rescan"
           onClick={() => refresh(true)}
@@ -93,9 +105,11 @@ function Shell() {
 
       {paletteOpen && (
         <Suspense fallback={null}>
-          <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+          <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onNewProject={() => setNewOpen(true)} />
         </Suspense>
       )}
+
+      <NewProjectDialog open={newOpen} onOpenChange={setNewOpen} />
     </div>
   );
 }

@@ -175,6 +175,7 @@ pub fn run() {
             commands::approve_pr,
             commands::get_feed,
             commands::clone_repo,
+            commands::init_repo,
             commands::active_agents,
             commands::search_code,
             commands::notify

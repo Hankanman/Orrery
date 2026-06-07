@@ -268,6 +268,13 @@ export const ipc = {
   listStarred: () => invoke<RemoteRepo[]>("list_starred"),
   getFeed: (refresh = false) => invoke<FeedItem[]>("get_feed", { refresh }),
   cloneRepo: (url: string, destRoot: string) => invoke<string>("clone_repo", { url, destRoot }),
+  initRepo: (
+    destRoot: string,
+    name: string,
+    template?: string,
+    remote?: string,
+    firstCommit?: string,
+  ) => invoke<string>("init_repo", { destRoot, name, template, remote, firstCommit }),
   activeAgents: () => invoke<string[]>("active_agents"),
   notify: (title: string, body: string) => invoke<void>("notify", { title, body }),
 };

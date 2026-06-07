@@ -841,6 +841,42 @@ pub async fn get_feed(refresh: bool) -> Result<Vec<inbox::FeedItem>, String> {
     Ok(items)
 }
 
+/// Reject a directory name that's empty or would escape its root.
+fn safe_dir_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return Err("invalid project name".into());
+    }
+    Ok(name.to_string())
+}
+
+/// Create a new project in a chosen root: `git init` + optional template copy,
+/// remote, and first commit (#71). Returns the new working directory.
+#[tauri::command]
+pub async fn init_repo(
+    dest_root: String,
+    name: String,
+    template: Option<String>,
+    remote: Option<String>,
+    first_commit: Option<String>,
+) -> Result<String, String> {
+    let name = safe_dir_name(&name)?;
+    let dest = scan::expand(&dest_root).join(&name);
+    if dest.exists() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    let dest_str = dest.to_string_lossy().into_owned();
+    // Empty optional strings from the form mean "not set".
+    let template = template.filter(|s| !s.trim().is_empty()).map(|s| scan::expand(&s).to_string_lossy().into_owned());
+    let remote = remote.filter(|s| !s.trim().is_empty());
+    let first_commit = first_commit.filter(|s| !s.trim().is_empty());
+    tauri::async_runtime::spawn_blocking(move || {
+        git_ops::init(&dest_str, &name, template.as_deref(), remote.as_deref(), first_commit.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Clone a repo into a configured root and return its working dir (#26).
 #[tauri::command]
 pub async fn clone_repo(url: String, dest_root: String) -> Result<String, String> {

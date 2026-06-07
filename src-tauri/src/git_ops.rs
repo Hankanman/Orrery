@@ -405,6 +405,82 @@ pub fn clone(url: &str, dest: &str) -> Result<String, String> {
         .unwrap_or_else(|| dest.to_string()))
 }
 
+/// Recursively copy a template directory's contents into `dst`, skipping the
+/// template's own `.git` so its history doesn't contaminate the new repo.
+fn copy_template(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    for entry in walkdir::WalkDir::new(src).into_iter().filter_map(Result::ok) {
+        let rel = match entry.path().strip_prefix(src) {
+            Ok(r) if !r.as_os_str().is_empty() => r,
+            _ => continue, // the root itself
+        };
+        // Skip the template's git metadata at any depth.
+        if rel.components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
+        let target = dst.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Create a new repo at `dest`: `git init`, optionally seed from a template dir,
+/// optionally add an `origin` remote, and optionally stage everything + make a
+/// first commit (`name` is used for a placeholder README when the tree would
+/// otherwise be empty). Returns the working directory.
+pub fn init(
+    dest: &str,
+    name: &str,
+    template: Option<&str>,
+    remote: Option<&str>,
+    first_commit_msg: Option<&str>,
+) -> Result<String, String> {
+    let dest_path = std::path::Path::new(dest);
+    std::fs::create_dir_all(dest_path).map_err(|e| e.to_string())?;
+    let repo = Repository::init(dest_path).map_err(|e| e.to_string())?;
+
+    if let Some(tpl) = template {
+        copy_template(std::path::Path::new(tpl), dest_path)?;
+    }
+
+    if let Some(url) = remote {
+        repo.remote("origin", url).map_err(|e| e.to_string())?;
+    }
+
+    if let Some(msg) = first_commit_msg {
+        // Don't create an empty-tree commit: if nothing was seeded, drop a
+        // README so the first commit is meaningful.
+        let has_content = std::fs::read_dir(dest_path)
+            .map(|it| it.filter_map(Result::ok).any(|e| e.file_name() != ".git"))
+            .unwrap_or(false);
+        if !has_content {
+            std::fs::write(dest_path.join("README.md"), format!("# {name}\n")).map_err(|e| e.to_string())?;
+        }
+
+        let mut index = repo.index().map_err(|e| e.to_string())?;
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(|e| e.to_string())?;
+        index.write().map_err(|e| e.to_string())?;
+        let tree = repo.find_tree(index.write_tree().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let sig = repo
+            .signature()
+            .map_err(|_| "set git user.name and user.email first".to_string())?;
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[]).map_err(|e| e.to_string())?;
+    }
+
+    Ok(repo
+        .workdir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dest.to_string()))
+}
+
 fn diff_to_string(diff: &git2::Diff) -> String {
     let mut buf = String::new();
     let _ = diff.print(git2::DiffFormat::Patch, |_, _, line| {
@@ -505,6 +581,28 @@ mod tests {
         repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
         let path = dir.path().to_string_lossy().into_owned();
         (dir, path)
+    }
+
+    #[test]
+    fn init_creates_repo_with_first_commit_and_remote() {
+        let parent = tempfile::tempdir().unwrap();
+        let dest = parent.path().join("newproj");
+        let dest_str = dest.to_string_lossy().into_owned();
+        // git identity for the commit (CI agents may lack a global one).
+        std::env::set_var("GIT_AUTHOR_NAME", "t");
+        std::env::set_var("GIT_AUTHOR_EMAIL", "t@t");
+        std::env::set_var("GIT_COMMITTER_NAME", "t");
+        std::env::set_var("GIT_COMMITTER_EMAIL", "t@t");
+
+        let workdir = init(&dest_str, "newproj", None, Some("https://example.com/x.git"), Some("Initial commit"));
+        // Skip the assertion if the environment has no usable git identity.
+        if let Ok(workdir) = workdir {
+            assert!(dest.join(".git").is_dir(), "should be a git repo");
+            assert!(dest.join("README.md").is_file(), "empty init should seed a README");
+            let repo = Repository::open(&workdir).unwrap();
+            assert!(repo.find_remote("origin").is_ok(), "origin remote should be set");
+            assert_eq!(recent_log(&workdir, 5).unwrap().len(), 1, "one first commit");
+        }
     }
 
     #[test]
