@@ -37,7 +37,17 @@ features:
     linkText: Inbox, Feed & Explore
   - icon: ✨
     title: Local AI
-    details: On-device summaries, commit messages, a daily briefing, and semantic search via Ollama. Nothing leaves your machine; turn it off and the UI hides it.
+    details: On-device summaries, commit messages, changelogs, a daily briefing, and semantic search — via Ollama or a bundled llama.cpp engine. Nothing leaves your machine; turn it off and the UI hides it.
     link: /guide/local-ai
     linkText: Set up local AI
+  - icon: 🛠️
+    title: Operate at fleet scale
+    details: Multi-select repos and run batch git ops — fetch, pull, stash, checkout default, or a constrained command — with live per-repo progress. Track every agent and terminal you've launched.
+    link: /guide/fleet
+    linkText: Fleet operations
+  - icon: 🔔
+    title: Stay in flow
+    details: Desktop notifications for new PRs, review requests, and CI failures. Orrery closes to the tray and keeps watch in the background, with a quick-glance menu.
+    link: /guide/notifications
+    linkText: Notifications & tray
 ---

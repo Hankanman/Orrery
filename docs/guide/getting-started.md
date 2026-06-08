@@ -1,10 +1,28 @@
 # Getting started
 
-Orrery is built from source for now. This guide covers the prerequisites and the build.
+Install a packaged build, or build from source. Both are covered below.
+
+## Install a release
+
+Grab the latest artifact for your distro from the [releases page](https://github.com/Hankanman/Orrery/releases):
+
+```sh
+# AppImage — portable, no install
+chmod +x Orrery_*_amd64.AppImage
+./Orrery_*_amd64.AppImage
+
+# Debian / Ubuntu
+sudo apt install ./Orrery_*_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./Orrery-*.x86_64.rpm
+```
+
+Release builds ship a bundled `llama.cpp` engine, so the [local-AI](./local-ai) features work out of the box once you download a model — no separate install required.
 
 ## Prerequisites
 
-You'll need the Tauri 2 toolchain for Linux:
+To build from source you'll need the Tauri 2 toolchain for Linux:
 
 - **Rust** (stable) — install via [rustup](https://rustup.rs)
 - **Node.js** 18+ and **pnpm** — `corepack enable` then `corepack prepare pnpm@latest --activate`
@@ -36,7 +54,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-On first launch, open **Settings → Workspace roots** and point Orrery at the directories where you keep your projects (defaults to `~/dev`). Then **Save & rescan**.
+On first launch, open **Settings → Workspace roots** and point Orrery at the directories where you keep your projects (defaults to `~/dev`). Then **Save**.
 
 ::: tip Wayland + NVIDIA
 WebKitGTK's DMABUF renderer can crash or render blank on some NVIDIA/Wayland setups. Orrery disables it automatically on KDE+Wayland; the flat, GPU-light design keeps the UI smooth on the CPU-bound path. See [Rendering performance](/rendering-performance) for the full investigation.

@@ -17,8 +17,19 @@ There's no great *workspace dashboard* for Linux. GitKraken is heavy and git-foc
 ## Status
 
 ::: warning EARLY DEVELOPMENT
-Orrery is in active early development and is built from source — there's no packaged release yet. The [Getting started](./getting-started) guide covers building it locally. Expect rough edges.
+Orrery is in active early development. Packaged Linux builds (AppImage, `.deb`, `.rpm`) are published on the [releases page](https://github.com/Hankanman/Orrery/releases), or you can build from source — see [Getting started](./getting-started). Expect rough edges.
 :::
+
+## What's inside
+
+Beyond the [Mission Control](./mission-control) grid, Orrery has grown a full command center:
+
+- **[The repo drawer](./repo-drawer)** — branches, history, staged-diff with AI commit messages, a PR/CI panel with quick-merge, and per-repo notes with a "what changed since I last looked" catch-up.
+- **[Fleet operations](./fleet)** — multi-select repos for batch git ops, and a dashboard of every agent/terminal session you've launched.
+- **[Notifications & tray](./notifications)** — background polling for PRs, reviews, and CI, surfaced as desktop notifications and a tray glance.
+- **[Maintenance & tools](./maintenance)** — a branch janitor for merged/gone branches, and an offline developer utility belt.
+- **[Inbox, Feed & Explore](./inbox-feed-explore)** — what's waiting on you, a release radar, and a browser for your starred repos.
+- **[Local AI](./local-ai)** — summaries, commit messages, changelogs, briefings, and semantic search, on-device via Ollama or a bundled llama.cpp engine.
 
 ## Stack
 
@@ -29,7 +40,7 @@ Orrery is in active early development and is built from source — there's no pa
 | Git | `git2` (libgit2, vendored) |
 | Persistence | SQLite + TOML config (XDG dirs) |
 | Hosts | GitHub + GitLab REST/GraphQL (incl. self-hosted) |
-| Local AI | [Ollama](https://ollama.com) over HTTP |
+| Local AI | [Ollama](https://ollama.com) or a bundled [llama.cpp](https://github.com/ggml-org/llama.cpp) sidecar, over HTTP |
 
 ## How it fits together
 

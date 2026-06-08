@@ -9,7 +9,8 @@ The Settings screen switches sections from the sidebar:
 - **Workspace roots** — directories scanned for git repos, scan depth, and ignore globs.
 - **Launchers** — IDE and terminal-agent presets (see [Launchers](./launchers)).
 - **GitHub** — connect for higher rate limits and private-repo enrichment.
-- **AI & search** — Ollama endpoint, models, and the cache control (see [Local AI](./local-ai)).
+- **AI & search** — inference backend (Ollama or the bundled llama.cpp engine), models, and the cache control (see [Local AI](./local-ai)).
+- **Notifications** — which background events raise a desktop notification (see [Notifications & tray](./notifications)).
 - **Motion** — a reduce-motion toggle that disables all UI animation.
 
 ## Workspace roots
@@ -33,6 +34,12 @@ For **self-hosted GitLab**, only explicitly trusted domains are ever sent a toke
 | Path | Contents |
 |---|---|
 | `~/.config/orrery/config.toml` | Your settings. |
-| `~/.local/share/orrery/cache.sqlite` | Repo snapshot, host enrichment, favorites, AI summaries & embeddings. |
+| `~/.local/share/orrery/cache.sqlite` | Repo snapshot, host enrichment, favorites, notes, AI summaries & embeddings. |
+| `~/.local/share/orrery/models/` | GGUF models downloaded for the llama.cpp backend. |
+| `~/.local/share/orrery/bin/` | The llama.cpp engine (bundled with release builds, unpacked here on first use). |
 
 The repo snapshot and host enrichment are rehydrated on launch, so Mission Control paints instantly and visibility/stars survive restarts without a re-fetch.
+
+::: tip Don't commit these
+Everything under `~/.config/orrery` and `~/.local/share/orrery` is machine-local — never check it into a repo. It can hold host tokens and your personal data.
+:::
