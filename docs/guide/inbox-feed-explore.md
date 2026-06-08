@@ -8,7 +8,7 @@ The Inbox is for things that need *you*: open pull requests, review requests, as
 
 ![Inbox — PRs, reviews, issues, notifications](/shots/inbox.png)
 
-It answers "what's waiting on me right now?" across GitHub and GitLab.
+It answers "what's waiting on me right now?" across GitHub and GitLab. Orrery also polls these in the background and raises desktop notifications for new PRs, review requests, and CI failures — see [Notifications & tray](./notifications).
 
 ## Feed
 

@@ -27,6 +27,17 @@ The toolbar and chip row narrow the grid:
 
 The activity graph at the top summarises recent commit activity across the visible repos; toggle it from the toolbar.
 
+### Projects & saved views
+
+The sidebar adds two ways to carve up a large workspace:
+
+- **Projects** — tag repos to group related work, then filter the grid to one tag.
+- **Saved views** — capture the current filter/sort/visibility combination as a named preset and jump back to it in one click. Presets persist locally.
+
+## Selecting repos
+
+Each card has a checkbox; select one or more (or use the toolbar's select-all) to bring up the **fleet bar** for batch git operations across the selection. See [Fleet operations](./fleet).
+
 ## List view
 
 Switch to a compact, single-line view from the segmented control — useful when you're scanning a lot of repos at once.
@@ -35,10 +46,14 @@ Switch to a compact, single-line view from the segmented control — useful when
 
 ## The repo drawer
 
-Click a card to slide out a detail drawer with the repo's branches, recent commits, staged-diff view (with AI commit-message and changelog generation when AI is on), and the README — plus the same launch actions in the footer.
+Click a card to slide out a detail drawer with the repo's branches, recent commits, staged-diff view, README, a PR/CI panel, and per-repo notes — plus the same launch actions in the footer.
 
 ![The repo detail drawer](/shots/repo-drawer.png)
+
+It's covered in full on its own page: [The repo drawer](./repo-drawer).
 
 ## Command palette
 
 Press <kbd>⌘K</kbd> / <kbd>Ctrl K</kbd> to search repos and run commands without leaving the keyboard.
+
+It also does **cross-repo code search**: type a query and Orrery runs [ripgrep](https://github.com/BurntSushi/ripgrep) across your repos, returning matching files and lines you can open directly — a fast way to find that one call site across the whole fleet.

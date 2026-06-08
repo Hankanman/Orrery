@@ -45,7 +45,11 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: "Mission Control", link: "/guide/mission-control" },
+          { text: "The repo drawer", link: "/guide/repo-drawer" },
+          { text: "Fleet operations", link: "/guide/fleet" },
           { text: "Launchers", link: "/guide/launchers" },
+          { text: "Notifications & tray", link: "/guide/notifications" },
+          { text: "Maintenance & tools", link: "/guide/maintenance" },
           { text: "Inbox, Feed & Explore", link: "/guide/inbox-feed-explore" },
           { text: "Local AI", link: "/guide/local-ai" },
         ],
