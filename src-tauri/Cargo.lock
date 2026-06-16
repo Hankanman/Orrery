@@ -2712,6 +2712,7 @@ dependencies = [
  "globset",
  "notify-debouncer-mini",
  "orrery-core",
+ "orrery-platform",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -2748,6 +2749,16 @@ dependencies = [
  "urlencoding",
  "walkdir",
  "which",
+]
+
+[[package]]
+name = "orrery-platform"
+version = "0.2.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "tokio",
+ "zbus",
 ]
 
 [[package]]

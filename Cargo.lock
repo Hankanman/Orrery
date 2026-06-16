@@ -4072,6 +4072,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "orrery-core",
+ "orrery-platform",
  "rust-embed",
 ]
 
@@ -4093,6 +4094,16 @@ dependencies = [
  "urlencoding",
  "walkdir",
  "which 8.0.3",
+]
+
+[[package]]
+name = "orrery-platform"
+version = "0.2.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "tokio",
+ "zbus",
 ]
 
 [[package]]

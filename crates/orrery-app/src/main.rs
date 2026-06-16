@@ -33,7 +33,15 @@ fn main() {
         rows.len(),
         roots
     );
-    let theme = Rc::new(Theme::dark());
+    // Borrow the desktop's accent colour (KDE/portal) so the app harmonises
+    // with the user's theme — the design system's runtime accent override.
+    let accent = orrery_platform::appearance::read_blocking()
+        .accent
+        .map(|c| (c.r, c.g, c.b));
+    if let Some((r, g, b)) = accent {
+        eprintln!("[native] system accent #{r:02x}{g:02x}{b:02x}");
+    }
+    let theme = Rc::new(Theme::dark().with_system_accent(accent));
     let config = orrery_core::config::load();
 
     let platform = gpui_platform::current_platform(false);
