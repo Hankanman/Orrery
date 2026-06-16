@@ -1,23 +1,10 @@
-//! Native Orrery (rewrite) — the desktop app in GPUI against the real SQLite
-//! cache. The Rust core is reused verbatim: `model.rs` and `cache.rs` are pulled
-//! in by `#[path]` (so `cache::load_repos()` reads the shipping
-//! `~/.local/share/orrery/cache.sqlite` with zero drift). No webview, no IPC.
+//! Native Orrery (rewrite) — the desktop GPUI app. All logic comes from the
+//! `orrery-core` crate (scan/git/forge/inbox/ai/cache/config); this crate is
+//! purely the UI: theme, cards, shell, views. No webview, no IPC. Reading the
+//! shipping `~/.local/share/orrery/cache.sqlite` is `orrery_core::cache`.
 //!
 //! Phase 1: real `--orr-*` theme + faithful RepoCard. Phase 2: the app shell —
-//! header + sidebar nav + view switching (`shell.rs`). Branch: spike/native-gpui.
-
-// Reused verbatim from the `orrery` crate — never reformatted/linted here
-// (rustfmt::skip stops `cargo fmt` following the include; clippy::all silences
-// lints on code we don't own).
-#[rustfmt::skip]
-#[allow(dead_code, clippy::all)]
-#[path = "../../src-tauri/src/model.rs"]
-mod model;
-
-#[rustfmt::skip]
-#[allow(dead_code, clippy::all)]
-#[path = "../../src-tauri/src/cache.rs"]
-mod cache;
+//! header + sidebar nav + view switching (`shell.rs`).
 
 mod card;
 mod data;

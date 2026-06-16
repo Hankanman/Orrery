@@ -1,22 +1,17 @@
-mod ai;
 mod appearance;
-mod cache;
 mod cli;
 mod commands;
-mod config;
-mod forge;
-mod git_ops;
-mod inbox;
 mod krunner;
-mod launch;
-mod llama;
-mod model;
 mod notifier;
-mod oauth;
-mod scan;
-mod search;
 mod tray;
 mod watcher;
+
+// The logic modules now live in orrery-core. Re-export them under this crate's
+// own namespace so the existing `crate::model` / `crate::cache` / … paths
+// across commands.rs, watcher.rs, etc. keep resolving unchanged.
+pub(crate) use orrery_core::{
+    ai, cache, config, forge, git_ops, inbox, launch, llama, model, oauth, scan, search,
+};
 
 /// Configure display/rendering environment on Linux before GTK/WebKit init.
 /// Both vars are only set if the user hasn't already set them, so anyone can

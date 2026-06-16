@@ -1,8 +1,8 @@
-//! Bridge from the reused core (`crate::cache` / `crate::model`, included via
-//! `#[path]` in main.rs) to a flat, render-ready `Row`. The card reads `Row`
-//! and never touches the serde types directly.
+//! Bridge from `orrery-core` (`cache` / `model`) to a flat, render-ready `Row`.
+//! The card reads `Row` and never touches the core's serde types directly.
 
 use gpui::SharedString;
+use orrery_core::{cache, model};
 
 /// Everything the grid card renders, flattened from `model::Repo`.
 pub struct Row {
@@ -54,7 +54,7 @@ fn fmt_stars(stars: u32) -> String {
     }
 }
 
-pub fn to_rows(repos: Vec<crate::model::Repo>, now: i64) -> Vec<Row> {
+pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
     repos
         .into_iter()
         .map(|r| Row {
@@ -85,7 +85,7 @@ pub fn to_rows(repos: Vec<crate::model::Repo>, now: i64) -> Vec<Row> {
 /// Load real repos from the shipping SQLite cache. Returns the rows plus the
 /// number of distinct scanned roots (for the header's "N roots · M repos").
 pub fn load(now: i64) -> (Vec<Row>, usize) {
-    let repos = crate::cache::load_repos();
+    let repos = cache::load_repos();
     let roots: std::collections::HashSet<&str> = repos.iter().map(|r| r.root.as_str()).collect();
     let n_roots = roots.len();
     (to_rows(repos, now), n_roots)

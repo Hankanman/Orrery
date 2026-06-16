@@ -1,0 +1,30 @@
+# orrery-app — the native GPUI desktop app. Depends on orrery-core for all
+# logic; carries the UI (theme, cards, shell, views). Will be renamed to
+# `orrery` at cutover, once the legacy Tauri shell (src-tauri/) is deleted.
+[package]
+name = "orrery-app"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "orrery-app"
+path = "src/main.rs"
+
+[dependencies]
+# All logic lives here now — no more #[path] includes of the core.
+orrery-core = { path = "../orrery-core" }
+
+# GPU-native UI toolkit. Pinned to a Zed release tag (not on crates.io).
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
+# v1.6.3 moved platform construction out of gpui; the window/Vulkan factory lives
+# here. A compositor feature is REQUIRED on Linux or gpui_linux compiles out its
+# compositor arms and panics with `unreachable!()` at startup. Wayland session →
+# `wayland` suffices; add "x11" under Xorg (needs the libxkbcommon-x11 dev lib).
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3", features = ["wayland"] }
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"

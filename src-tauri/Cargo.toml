@@ -19,6 +19,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Orrery's logic, extracted out of this crate (scan/git/forge/inbox/ai/cache/
+# config/launch). Re-exported under crate:: in lib.rs. Slated to be the only
+# survivor when this Tauri shell is deleted in favor of the native app.
+orrery-core = { path = "../crates/orrery-core" }
+
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"

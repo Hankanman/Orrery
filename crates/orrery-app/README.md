@@ -11,11 +11,15 @@ you can run it next to the Tauri build and compare CPU directly.
 
 ## What it reuses (no drift)
 
-The Rust core is untouched. `model.rs` and `cache.rs` are pulled in verbatim via
-`#[path]` includes — the spike calls exactly one core function,
-`cache::load_repos()`, which reads `~/.local/share/orrery/cache.sqlite`. The
-whole point of going native is that this core survives a rewrite; the spike
-proves it links and renders without a webview or IPC layer.
+All logic lives in the **`orrery-core`** crate (`crates/orrery-core`) — scan,
+git, host APIs, AI, cache, config, launchers — with zero UI and zero Tauri.
+`orrery-app` depends on it directly; the grid reads `orrery_core::cache::load_repos()`,
+which loads `~/.local/share/orrery/cache.sqlite`. The legacy Tauri shell
+(`src-tauri/`) re-exports the same core, so both apps share one source of truth
+until the Tauri shell is deleted at cutover.
+
+(Earlier this crate `#[path]`-included `model.rs`/`cache.rs` directly from
+`src-tauri` — a throwaway-spike shortcut, now replaced by the real crate.)
 
 What it does **not** reuse: the 1,655-line CSS design system (it can't cross the
 native boundary). Card styling is re-approximated in `src/main.rs` with the same
@@ -35,7 +39,7 @@ pkg-config --exists vulkan wayland-client xkbcommon fontconfig freetype2 && echo
 ## Build & run
 
 ```bash
-cd native-spike
+cd crates/orrery-app
 cargo run --release      # first build is slow: it compiles all of GPUI
 ```
 
@@ -57,11 +61,10 @@ cargo fmt -- --check # CI-style: fail if unformatted
 cargo clippy         # lint (warnings); add `-- -D warnings` to fail on any
 ```
 
-`rustfmt`/`clippy` ship via the pinned toolchain (`components` in
-`rust-toolchain.toml`). The reused core (`model.rs`/`cache.rs`) is pulled in by
-`#[path]`; both carry `#[rustfmt::skip]` + `#[allow(clippy::all)]` so the
-hygiene tools only ever touch the spike's own code and never reformat or lint
-the main `orrery` crate's files. Lint policy lives in `[lints]` in `Cargo.toml`.
+`rustfmt`/`clippy` ship via the workspace-pinned toolchain (`components` in the
+root `rust-toolchain.toml`). Logic lives in its own `orrery-core` crate now, so
+the hygiene tools here only touch UI code. `cargo clippy --workspace -- -D
+warnings` is green. Lint policy lives in `[lints]` in each crate's `Cargo.toml`.
 
 You should get a populated grid only if the cache is warm. If you see
 "No cached repos", launch the Tauri app once (`pnpm tauri dev`) to populate
@@ -77,7 +80,7 @@ for the *same* interaction (scroll the grid up and down for ~15s).
 # Native spike
 cargo run --release &
 # find its pid, then sample:
-pidstat -h -u -p $(pgrep -f orrery-native-spike) 1 20
+pidstat -h -u -p $(pgrep -f orrery-app) 1 20
 
 # Tauri build (separately) — measure the WebKit render process, not just the shell:
 pnpm tauri dev   # or the release binary

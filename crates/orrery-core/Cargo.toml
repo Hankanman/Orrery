@@ -1,0 +1,36 @@
+# orrery-core — all of Orrery's logic with zero UI and zero Tauri. Scanning,
+# git, host APIs (GitHub/GitLab), local AI (Ollama + bundled llama.cpp), the
+# SQLite cache, config, and launchers. Both the (legacy) Tauri app and the
+# native GPUI app depend on this; it knows nothing about either.
+[package]
+name = "orrery-core"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Repo discovery + metadata (versions match the legacy crate deliberately).
+git2 = "0.20"                                             # libgit2 (vendored)
+walkdir = "2"                                             # repo scanning
+globset = "0.4"                                           # ignore-glob matching
+toml = "1"                                                # config file
+dirs = "6"                                                # XDG config/data paths
+which = "8"                                               # detect IDE/terminal on PATH
+rusqlite = { version = "0.32", features = ["bundled"] }   # cache (SQLite bundled)
+
+# Git host providers + AI HTTP.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+urlencoding = "2"
+futures-util = "0.3"                                      # stream combinators (ai.rs SSE)
+# Only the timer (oauth device-flow poll backoff). No runtime here — the caller
+# (app) drives async; logic stays runtime-agnostic where it can.
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+all = "warn"

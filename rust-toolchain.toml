@@ -1,0 +1,7 @@
+# GPUI (Zed v1.6.3) requires Rust 1.95.0 (std::hint::cold_path, stabilized in
+# 1.95). Pinned workspace-wide; the legacy src-tauri crate also builds fine on
+# 1.95 (verified), so a single toolchain covers everything.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
