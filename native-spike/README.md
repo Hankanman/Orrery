@@ -65,15 +65,24 @@ pnpm tauri dev   # or the release binary
 pidstat -h -u -p ALL 1 20 | grep -i 'WebKit\|orrery'
 ```
 
-Things to record for the go/no-go:
+## Result (measured 2026-06-16, RTX 3080 Ti / NVIDIA / KDE Wayland)
 
-| Metric | Native spike | Tauri build |
+Same interaction (scroll the 22-repo grid), `pidstat 1` samples. The Tauri
+figure sums the shell process and `WebKitWebProcess` (the renderer).
+
+| Metric | Native spike (GPUI) | Tauri build (WebKitGTK) |
 | --- | --- | --- |
-| CPU % idle (window focused, no input) | | |
-| CPU % while scrolling the grid | | |
-| Peak RSS | | |
-| Cold-start to first paint | | |
-| Binary size | | |
+| CPU % idle (focused, no input) | ~0–1% | ~0–1% |
+| CPU % scrolling — average | **~5.7%** | **~43%** (WebKit ~34% + shell ~9%) |
+| CPU % scrolling — peak | 7% | ~62% (WebKit 53% + shell 9%) |
+| Binary size (stripped) | 25M, no webview runtime dep | 18M + system webkit2gtk |
+
+**~7.5× lower scroll CPU.** The webview renderer alone sat at 30–50% sustained
+while the native window never crossed 7%. Both idle near zero — WebKitGTK's tax
+is a *repaint* cost, which is exactly what the scroll rows show. The spike's UI
+is simpler than the real GridView, so the shipped port won't be a clean 7.5×,
+but the hypothesis (the webview renderer is the scroll-time CPU hog) is
+confirmed. **Verdict: GO.**
 
 If the native column is convincingly lower on the scroll/idle CPU rows, Phase 0
 is a GO and the full rewrite is justified. If GPUI misbehaves on the NVIDIA path
