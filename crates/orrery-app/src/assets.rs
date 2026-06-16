@@ -12,6 +12,12 @@ use rust_embed::RustEmbed;
 #[folder = "assets/icons"]
 struct Icons;
 
+/// True if an asset is embedded at `path` (e.g. `"devicon/rust.svg"`). Used to
+/// fall back gracefully when a language has no bundled devicon.
+pub fn has_icon(path: &str) -> bool {
+    Icons::get(path).is_some()
+}
+
 /// AssetSource registered on the `Application`. Asset paths are relative to
 /// `assets/icons/`, e.g. `"lucide/git-branch.svg"`, `"brand/github.svg"`.
 pub struct Assets;

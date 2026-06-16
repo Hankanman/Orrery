@@ -6,7 +6,7 @@
 //
 // lucide icons are stroke-based; we emit stroke="#000" so usvg rasterizes the
 // strokes into an alpha mask that GPUI's svg() element tints via text_color.
-import { writeFileSync, mkdirSync, copyFileSync } from "fs";
+import { writeFileSync, mkdirSync, copyFileSync, existsSync } from "fs";
 import { join } from "path";
 
 const ROOT = join(import.meta.dirname, "..", "..", ".."); // repo root
@@ -26,8 +26,21 @@ const LUCIDE_ICONS = [
   "hard-drive",
 ];
 
+// Language marks: multicolor devicon "-original" SVGs, rendered in full color
+// by GPUI's img() element. Keyed by stem → devicon directory. Stems must mirror
+// `devicon_stem()` in theme.rs.
+const DEVICON = {
+  rust: "rust", typescript: "typescript", javascript: "javascript", python: "python",
+  go: "go", ruby: "ruby", java: "java", c: "c", cpp: "cplusplus", csharp: "csharp",
+  html: "html5", css: "css3", shell: "bash", vue: "vuejs", svelte: "svelte",
+  kotlin: "kotlin", swift: "swift", php: "php", scala: "scala", elixir: "elixir",
+  haskell: "haskell", lua: "lua", dart: "dart", zig: "zig", nix: "nixos", markdown: "markdown",
+};
+const DEVICON_DIR = join(ROOT, "node_modules/devicon/icons");
+
 mkdirSync(join(OUT, "lucide"), { recursive: true });
 mkdirSync(join(OUT, "brand"), { recursive: true });
+mkdirSync(join(OUT, "devicon"), { recursive: true });
 
 for (const name of LUCIDE_ICONS) {
   const mod = await import(join(LUCIDE, `${name}.mjs`));
@@ -51,4 +64,16 @@ for (const b of ["github", "gitlab"]) {
   copyFileSync(join(SIMPLE, `${b}.svg`), join(OUT, "brand", `${b}.svg`));
 }
 
-console.log(`generated ${LUCIDE_ICONS.length} lucide + 2 brand SVGs into ${OUT}`);
+// Language marks (multicolor devicon originals).
+let devCount = 0;
+for (const [stem, dir] of Object.entries(DEVICON)) {
+  const src = join(DEVICON_DIR, dir, `${dir}-original.svg`);
+  if (existsSync(src)) {
+    copyFileSync(src, join(OUT, "devicon", `${stem}.svg`));
+    devCount++;
+  } else {
+    console.warn(`  devicon missing: ${dir}-original.svg (lang ${stem})`);
+  }
+}
+
+console.log(`generated ${LUCIDE_ICONS.length} lucide + 2 brand + ${devCount} devicon SVGs into ${OUT}`);
