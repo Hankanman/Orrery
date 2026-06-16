@@ -316,10 +316,10 @@ async fn following_items(token: &str) -> Result<Vec<FeedItem>, String> {
                 }
             }
             Some("WatchEvent") => out.push(item("starred", String::new(), String::new(), String::new(), repo_url, false)),
-            Some("CreateEvent") => {
-                if e.payload.as_ref().and_then(|p| p.ref_type.as_deref()) == Some("repository") {
-                    out.push(item("created", String::new(), String::new(), String::new(), repo_url, false));
-                }
+            Some("CreateEvent")
+                if e.payload.as_ref().and_then(|p| p.ref_type.as_deref()) == Some("repository") =>
+            {
+                out.push(item("created", String::new(), String::new(), String::new(), repo_url, false));
             }
             Some("ForkEvent") => out.push(item("forked", String::new(), String::new(), String::new(), repo_url, false)),
             Some("PublicEvent") => out.push(item("public", String::new(), String::new(), String::new(), repo_url, false)),
@@ -351,7 +351,7 @@ pub async fn github_feed() -> Result<Vec<FeedItem>, String> {
         return Err(errors.join("; "));
     }
 
-    items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    items.sort_by_key(|i| std::cmp::Reverse(i.timestamp));
     let mut seen = std::collections::HashSet::new();
     items.retain(|i| seen.insert(i.url.clone()));
     items.truncate(80);

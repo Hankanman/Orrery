@@ -54,7 +54,7 @@ pub fn scan(roots: &[String], depth: usize, ignore: &[String], favorites: &HashS
 
 /// Just the discovered repo paths (no metadata) — used by the watcher to decide
 /// what to watch, far cheaper than a full scan.
-pub(crate) fn repo_paths(roots: &[String], depth: usize, ignore: &[String]) -> Vec<PathBuf> {
+pub fn repo_paths(roots: &[String], depth: usize, ignore: &[String]) -> Vec<PathBuf> {
     let ignore_set = build_ignore(ignore);
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -412,7 +412,7 @@ fn home() -> Option<PathBuf> {
 }
 
 /// Expand a leading `~` to the home directory.
-pub(crate) fn expand(path: &str) -> PathBuf {
+pub fn expand(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(h) = home() {
             return h.join(rest);

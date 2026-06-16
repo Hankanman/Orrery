@@ -2711,6 +2711,7 @@ dependencies = [
  "git2",
  "globset",
  "notify-debouncer-mini",
+ "orrery-core",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -2728,6 +2729,25 @@ dependencies = [
  "webkit2gtk",
  "which",
  "zbus",
+]
+
+[[package]]
+name = "orrery-core"
+version = "0.2.0"
+dependencies = [
+ "dirs",
+ "futures-util",
+ "git2",
+ "globset",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "urlencoding",
+ "walkdir",
+ "which",
 ]
 
 [[package]]

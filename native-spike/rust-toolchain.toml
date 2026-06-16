@@ -1,7 +1,0 @@
-# GPUI (Zed v1.6.3) requires Rust 1.95.0 — it uses std::hint::cold_path(),
-# stabilized in 1.95. Pinning here so `cargo build` in this dir auto-selects it
-# (the repo's default toolchain is 1.94, which fails with E0658).
-[toolchain]
-channel = "1.95.0"
-profile = "minimal"
-components = ["clippy", "rustfmt"]
