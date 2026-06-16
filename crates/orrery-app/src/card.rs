@@ -1,31 +1,32 @@
 //! Faithful GPUI port of `RepoCard` (grid view) from
 //! `src/components/RepoCard.tsx` + the `.orr-card*` rules in `src/index.css`.
-//! Layout, spacing, type sizes and token colors match; real icons (LangIcon
-//! devicons, lucide, brand logos) are stubbed with a language dot + glyphs and
-//! land in Phase 2. Static for now — interactivity is a later phase.
+//! Layout, spacing, type sizes, token colors and now real lucide/host-brand
+//! icons match. The language mark is still a color dot (devicon pass is its own
+//! follow-up). Static for now — interactivity is a later phase.
 
 use gpui::{div, px, rgb, FontWeight, IntoElement, ParentElement, SharedString, Styled};
 
 use crate::data::Row;
+use crate::icon::{brand, lucide};
 use crate::theme::{lang_color, Theme};
 
 const MONO: &str = "monospace";
 
-/// One status segment, e.g. "⎇ main" or "↑2 ↓0", in a given color.
-fn seg(glyph: &str, label: SharedString, color: u32) -> impl IntoElement {
+/// One status segment: a lucide icon + label, both in `color`.
+fn seg(icon_name: &str, label: SharedString, color: u32) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(4.))
         .text_color(rgb(color))
-        .child(SharedString::from(glyph.to_string()))
+        .child(lucide(icon_name, 14., color))
         .child(label)
 }
 
 /// A launcher button. `wide` ones flex to fill (IDE/Agent); narrow ones are
-/// fixed 38px icon slots (Folder/Host).
-fn button(label: SharedString, wide: bool, t: &Theme) -> impl IntoElement {
+/// fixed 38px icon slots (Folder/Host). `content` is text or an icon.
+fn button(content: impl IntoElement, wide: bool, t: &Theme) -> impl IntoElement {
     let base = div()
         .flex()
         .flex_row()
@@ -40,7 +41,7 @@ fn button(label: SharedString, wide: bool, t: &Theme) -> impl IntoElement {
         .text_size(px(t.text_data_sm))
         .text_color(rgb(t.fg1))
         .font_family(MONO)
-        .child(label);
+        .child(content);
     if wide {
         base.flex_1().min_w(px(0.))
     } else {
@@ -76,12 +77,11 @@ pub fn card(row: &Row, t: &Theme) -> impl IntoElement {
                 )
                 .child(div().min_w(px(0.)).truncate().child(row.name.clone())),
         )
-        .child(
-            div()
-                .text_size(px(16.))
-                .text_color(rgb(if row.favorite { t.star } else { t.fg3 }))
-                .child("★"),
-        );
+        .child(lucide(
+            "star",
+            16.,
+            if row.favorite { t.star } else { t.fg3 },
+        ));
 
     // ── slug · path ───────────────────────────────────────────────────────
     let slug = div()
@@ -112,17 +112,28 @@ pub fn card(row: &Row, t: &Theme) -> impl IntoElement {
         .mt(px(12.))
         .font_family(MONO)
         .text_size(px(t.text_data_sm))
-        .child(seg("⎇", row.branch.clone(), t.fg2));
+        .child(seg("git-branch", row.branch.clone(), t.fg2));
     if row.ahead > 0 || row.behind > 0 {
         let color = if row.behind > 0 { t.behind } else { t.clean };
-        status = status.child(seg(
-            "↑",
-            SharedString::from(format!("{} ↓{}", row.ahead, row.behind)),
-            color,
-        ));
+        status = status.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .text_color(rgb(color))
+                .child(lucide("arrow-up", 13., color))
+                .child(SharedString::from(row.ahead.to_string()))
+                .child(lucide("arrow-down", 13., color))
+                .child(SharedString::from(row.behind.to_string())),
+        );
     }
     if row.dirty > 0 {
-        status = status.child(seg("●", SharedString::from(row.dirty.to_string()), t.dirty));
+        status = status.child(seg(
+            "circle-dot",
+            SharedString::from(row.dirty.to_string()),
+            t.dirty,
+        ));
     }
 
     // ── host row: private · stars · release · age ────────────────────────
@@ -136,15 +147,21 @@ pub fn card(row: &Row, t: &Theme) -> impl IntoElement {
         .text_size(px(t.text_data_sm))
         .text_color(rgb(t.fg2));
     if row.private {
-        host = host.child(seg("⚿", SharedString::from("private"), t.fg3));
+        host = host.child(lucide("lock", 13., t.fg3));
     }
-    if row.has_host {
-        host = host.child(seg("★", row.stars.clone(), t.star));
+    if !row.host.is_empty() {
+        host = host.child(seg("star", row.stars.clone(), t.star));
     }
     if !row.release.is_empty() {
-        host = host.child(seg("⌑", row.release.clone(), t.fg2));
+        host = host.child(seg("tag", row.release.clone(), t.fg2));
     }
-    host = host.child(seg("◷", row.age.clone(), t.fg2));
+    host = host.child(seg("clock", row.age.clone(), t.fg2));
+    if !row.host.is_empty() {
+        // host brand mark, pushed to the right edge
+        host = host
+            .child(div().flex_1())
+            .child(brand(&row.host, 14., t.fg2));
+    }
 
     // ── launchers ─────────────────────────────────────────────────────────
     let acts = div()
@@ -154,8 +171,8 @@ pub fn card(row: &Row, t: &Theme) -> impl IntoElement {
         .mt(px(14.))
         .child(button(SharedString::from("Open in IDE"), true, t))
         .child(button(SharedString::from("Agent"), true, t))
-        .child(button(SharedString::from("⌂"), false, t))
-        .child(button(SharedString::from("↗"), false, t));
+        .child(button(lucide("folder-open", 15., t.fg1), false, t))
+        .child(button(lucide("external-link", 15., t.fg1), false, t));
 
     // ── card shell ────────────────────────────────────────────────────────
     let mut shell = div()
@@ -188,7 +205,7 @@ pub fn card(row: &Row, t: &Theme) -> impl IntoElement {
                 .font_family(MONO)
                 .text_size(px(t.text_data_sm))
                 .text_color(rgb(t.ai))
-                .child("✦")
+                .child(lucide("sparkles", 13., t.ai))
                 .child(row.ai_summary.clone()),
         );
     }

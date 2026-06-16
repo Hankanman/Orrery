@@ -23,6 +23,10 @@ gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
 # `wayland` suffices; add "x11" under Xorg (needs the libxkbcommon-x11 dev lib).
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3", features = ["wayland"] }
 
+# Embed the SVG icon assets into the binary (no runtime file deps), served to
+# GPUI through an AssetSource. Icons are generated/committed under assets/icons/.
+rust-embed = "8"
+
 [lints.rust]
 unsafe_code = "warn"
 

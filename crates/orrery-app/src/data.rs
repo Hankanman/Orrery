@@ -19,7 +19,7 @@ pub struct Row {
     pub behind: u32,
     pub dirty: u32,
     pub stars: SharedString, // pre-formatted (e.g. "1.2k")
-    pub has_host: bool,
+    pub host: SharedString,  // "github" / "gitlab" / "" (brand-icon name)
     pub private: bool,
     pub favorite: bool,
 }
@@ -75,7 +75,12 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
             behind: r.git.behind,
             dirty: r.git.dirty,
             stars: fmt_stars(r.stars).into(),
-            has_host: r.host.is_some(),
+            host: match r.host {
+                Some(model::Host::Github) => "github",
+                Some(model::Host::Gitlab) => "gitlab",
+                None => "",
+            }
+            .into(),
             private: r.private,
             favorite: r.favorite,
         })

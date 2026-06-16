@@ -6,8 +6,10 @@
 //! Phase 1: real `--orr-*` theme + faithful RepoCard. Phase 2: the app shell —
 //! header + sidebar nav + view switching (`shell.rs`).
 
+mod assets;
 mod card;
 mod data;
+mod icon;
 mod shell;
 mod theme;
 
@@ -35,23 +37,25 @@ fn main() {
     let theme = Rc::new(Theme::dark());
 
     let platform = gpui_platform::current_platform(false);
-    Application::with_platform(platform).run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_window, cx| {
-                cx.new(|_cx| OrreryApp {
-                    view: View::Grid,
-                    rows,
-                    roots,
-                    theme,
-                })
-            },
-        )
-        .expect("failed to open window");
-        cx.activate(true);
-    });
+    Application::with_platform(platform)
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |_window, cx| {
+                    cx.new(|_cx| OrreryApp {
+                        view: View::Grid,
+                        rows,
+                        roots,
+                        theme,
+                    })
+                },
+            )
+            .expect("failed to open window");
+            cx.activate(true);
+        });
 }
