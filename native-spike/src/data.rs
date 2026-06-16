@@ -7,7 +7,7 @@ use gpui::SharedString;
 /// Everything the grid card renders, flattened from `model::Repo`.
 pub struct Row {
     pub name: SharedString,
-    pub slug: SharedString,   // "owner/repo" or "no remote"
+    pub slug: SharedString, // "owner/repo" or "no remote"
     pub path: SharedString,
     pub description: SharedString,
     pub language: SharedString, // "" when unknown
@@ -86,8 +86,7 @@ pub fn to_rows(repos: Vec<crate::model::Repo>, now: i64) -> Vec<Row> {
 /// number of distinct scanned roots (for the header's "N roots · M repos").
 pub fn load(now: i64) -> (Vec<Row>, usize) {
     let repos = crate::cache::load_repos();
-    let roots: std::collections::HashSet<&str> =
-        repos.iter().map(|r| r.root.as_str()).collect();
+    let roots: std::collections::HashSet<&str> = repos.iter().map(|r| r.root.as_str()).collect();
     let n_roots = roots.len();
     (to_rows(repos, now), n_roots)
 }

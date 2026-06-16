@@ -71,7 +71,12 @@ impl OrreryApp {
                     .flex_row()
                     .items_center()
                     .gap(px(9.))
-                    .child(div().text_size(px(18.)).text_color(rgb(t.primary)).child("⊚"))
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .text_color(rgb(t.primary))
+                            .child("⊚"),
+                    )
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -152,7 +157,11 @@ impl OrreryApp {
                     this.view = view;
                     cx.notify();
                 }))
-                .child(div().w(px(16.)).child(SharedString::from(glyph.to_string())))
+                .child(
+                    div()
+                        .w(px(16.))
+                        .child(SharedString::from(glyph.to_string())),
+                )
                 .child(SharedString::from(label.to_string()));
             if active {
                 item = item.bg(rgb(t.accent_wash));
@@ -247,7 +256,13 @@ impl Render for OrreryApp {
                     .flex_1()
                     .min_h(px(0.))
                     .child(self.sidebar(&t, cx))
-                    .child(div().flex().flex_1().min_w(px(0.)).child(self.main_view(&t))),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(self.main_view(&t)),
+                    ),
             )
     }
 }

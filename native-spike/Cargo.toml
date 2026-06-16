@@ -33,6 +33,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
 
+# Lint policy. clippy::all defaults to warn already; pinning it here makes the
+# intent explicit and lets a CI run flip to -D warnings. The reused core
+# (model.rs/cache.rs) carries its own `#[allow(clippy::all)]`, so this only
+# governs the spike's own code.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+
 # Keep the spike's own build fast; gpui's first build dominates regardless.
 [profile.release]
 opt-level = 2

@@ -43,6 +43,26 @@ cargo run --release      # first build is slow: it compiles all of GPUI
 > in 1.95). A `rust-toolchain.toml` pins it, so rustup auto-installs/selects it;
 > the repo default of 1.94 fails with `E0658`.
 
+For a fast edit/run loop (debug build, GPUI cached → ~2s):
+
+```bash
+cargo run            # build + launch; prints "[native] loaded N repos…"
+```
+
+## Hygiene (lint + format)
+
+```bash
+cargo fmt            # format this crate's own sources
+cargo fmt -- --check # CI-style: fail if unformatted
+cargo clippy         # lint (warnings); add `-- -D warnings` to fail on any
+```
+
+`rustfmt`/`clippy` ship via the pinned toolchain (`components` in
+`rust-toolchain.toml`). The reused core (`model.rs`/`cache.rs`) is pulled in by
+`#[path]`; both carry `#[rustfmt::skip]` + `#[allow(clippy::all)]` so the
+hygiene tools only ever touch the spike's own code and never reformat or lint
+the main `orrery` crate's files. Lint policy lives in `[lints]` in `Cargo.toml`.
+
 You should get a populated grid only if the cache is warm. If you see
 "No cached repos", launch the Tauri app once (`pnpm tauri dev`) to populate
 `cache.sqlite`, then relaunch the spike.

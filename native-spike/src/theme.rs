@@ -11,13 +11,13 @@
 /// Dark-theme token set. One value per `--orr-*`/shadcn var the grid touches.
 pub struct Theme {
     // Surfaces (deep blue-black void the system orbits in).
-    pub page: u32,           // --background #0a0e16
-    pub surface: u32,        // --orr-glass over page (card background)
-    pub surface_hover: u32,  // --orr-glass-hover over page
-    pub button_bg: u32,      // --orr-glass-2 over page
-    pub border: u32,         // --orr-border (white 7.5%) over page
-    pub border_strong: u32,  // --orr-border-strong (white 14%) over page
-    pub border_accent: u32,  // --orr-border-accent (primary 40%) over page
+    pub page: u32,          // --background #0a0e16
+    pub surface: u32,       // --orr-glass over page (card background)
+    pub surface_hover: u32, // --orr-glass-hover over page
+    pub button_bg: u32,     // --orr-glass-2 over page
+    pub border: u32,        // --orr-border (white 7.5%) over page
+    pub border_strong: u32, // --orr-border-strong (white 14%) over page
+    pub border_accent: u32, // --orr-border-accent (primary 40%) over page
 
     // Text ramp (--orr-fg-0..3).
     pub fg0: u32, // primary
@@ -26,10 +26,10 @@ pub struct Theme {
     pub fg3: u32, // faint
 
     // Identity + semantics.
-    pub primary: u32,        // --primary orbit cyan
-    pub accent_bright: u32,  // --orr-accent-bright (primary + white 22%)
-    pub accent_wash: u32,    // --orr-accent-wash (primary 12% over page) — active nav bg
-    pub accent_badge: u32,   // accent 20% over page — nav count badge bg
+    pub primary: u32,       // --primary orbit cyan
+    pub accent_bright: u32, // --orr-accent-bright (primary + white 22%)
+    pub accent_wash: u32,   // --orr-accent-wash (primary 12% over page) — active nav bg
+    pub accent_badge: u32,  // accent 20% over page — nav count badge bg
     pub star: u32,
     pub ai: u32,
     pub clean: u32,

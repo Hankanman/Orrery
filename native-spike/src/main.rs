@@ -6,10 +6,15 @@
 //! Phase 1: real `--orr-*` theme + faithful RepoCard. Phase 2: the app shell —
 //! header + sidebar nav + view switching (`shell.rs`). Branch: spike/native-gpui.
 
+// Reused verbatim from the `orrery` crate — never reformatted/linted here
+// (rustfmt::skip stops `cargo fmt` following the include; clippy::all silences
+// lints on code we don't own).
+#[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
 #[path = "../../src-tauri/src/model.rs"]
 mod model;
 
+#[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
 #[path = "../../src-tauri/src/cache.rs"]
 mod cache;
@@ -22,9 +27,7 @@ mod theme;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{
-    px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions,
-};
+use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
 
 use shell::{OrreryApp, View};
 use theme::Theme;
@@ -36,7 +39,11 @@ fn main() {
         .unwrap_or(0);
 
     let (rows, roots) = data::load(now);
-    eprintln!("[native] loaded {} repos across {} roots", rows.len(), roots);
+    eprintln!(
+        "[native] loaded {} repos across {} roots",
+        rows.len(),
+        roots
+    );
     let rows = Rc::new(rows);
     let theme = Rc::new(Theme::dark());
 
