@@ -26,7 +26,10 @@ pub struct Theme {
     pub fg3: u32, // faint
 
     // Identity + semantics.
-    pub primary: u32, // --primary orbit cyan
+    pub primary: u32,        // --primary orbit cyan
+    pub accent_bright: u32,  // --orr-accent-bright (primary + white 22%)
+    pub accent_wash: u32,    // --orr-accent-wash (primary 12% over page) — active nav bg
+    pub accent_badge: u32,   // accent 20% over page — nav count badge bg
     pub star: u32,
     pub ai: u32,
     pub clean: u32,
@@ -69,6 +72,9 @@ impl Theme {
             fg3: 0x434e63,
 
             primary: 0x38dbf0,
+            accent_bright: 0x64e3f3,
+            accent_wash: 0x102730,
+            accent_badge: 0x133742,
             star: 0xffc24b,
             ai: 0xa78bfa,
             clean: 0x3dd68c,

@@ -82,7 +82,12 @@ pub fn to_rows(repos: Vec<crate::model::Repo>, now: i64) -> Vec<Row> {
         .collect()
 }
 
-/// Load real repos from the shipping SQLite cache.
-pub fn load(now: i64) -> Vec<Row> {
-    to_rows(crate::cache::load_repos(), now)
+/// Load real repos from the shipping SQLite cache. Returns the rows plus the
+/// number of distinct scanned roots (for the header's "N roots · M repos").
+pub fn load(now: i64) -> (Vec<Row>, usize) {
+    let repos = crate::cache::load_repos();
+    let roots: std::collections::HashSet<&str> =
+        repos.iter().map(|r| r.root.as_str()).collect();
+    let n_roots = roots.len();
+    (to_rows(repos, now), n_roots)
 }
