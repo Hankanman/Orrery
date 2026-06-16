@@ -25,3 +25,15 @@ pub fn spawn(template: &str, path: &str) -> Result<Child, String> {
 pub fn launch(template: &str, path: &str) -> Result<(), String> {
     spawn(template, path).map(|_| ())
 }
+
+/// Open a folder path or URL in the system default handler (xdg-open), detached.
+pub fn open(target: &str) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to open `{target}`: {e}"))
+}

@@ -6,6 +6,8 @@ use orrery_core::{cache, model};
 
 /// Everything the grid card renders, flattened from `model::Repo`.
 pub struct Row {
+    pub id: SharedString,  // absolute path — launch cwd + favorite/cache key
+    pub url: SharedString, // host web URL, or "" (open-on-host button)
     pub name: SharedString,
     pub slug: SharedString, // "owner/repo" or "no remote"
     pub path: SharedString,
@@ -58,6 +60,12 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
     repos
         .into_iter()
         .map(|r| Row {
+            id: r.id.into(),
+            url: match (r.remote_host.as_deref(), r.slug.as_deref()) {
+                (Some(host), Some(slug)) => format!("https://{host}/{slug}"),
+                _ => String::new(),
+            }
+            .into(),
             name: r.display_name.into(),
             slug: r.slug.unwrap_or_else(|| "no remote".into()).into(),
             path: r.path.into(),
