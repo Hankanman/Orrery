@@ -33,8 +33,8 @@ fn main() {
         rows.len(),
         roots
     );
-    let rows = Rc::new(rows);
     let theme = Rc::new(Theme::dark());
+    let config = orrery_core::config::load();
 
     let platform = gpui_platform::current_platform(false);
     Application::with_platform(platform)
@@ -52,6 +52,7 @@ fn main() {
                         rows,
                         roots,
                         theme,
+                        config,
                     })
                 },
             )

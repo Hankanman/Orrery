@@ -13,6 +13,8 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
+use orrery_core::model::AppConfig;
+
 use crate::card::card;
 use crate::data::Row;
 use crate::icon::lucide;
@@ -47,9 +49,10 @@ const NAV: [(View, &str, &str); 8] = [
 
 pub struct OrreryApp {
     pub view: View,
-    pub rows: Rc<Vec<Row>>,
+    pub rows: Vec<Row>,
     pub roots: usize,
     pub theme: Rc<Theme>,
+    pub config: AppConfig,
 }
 
 impl OrreryApp {
@@ -196,26 +199,30 @@ impl OrreryApp {
             )
     }
 
-    fn main_view(&self, t: &Theme) -> gpui::AnyElement {
+    fn main_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.view {
-            View::Grid => self.grid(t).into_any_element(),
+            View::Grid => self.grid(t, cx).into_any_element(),
             other => placeholder(other, t).into_any_element(),
         }
     }
 
-    fn grid(&self, t: &Theme) -> impl IntoElement {
-        let rows = self.rows.clone();
+    fn grid(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
         let theme = self.theme.clone();
-        let total = rows.len();
-        let grid_rows = total.div_ceil(COLS);
+        let ide = self.config.ide_command.clone();
+        let agent = self.config.agent_command.clone();
+        let grid_rows = self.rows.len().div_ceil(COLS);
 
-        gpui::uniform_list("repo-grid", grid_rows, move |range, _win, _cx| {
+        gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
+            let app = entity.read(cx);
             range
                 .map(|gi| {
                     let start = gi * COLS;
-                    let end = (start + COLS).min(rows.len());
+                    let end = (start + COLS).min(app.rows.len());
                     let mut cells: Vec<gpui::AnyElement> = (start..end)
-                        .map(|i| card(&rows[i], &theme).into_any_element())
+                        .map(|i| {
+                            card(&app.rows[i], i, &theme, &entity, &ide, &agent).into_any_element()
+                        })
                         .collect();
                     while cells.len() < COLS {
                         cells.push(div().flex_1().min_w(px(0.)).into_any_element());
@@ -262,7 +269,7 @@ impl Render for OrreryApp {
                             .flex()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(self.main_view(&t)),
+                            .child(self.main_view(&t, cx)),
                     ),
             )
     }
