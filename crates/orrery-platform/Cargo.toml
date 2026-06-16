@@ -9,10 +9,14 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
+# Logic: scan/config for the file-watcher, inbox/oauth/cache for the poller.
+orrery-core = { path = "../orrery-core" }
 serde = { version = "1", features = ["derive"] }
-zbus = "5"               # D-Bus: freedesktop appearance portal
+serde_json = "1"         # attention-snapshot dedupe
+zbus = "5"               # D-Bus: appearance portal + desktop notifications
 futures-util = "0.3"     # signal stream
 tokio = { version = "1", features = ["rt"] }  # drive zbus async off the UI thread
+notify-debouncer-mini = "0.4"                 # inotify live-watch (debounced)
 
 [lints.clippy]
 all = "warn"

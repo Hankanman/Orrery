@@ -2756,7 +2756,10 @@ name = "orrery-platform"
 version = "0.2.0"
 dependencies = [
  "futures-util",
+ "notify-debouncer-mini",
+ "orrery-core",
  "serde",
+ "serde_json",
  "tokio",
  "zbus",
 ]
