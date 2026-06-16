@@ -7,10 +7,26 @@
 use gpui::{div, px, rgb, FontWeight, IntoElement, ParentElement, SharedString, Styled};
 
 use crate::data::Row;
-use crate::icon::{brand, lucide};
-use crate::theme::{lang_color, Theme};
+use crate::icon::{brand, langicon, lucide};
+use crate::theme::{devicon_stem, lang_color, Theme};
 
 const MONO: &str = "monospace";
+
+/// The language mark: the multicolor devicon when one is bundled, else the
+/// brand-color dot (no devicon for this language).
+fn lang_mark(language: &str, t: &Theme) -> gpui::AnyElement {
+    if let Some(stem) = devicon_stem(language) {
+        if crate::assets::has_icon(&format!("devicon/{stem}.svg")) {
+            return langicon(stem, 16.).into_any_element();
+        }
+    }
+    div()
+        .w(px(9.))
+        .h(px(9.))
+        .rounded_full()
+        .bg(rgb(lang_color(language, t.fg3)))
+        .into_any_element()
+}
 
 /// One status segment: a lucide icon + label, both in `color`.
 fn seg(icon_name: &str, label: SharedString, color: u32) -> impl IntoElement {
@@ -67,14 +83,7 @@ pub fn card(row: &Row, t: &Theme) -> impl IntoElement {
                 .text_size(px(t.text_h3))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(t.fg0))
-                .child(
-                    // language dot (LangIcon stand-in)
-                    div()
-                        .w(px(9.))
-                        .h(px(9.))
-                        .rounded_full()
-                        .bg(rgb(lang_color(&row.language, t.fg3))),
-                )
+                .child(lang_mark(&row.language, t))
                 .child(div().min_w(px(0.)).truncate().child(row.name.clone())),
         )
         .child(lucide(

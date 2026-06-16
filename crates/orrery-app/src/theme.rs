@@ -97,8 +97,43 @@ impl Theme {
     }
 }
 
-/// Language → brand dot color (stand-in for `LangIcon`; the real devicon SVGs
-/// land in Phase 2). Falls back to the faint text color for unknowns.
+/// Language → embedded devicon asset stem (`assets/icons/devicon/<stem>.svg`),
+/// or `None` when there's no devicon (card falls back to the color dot).
+/// Mirrors the `DEVICON` table in `assets/generate-icons.mjs`.
+pub fn devicon_stem(language: &str) -> Option<&'static str> {
+    Some(match language.to_ascii_lowercase().as_str() {
+        "rust" => "rust",
+        "typescript" | "tsx" => "typescript",
+        "javascript" | "jsx" => "javascript",
+        "python" => "python",
+        "go" => "go",
+        "ruby" => "ruby",
+        "java" => "java",
+        "c" => "c",
+        "c++" | "cpp" => "cpp",
+        "c#" | "csharp" => "csharp",
+        "html" => "html",
+        "css" => "css",
+        "shell" | "bash" | "sh" => "shell",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "kotlin" => "kotlin",
+        "swift" => "swift",
+        "php" => "php",
+        "scala" => "scala",
+        "elixir" => "elixir",
+        "haskell" => "haskell",
+        "lua" => "lua",
+        "dart" => "dart",
+        "zig" => "zig",
+        "nix" => "nix",
+        "markdown" => "markdown",
+        _ => return None,
+    })
+}
+
+/// Language → brand dot color, the fallback language mark when no devicon
+/// exists. Falls back to the faint text color for unknowns.
 pub fn lang_color(language: &str, fallback: u32) -> u32 {
     match language.to_ascii_lowercase().as_str() {
         "rust" => 0xdea584,
