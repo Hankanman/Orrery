@@ -5,10 +5,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/orrery-core", # logic: scan/git/forge/inbox/ai/cache/config/launch
-    "crates/orrery-app",  # GPUI desktop app (UI). Renamed to `orrery` at cutover.
-    # "crates/orrery-platform" — tray/global-shortcut/notify/appearance (added
-    # when that tier is de-Tauri'd).
+    "crates/orrery-core",     # logic: scan/git/forge/inbox/ai/cache/config/launch
+    "crates/orrery-platform", # desktop integration: appearance (+ tray/notify/… later)
+    "crates/orrery-app",      # GPUI desktop app (UI). Renamed to `orrery` at cutover.
 ]
 exclude = ["src-tauri"]
 

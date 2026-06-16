@@ -1,0 +1,18 @@
+# orrery-platform — Linux desktop integration with no UI and no Tauri. The home
+# for what used to live behind Tauri plugins/AppHandle: appearance (XDG portal +
+# kdeglobals), and later tray, global shortcut, notifications, file watching.
+# Both the legacy Tauri app and the native GPUI app consume it.
+[package]
+name = "orrery-platform"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+zbus = "5"               # D-Bus: freedesktop appearance portal
+futures-util = "0.3"     # signal stream
+tokio = { version = "1", features = ["rt"] }  # drive zbus async off the UI thread
+
+[lints.clippy]
+all = "warn"

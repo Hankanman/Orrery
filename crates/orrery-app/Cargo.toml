@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 # All logic lives here now — no more #[path] includes of the core.
 orrery-core = { path = "../orrery-core" }
+# Desktop integration (system accent / appearance, …).
+orrery-platform = { path = "../orrery-platform" }
 
 # GPU-native UI toolkit. Pinned to a Zed release tag (not on crates.io).
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }

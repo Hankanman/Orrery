@@ -95,6 +95,37 @@ impl Theme {
             text_data_sm: 12.,
         }
     }
+
+    /// Override the built-in orbit-cyan accent with the desktop's system accent
+    /// when one is present, recomputing the derived accent tokens (bright/wash/
+    /// badge/border). Matches the design system's "primary overridden by the
+    /// system accent at runtime". No-op when `accent` is `None`.
+    pub fn with_system_accent(mut self, accent: Option<(u8, u8, u8)>) -> Self {
+        if let Some(a) = accent {
+            self.primary = pack(a);
+            self.accent_bright = lighten(a, 0.22);
+            self.accent_wash = over_page(a, 0.12);
+            self.accent_badge = over_page(a, 0.20);
+            self.border_accent = over_page(a, 0.40);
+        }
+        self
+    }
+}
+
+fn pack((r, g, b): (u8, u8, u8)) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+}
+
+/// Mix an sRGB colour toward white by fraction `f`.
+fn lighten((r, g, b): (u8, u8, u8), f: f32) -> u32 {
+    let m = |c: u8| (c as f32 + (255.0 - c as f32) * f).round() as u8;
+    pack((m(r), m(g), m(b)))
+}
+
+/// Blend an sRGB colour over the page background (#0a0e16) at `alpha`.
+fn over_page((r, g, b): (u8, u8, u8), alpha: f32) -> u32 {
+    let blend = |c: u8, base: u8| (base as f32 + (c as f32 - base as f32) * alpha).round() as u8;
+    pack((blend(r, 0x0a), blend(g, 0x0e), blend(b, 0x16)))
 }
 
 /// Language → embedded devicon asset stem (`assets/icons/devicon/<stem>.svg`),

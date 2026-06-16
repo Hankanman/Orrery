@@ -23,6 +23,7 @@ tauri-build = { version = "2", features = [] }
 # config/launch). Re-exported under crate:: in lib.rs. Slated to be the only
 # survivor when this Tauri shell is deleted in favor of the native app.
 orrery-core = { path = "../crates/orrery-core" }
+orrery-platform = { path = "../crates/orrery-platform" }
 
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
