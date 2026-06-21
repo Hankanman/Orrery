@@ -35,6 +35,24 @@ pub enum View {
     Settings,
 }
 
+/// A modal layered over the shell (drawer / palette / dialog). Rendered last in
+/// `render`, above the active view; `Esc`/backdrop dismisses it.
+pub enum Overlay {
+    /// The repo detail drawer, keyed by repo id (stable across rescans), with
+    /// the active tab.
+    Drawer { repo: SharedString, tab: DrawerTab },
+}
+
+/// The RepoDrawer's tabs (mirrors `RepoDrawer.tsx`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DrawerTab {
+    Overview,
+    Changes,
+    Pr,
+    Notes,
+    Readme,
+}
+
 /// (view, lucide-icon, label) — labels match the real sidebar (route ≠ label).
 const NAV: [(View, &str, &str); 8] = [
     (View::Grid, "layout-grid", "Mission Control"),
@@ -56,6 +74,23 @@ pub struct OrreryApp {
     /// Current attention glance lines (PRs/reviews/CI) from the background
     /// poller — drives the Inbox nav badge. Empty until the first poll lands.
     pub attention: Vec<String>,
+    /// The modal layered over the active view, if any (drawer/palette/dialog).
+    pub overlay: Option<Overlay>,
+}
+
+impl OrreryApp {
+    /// Open the repo detail drawer for `repo` (id), on the Overview tab.
+    pub fn open_drawer(&mut self, repo: SharedString) {
+        self.overlay = Some(Overlay::Drawer {
+            repo,
+            tab: DrawerTab::Overview,
+        });
+    }
+
+    /// Dismiss whatever overlay is open.
+    pub fn close_overlay(&mut self) {
+        self.overlay = None;
+    }
 }
 
 impl OrreryApp {
@@ -258,7 +293,7 @@ impl OrreryApp {
 impl Render for OrreryApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
-        div()
+        let shell = div()
             .flex()
             .flex_col()
             .size_full()
@@ -280,7 +315,36 @@ impl Render for OrreryApp {
                             .min_w(px(0.))
                             .child(self.main_view(&t, cx)),
                     ),
-            )
+            );
+
+        // The shell, with any overlay (drawer/palette/dialog) layered on top.
+        let mut root = div().relative().size_full().child(shell);
+        if let Some(overlay) = self.overlay_element(&t, cx) {
+            root = root.child(overlay);
+        }
+        root
+    }
+}
+
+impl OrreryApp {
+    /// Build the active overlay's element, if one is open. Returns `None` when
+    /// the drawer's repo has vanished (e.g. a rescan dropped it) — which also
+    /// leaves the stale overlay to be cleared on the next interaction.
+    fn overlay_element(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        match &self.overlay {
+            Some(Overlay::Drawer { repo, tab }) => {
+                let row = self.rows.iter().find(|r| &r.id == repo)?;
+                let cmds = (
+                    self.config.ide_command.clone(),
+                    self.config.agent_command.clone(),
+                );
+                Some(
+                    crate::drawer::drawer(row, *tab, t, &cx.entity(), &cmds.0, &cmds.1)
+                        .into_any_element(),
+                )
+            }
+            None => None,
+        }
     }
 }
 
