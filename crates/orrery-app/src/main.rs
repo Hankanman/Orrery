@@ -64,6 +64,7 @@ fn main() {
                             config,
                             attention: Vec::new(),
                             overlay: None,
+                            drawer: Default::default(),
                         }
                     })
                 },

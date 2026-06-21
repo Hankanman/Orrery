@@ -294,10 +294,7 @@ pub fn card(
             .cursor_pointer()
             .on_click(move |_ev, _win, cx| {
                 let id = id.clone();
-                app.update(cx, |this, cx| {
-                    this.open_drawer(id);
-                    cx.notify();
-                });
+                app.update(cx, |this, cx| this.open_drawer(id, cx));
             })
             .child(head)
             .child(slug)
