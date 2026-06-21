@@ -29,7 +29,7 @@ pub struct Row {
     pub favorite: bool,
 }
 
-fn rel_age(last_commit_unix: i64, now: i64) -> String {
+pub(crate) fn rel_age(last_commit_unix: i64, now: i64) -> String {
     if last_commit_unix <= 0 {
         return "—".into();
     }

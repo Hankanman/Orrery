@@ -76,15 +76,21 @@ pub struct OrreryApp {
     pub attention: Vec<String>,
     /// The modal layered over the active view, if any (drawer/palette/dialog).
     pub overlay: Option<Overlay>,
+    /// Async-loaded git data for the open drawer (branches/commits/worktrees).
+    pub drawer: crate::drawer::DrawerData,
 }
 
 impl OrreryApp {
-    /// Open the repo detail drawer for `repo` (id), on the Overview tab.
-    pub fn open_drawer(&mut self, repo: SharedString) {
+    /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
+    /// async git load.
+    pub fn open_drawer(&mut self, repo: SharedString, cx: &mut Context<Self>) {
         self.overlay = Some(Overlay::Drawer {
-            repo,
+            repo: repo.clone(),
             tab: DrawerTab::Overview,
         });
+        self.drawer = crate::drawer::DrawerData::loading(repo.clone());
+        crate::drawer::load_overview(repo, cx);
+        cx.notify();
     }
 
     /// Dismiss whatever overlay is open.
@@ -339,8 +345,16 @@ impl OrreryApp {
                     self.config.agent_command.clone(),
                 );
                 Some(
-                    crate::drawer::drawer(row, *tab, t, &cx.entity(), &cmds.0, &cmds.1)
-                        .into_any_element(),
+                    crate::drawer::drawer(
+                        row,
+                        *tab,
+                        t,
+                        &cx.entity(),
+                        &self.drawer,
+                        &cmds.0,
+                        &cmds.1,
+                    )
+                    .into_any_element(),
                 )
             }
             None => None,
