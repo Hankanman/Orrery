@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use gpui::Context;
 use orrery_platform::appearance::Appearance;
+use orrery_platform::tray::TrayAction;
 
 use crate::data;
 use crate::shell::OrreryApp;
@@ -30,6 +31,10 @@ enum Signal {
     Appearance(Appearance),
     /// Latest attention glance lines — for the Inbox nav badge.
     Attention(Vec<String>),
+    /// Raise the main window (tray: left-click / "Show Orrery").
+    ShowWindow,
+    /// Quit the app (tray: "Quit").
+    Quit,
 }
 
 /// Start the three background watchers and the gpui task that applies their
@@ -55,13 +60,32 @@ pub fn spawn(cx: &mut Context<OrreryApp>) {
     }
 
     // Attention poll → Inbox badge. Notifications fire inside the poller itself.
-    orrery_platform::notifier::watch(move |lines| {
-        let _ = tx.try_send(Signal::Attention(lines));
-    });
+    {
+        let tx = tx.clone();
+        orrery_platform::notifier::watch(move |lines| {
+            let _ = tx.try_send(Signal::Attention(lines));
+        });
+    }
+
+    // System tray. Menu activations come back on the tray thread; forward the
+    // app-level ones onto the channel (Open is handled inside the tray itself).
+    let tray = {
+        let tx = tx.clone();
+        orrery_platform::tray::spawn(move |action| {
+            let signal = match action {
+                TrayAction::Show => Signal::ShowWindow,
+                TrayAction::Rescan => Signal::ReposChanged,
+                TrayAction::Quit => Signal::Quit,
+                TrayAction::Open(_) => return, // handled in the tray
+            };
+            let _ = tx.try_send(signal);
+        })
+    };
 
     // The single foreground consumer. Holds a weak handle to the app entity; it
     // ends naturally when the entity is dropped (its `update` calls start failing
-    // and the channel closes).
+    // and the channel closes). Owns the tray handle so it can push glance +
+    // panel-theme updates to it.
     cx.spawn(async move |this, cx| {
         while let Ok(signal) = rx.recv().await {
             match signal {
@@ -82,6 +106,11 @@ pub fn spawn(cx: &mut Context<OrreryApp>) {
                     }
                 }
                 Signal::Appearance(appearance) => {
+                    // Keep the tray glyph matching the panel (dark unless the
+                    // scheme is explicitly light).
+                    if let Some(tray) = &tray {
+                        tray.set_panel_dark(appearance.color_scheme.as_deref() != Some("light"));
+                    }
                     let accent = appearance.accent.map(|c| (c.r, c.g, c.b));
                     if this
                         .update(cx, |app, cx| {
@@ -94,6 +123,9 @@ pub fn spawn(cx: &mut Context<OrreryApp>) {
                     }
                 }
                 Signal::Attention(lines) => {
+                    if let Some(tray) = &tray {
+                        tray.set_glance(lines.clone());
+                    }
                     if this
                         .update(cx, |app, cx| {
                             app.attention = lines;
@@ -104,6 +136,8 @@ pub fn spawn(cx: &mut Context<OrreryApp>) {
                         break;
                     }
                 }
+                Signal::ShowWindow => cx.update(|cx| cx.activate(true)),
+                Signal::Quit => cx.update(|cx| cx.quit()),
             }
         }
     })
