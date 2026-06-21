@@ -104,6 +104,8 @@ pub fn card(
             .cursor_pointer()
             .child(lucide("star", 16., if fav { t.star } else { t.fg3 }))
             .on_click(move |_ev, _win, cx| {
+                // Don't let the star toggle also open the drawer.
+                cx.stop_propagation();
                 let next = !fav;
                 let _ = cache::set_favorite(&id, next);
                 app.update(cx, |this, cx| {
@@ -279,29 +281,32 @@ pub fn card(
         ));
     }
 
-    // ── card shell (hover lift via border/bg) ─────────────────────────────
-    let (hov_border, hov_bg) = (t.border_accent, t.surface_hover);
-    let mut shell = div()
-        .id(SharedString::from(format!("card-{idx}")))
-        .flex()
-        .flex_1()
-        .flex_col()
-        .min_w(px(0.))
-        .px(px(15.))
-        .py(px(14.))
-        .bg(rgb(t.surface))
-        .border_1()
-        .border_color(rgb(t.border))
-        .rounded(px(t.r_md))
-        .overflow_hidden()
-        .hover(move |s| s.border_color(rgb(hov_border)).bg(rgb(hov_bg)))
-        .child(head)
-        .child(slug)
-        .child(desc);
+    // ── clickable content region → opens the repo drawer ──────────────────
+    // Everything except the launcher row opens the drawer on click; the
+    // launchers (and the favorite star, which stops propagation) act in place.
+    let mut body = {
+        let app = app.clone();
+        let id = row.id.clone();
+        div()
+            .id(SharedString::from(format!("open-{idx}")))
+            .flex()
+            .flex_col()
+            .cursor_pointer()
+            .on_click(move |_ev, _win, cx| {
+                let id = id.clone();
+                app.update(cx, |this, cx| {
+                    this.open_drawer(id);
+                    cx.notify();
+                });
+            })
+            .child(head)
+            .child(slug)
+            .child(desc)
+    };
 
     // AI summary, when present, sits between description and status.
     if !row.ai_summary.is_empty() {
-        shell = shell.child(
+        body = body.child(
             div()
                 .flex()
                 .flex_row()
@@ -317,6 +322,24 @@ pub fn card(
                 .child(row.ai_summary.clone()),
         );
     }
+    body = body.child(status).child(host);
 
-    shell.child(status).child(host).child(acts)
+    // ── card shell (hover lift via border/bg) ─────────────────────────────
+    let (hov_border, hov_bg) = (t.border_accent, t.surface_hover);
+    div()
+        .id(SharedString::from(format!("card-{idx}")))
+        .flex()
+        .flex_1()
+        .flex_col()
+        .min_w(px(0.))
+        .px(px(15.))
+        .py(px(14.))
+        .bg(rgb(t.surface))
+        .border_1()
+        .border_color(rgb(t.border))
+        .rounded(px(t.r_md))
+        .overflow_hidden()
+        .hover(move |s| s.border_color(rgb(hov_border)).bg(rgb(hov_bg)))
+        .child(body)
+        .child(acts)
 }

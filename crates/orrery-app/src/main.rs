@@ -9,6 +9,7 @@
 mod assets;
 mod card;
 mod data;
+mod drawer;
 mod icon;
 mod live;
 mod shell;
@@ -62,6 +63,7 @@ fn main() {
                             theme,
                             config,
                             attention: Vec::new(),
+                            overlay: None,
                         }
                     })
                 },
