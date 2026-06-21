@@ -3,9 +3,10 @@
 //! dismisses it. Tabs: Overview / Changes / PR / Notes / Readme.
 //!
 //! This is the workhorse primitive — most journeys (catch-up, dive, commit, PR
-//! triage) live here. The Overview tab is complete: the synchronous `Row` facts
-//! plus async-loaded branches (switchable), recent commits, and worktrees. The
-//! Changes / PR / Notes / Readme tabs are scaffolds, filled in next.
+//! triage) live here. Done: **Overview** (Row facts + async branches/commits/
+//! worktrees) and **Readme** (lazy-loaded, rendered via `markdown`). The
+//! Changes / PR / Notes tabs are scaffolds — Changes & PR need the network/AI
+//! async bridge (reqwest → tokio) and text input, filled in next.
 
 use gpui::{
     div, px, rgb, rgba, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement,
@@ -55,13 +56,26 @@ pub struct WorktreeRow {
     pub path: SharedString,
 }
 
-/// Async-loaded Overview data for the currently open repo.
+/// Lazy-loaded state for a drawer tab whose data is fetched on first view.
+#[derive(Default, PartialEq)]
+pub enum ReadmeState {
+    /// Not requested yet.
+    #[default]
+    Idle,
+    Loading,
+    /// Loaded — `None` means the repo has no README file.
+    Ready(Option<SharedString>),
+}
+
+/// Async-loaded data for the currently open repo's drawer. Overview loads on
+/// open; the Readme loads lazily when its tab is first shown.
 #[derive(Default)]
 pub struct DrawerData {
     pub repo: SharedString,
     pub branches: Option<Vec<BranchRow>>,
     pub commits: Option<Vec<CommitRow>>,
     pub worktrees: Option<Vec<WorktreeRow>>,
+    pub readme: ReadmeState,
 }
 
 impl DrawerData {
@@ -144,6 +158,39 @@ pub fn switch_branch(repo: SharedString, name: SharedString, cx: &mut Context<Or
     .detach();
 }
 
+/// Lazily load the repo's README (filesystem, sync) when the Readme tab opens.
+pub fn load_readme(repo: SharedString, cx: &mut Context<OrreryApp>) {
+    let id = repo.to_string();
+    cx.spawn(async move |this, cx| {
+        let content = cx
+            .background_executor()
+            .spawn(async move { read_readme(&id) })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo == repo {
+                this.drawer.readme = ReadmeState::Ready(content.map(SharedString::from));
+                cx.notify();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Read the first matching README from the repo root (mirrors the Tauri
+/// `repo_readme` command).
+fn read_readme(id: &str) -> Option<String> {
+    const NAMES: [&str; 5] = [
+        "README.md",
+        "Readme.md",
+        "readme.md",
+        "README.markdown",
+        "README",
+    ];
+    NAMES
+        .iter()
+        .find_map(|name| std::fs::read_to_string(std::path::Path::new(id).join(name)).ok())
+}
+
 fn branch_row(b: git_ops::BranchInfo) -> BranchRow {
     BranchRow {
         name: b.name.into(),
@@ -203,7 +250,7 @@ pub fn drawer(
         .border_l_1()
         .border_color(rgb(t.border))
         .child(header(row, t, app))
-        .child(tab_bar(tab, t, app))
+        .child(tab_bar(tab, t, app, data.repo.clone()))
         .child(body(row, tab, t, data, app))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
@@ -282,7 +329,12 @@ fn header(row: &Row, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
         .child(close)
 }
 
-fn tab_bar(active: DrawerTab, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+fn tab_bar(
+    active: DrawerTab,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+    repo: SharedString,
+) -> impl IntoElement {
     let mut bar = div()
         .flex()
         .flex_row()
@@ -295,6 +347,7 @@ fn tab_bar(active: DrawerTab, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoEl
         let is_active = tab == active;
         let fg = if is_active { t.fg0 } else { t.fg2 };
         let app = app.clone();
+        let repo = repo.clone();
         // 1px underline on the active tab; page-coloured (invisible) otherwise so
         // the row height stays constant.
         let underline = if is_active { t.accent_bright } else { t.page };
@@ -310,9 +363,15 @@ fn tab_bar(active: DrawerTab, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoEl
             .hover(|s| s.text_color(rgb(t.fg0)))
             .child(SharedString::from(label))
             .on_click(move |_ev, _win, cx| {
+                let repo = repo.clone();
                 app.update(cx, |this, cx| {
                     if let Some(Overlay::Drawer { tab: cur, .. }) = &mut this.overlay {
                         *cur = tab;
+                    }
+                    // Lazy-load the tab's data on first view.
+                    if tab == DrawerTab::Readme && this.drawer.readme == ReadmeState::Idle {
+                        this.drawer.readme = ReadmeState::Loading;
+                        load_readme(repo, cx);
                     }
                     cx.notify();
                 });
@@ -331,6 +390,7 @@ fn body(
 ) -> impl IntoElement {
     let content = match tab {
         DrawerTab::Overview => overview(row, t, data, app).into_any_element(),
+        DrawerTab::Readme => readme_view(data, t).into_any_element(),
         other => coming_soon(other, t).into_any_element(),
     };
     div()
@@ -616,6 +676,15 @@ fn worktrees_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
         }
     }
     s
+}
+
+/// Readme tab: the rendered README, or a placeholder while loading / when absent.
+fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
+    match &data.readme {
+        ReadmeState::Ready(Some(src)) => crate::markdown::render(src, t).into_any_element(),
+        ReadmeState::Ready(None) => placeholder("No README in this repo.", t).into_any_element(),
+        _ => placeholder("Loading…", t).into_any_element(),
+    }
 }
 
 /// Placeholder for a tab not yet ported — clearly labelled so it reads as
