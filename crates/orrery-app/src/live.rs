@@ -67,6 +67,14 @@ pub fn spawn(cx: &mut Context<OrreryApp>) {
         });
     }
 
+    // Global shortcut (Ctrl+Alt+O) → raise the window, via the portal.
+    {
+        let tx = tx.clone();
+        orrery_platform::shortcut::spawn(move || {
+            let _ = tx.try_send(Signal::ShowWindow);
+        });
+    }
+
     // System tray. Menu activations come back on the tray thread; forward the
     // app-level ones onto the channel (Open is handled inside the tray itself).
     let tray = {

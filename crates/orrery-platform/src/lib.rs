@@ -3,5 +3,6 @@
 pub mod appearance;
 pub mod notifier;
 pub mod notify;
+pub mod shortcut;
 pub mod tray;
 pub mod watcher;

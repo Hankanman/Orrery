@@ -24,6 +24,10 @@ notify-debouncer-mini = "0.4"                 # inotify live-watch (debounced)
 # thread + executor), so the app needs no extra runtime for the tray.
 ksni = { version = "0.3.5", default-features = false, features = ["async-io", "blocking"] }
 png = "0.18"             # decode the tray glyph PNGs to ARGB for the SNI pixmap
+# Global-shortcut portal (Wayland-native summon hotkey). async-io backend (NOT
+# the default "tokio", which would force zbus/tokio and panic gpui's async-io
+# zbus connections — same constraint as the tray).
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 
 [lints.clippy]
 all = "warn"
