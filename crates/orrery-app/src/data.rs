@@ -1,8 +1,11 @@
 //! Bridge from `orrery-core` (`cache` / `model`) to a flat, render-ready `Row`.
 //! The card reads `Row` and never touches the core's serde types directly.
 
+use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use gpui::SharedString;
-use orrery_core::{cache, model};
+use orrery_core::{cache, config, model, scan};
 
 /// Everything the grid card renders, flattened from `model::Repo`.
 pub struct Row {
@@ -95,11 +98,44 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
         .collect()
 }
 
+/// Current Unix time in seconds (for relative ages); 0 if the clock is before
+/// the epoch.
+pub fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn count_roots(repos: &[model::Repo]) -> usize {
+    repos
+        .iter()
+        .map(|r| r.root.as_str())
+        .collect::<HashSet<&str>>()
+        .len()
+}
+
 /// Load real repos from the shipping SQLite cache. Returns the rows plus the
 /// number of distinct scanned roots (for the header's "N roots · M repos").
 pub fn load(now: i64) -> (Vec<Row>, usize) {
     let repos = cache::load_repos();
-    let roots: std::collections::HashSet<&str> = repos.iter().map(|r| r.root.as_str()).collect();
-    let n_roots = roots.len();
+    let n_roots = count_roots(&repos);
+    (to_rows(repos, now), n_roots)
+}
+
+/// Re-scan the configured roots from disk (git-heavy — call off the UI thread),
+/// refresh the cache, and return render-ready rows + root count. Mirrors the
+/// Tauri `scan_repos` command: the filesystem watcher triggers this so the grid
+/// reflects on-disk changes live.
+pub fn rescan() -> (Vec<Row>, usize) {
+    let now = now_unix();
+    let cfg = config::load();
+    let favorites = cache::favorites();
+    let mut repos = scan::scan(&cfg.roots, cfg.scan_depth, &cfg.ignore, &favorites, now);
+    // Carry over persisted host enrichment (stars/visibility) until a fresh
+    // enrich pass re-confirms it, then snapshot for instant next-launch paint.
+    cache::apply_host_info(&mut repos);
+    let _ = cache::store_repos(&repos);
+    let n_roots = count_roots(&repos);
     (to_rows(repos, now), n_roots)
 }
