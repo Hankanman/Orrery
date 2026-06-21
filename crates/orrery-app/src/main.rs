@@ -12,6 +12,7 @@ mod data;
 mod drawer;
 mod icon;
 mod live;
+mod markdown;
 mod shell;
 mod theme;
 
