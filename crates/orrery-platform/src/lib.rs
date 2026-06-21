@@ -3,4 +3,5 @@
 pub mod appearance;
 pub mod notifier;
 pub mod notify;
+pub mod tray;
 pub mod watcher;

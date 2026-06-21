@@ -15,8 +15,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"         # attention-snapshot dedupe
 zbus = "5"               # D-Bus: appearance portal + desktop notifications
 futures-util = "0.3"     # signal stream
-tokio = { version = "1", features = ["rt", "time"] }  # drive zbus async + the poll interval off the UI thread
+tokio = { version = "1", features = ["rt", "time"] }  # drive the poll interval (+ reqwest) off the UI thread
 notify-debouncer-mini = "0.4"                 # inotify live-watch (debounced)
+# StatusNotifierItem tray (pure D-Bus, no GTK). async-io backend to match gpui's
+# zbus (its portal/accessibility connections); the tokio backend would force
+# every zbus connection in the process — including gpui's — through tokio and
+# panic them. `blocking` gives a synchronous spawn/update API (ksni owns the
+# thread + executor), so the app needs no extra runtime for the tray.
+ksni = { version = "0.3.5", default-features = false, features = ["async-io", "blocking"] }
+png = "0.18"             # decode the tray glyph PNGs to ARGB for the SNI pixmap
 
 [lints.clippy]
 all = "warn"
