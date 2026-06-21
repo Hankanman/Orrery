@@ -5,12 +5,43 @@
 //! tray, a nav badge) and fire notifications however they like.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use orrery_core::model::AppConfig;
-use orrery_core::{cache, inbox, oauth};
+use orrery_core::{cache, config, inbox, oauth};
 
 /// Snapshot of the keys seen on the previous poll, for delta detection.
 const SEEN_KEY: &str = "attention_seen";
+
+/// How often the background poller checks for attention items.
+const POLL_SECS: u64 = 180;
+
+/// Run the attention poller forever on its own thread + async runtime. On each
+/// tick (immediately, then every `POLL_SECS`) it polls GitHub, fires a desktop
+/// notification for every newly-appeared item via [`crate::notify`], and calls
+/// `on_glance` with the current glance lines so the caller can paint a tray or a
+/// nav badge. Owns all threading + the runtime, so callers stay synchronous and
+/// UI-agnostic. No-ops (the thread exits) if a runtime can't be built.
+pub fn watch(on_glance: impl Fn(Vec<String>) + Send + 'static) {
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        rt.block_on(async move {
+            loop {
+                let result = poll(&config::load()).await;
+                on_glance(result.lines);
+                for notice in &result.fresh {
+                    let _ = crate::notify::send(&notice.title, &notice.body).await;
+                }
+                tokio::time::sleep(Duration::from_secs(POLL_SECS)).await;
+            }
+        });
+    });
+}
 
 /// One thing needing attention: a stable key for dedupe, a one-line glance
 /// label, and a title/body for the notification.

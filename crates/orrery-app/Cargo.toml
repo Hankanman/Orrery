@@ -29,6 +29,11 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3",
 # GPUI through an AssetSource. Icons are generated/committed under assets/icons/.
 rust-embed = "8"
 
+# Send desktop signals (filesystem watch / attention poll / appearance change)
+# from their background threads onto the GPUI foreground. async-channel's
+# Receiver is awaitable inside a gpui task; its Sender is Send + Clone.
+async-channel = "2"
+
 [lints.rust]
 unsafe_code = "warn"
 

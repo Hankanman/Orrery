@@ -53,6 +53,9 @@ pub struct OrreryApp {
     pub roots: usize,
     pub theme: Rc<Theme>,
     pub config: AppConfig,
+    /// Current attention glance lines (PRs/reviews/CI) from the background
+    /// poller — drives the Inbox nav badge. Empty until the first poll lands.
+    pub attention: Vec<String>,
 }
 
 impl OrreryApp {
@@ -164,6 +167,12 @@ impl OrreryApp {
                 .child(SharedString::from(label.to_string()));
             if active {
                 item = item.bg(rgb(t.accent_wash));
+            }
+            // The Inbox carries a count badge for items awaiting attention.
+            if view == View::Inbox && !self.attention.is_empty() {
+                item = item
+                    .child(div().flex_1())
+                    .child(badge(self.attention.len(), t));
             }
             nav = nav.child(item);
         }
@@ -286,6 +295,23 @@ fn icon_btn(name: &str, t: &Theme) -> impl IntoElement {
         .rounded(px(t.r_sm))
         .hover(|s| s.bg(rgb(t.surface_hover)))
         .child(lucide(name, 16., t.fg1))
+}
+
+/// A small count pill for the sidebar (e.g. Inbox attention items).
+fn badge(n: usize, t: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .min_w(px(18.))
+        .px(px(5.))
+        .py(px(1.))
+        .rounded(px(t.r_xs))
+        .bg(rgb(t.accent_badge))
+        .font_family("monospace")
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.accent_bright))
+        .child(SharedString::from(n.to_string()))
 }
 
 /// Scaffold for a not-yet-ported view: centered title + note.

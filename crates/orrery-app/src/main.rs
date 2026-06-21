@@ -10,11 +10,11 @@ mod assets;
 mod card;
 mod data;
 mod icon;
+mod live;
 mod shell;
 mod theme;
 
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
 
@@ -22,11 +22,7 @@ use shell::{OrreryApp, View};
 use theme::Theme;
 
 fn main() {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
+    let now = data::now_unix();
     let (rows, roots) = data::load(now);
     eprintln!(
         "[native] loaded {} repos across {} roots",
@@ -55,12 +51,18 @@ fn main() {
                     ..Default::default()
                 },
                 |_window, cx| {
-                    cx.new(|_cx| OrreryApp {
-                        view: View::Grid,
-                        rows,
-                        roots,
-                        theme,
-                        config,
+                    cx.new(|cx| {
+                        // Start the live wiring: filesystem watch, appearance, and
+                        // attention poll all marshal back onto this entity.
+                        live::spawn(cx);
+                        OrreryApp {
+                            view: View::Grid,
+                            rows,
+                            roots,
+                            theme,
+                            config,
+                            attention: Vec::new(),
+                        }
                     })
                 },
             )

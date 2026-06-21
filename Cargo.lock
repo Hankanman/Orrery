@@ -4169,6 +4169,7 @@ dependencies = [
 name = "orrery-app"
 version = "0.0.0"
 dependencies = [
+ "async-channel 2.5.0",
  "gpui",
  "gpui_platform",
  "orrery-core",
