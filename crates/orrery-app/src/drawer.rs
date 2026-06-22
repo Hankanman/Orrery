@@ -12,8 +12,9 @@
 //! the aiReady status, #102).
 
 use gpui::{
-    div, px, rgb, rgba, AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
+    AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, WeakEntity, div, px, rgb,
+    rgba,
 };
 use orrery_core::{cache, git_ops, inbox, launch};
 

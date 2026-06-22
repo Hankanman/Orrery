@@ -23,8 +23,8 @@ mod views;
 use std::rc::Rc;
 
 use gpui::{
-    actions, px, size, App, AppContext, Application, Bounds, KeyBinding, WindowBounds,
-    WindowOptions,
+    App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, actions, px,
+    size,
 };
 
 use shell::{OrreryApp, View};

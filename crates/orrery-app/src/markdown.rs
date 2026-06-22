@@ -3,7 +3,7 @@
 //! Inline spans (bold/italic/links) are rendered as plain text for now; a richer
 //! renderer can replace this without touching callers.
 
-use gpui::{div, px, rgb, Div, FontWeight, IntoElement, ParentElement, SharedString, Styled};
+use gpui::{Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 
 use crate::theme::Theme;
 
@@ -43,10 +43,10 @@ pub fn render(src: &str, t: &Theme) -> Div {
         // blank lines just produce the column gap
     }
     // Unterminated fence: still render what we captured.
-    if let Some(lines) = code {
-        if !lines.is_empty() {
-            col = col.child(code_block(&lines, t));
-        }
+    if let Some(lines) = code
+        && !lines.is_empty()
+    {
+        col = col.child(code_block(&lines, t));
     }
     col
 }

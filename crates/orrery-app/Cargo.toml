@@ -4,7 +4,7 @@
 [package]
 name = "orrery-app"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [[bin]]
@@ -17,13 +17,14 @@ orrery-core = { path = "../orrery-core" }
 # Desktop integration (system accent / appearance, …).
 orrery-platform = { path = "../orrery-platform" }
 
-# GPU-native UI toolkit. Pinned to a Zed release tag (not on crates.io).
-gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
-# v1.6.3 moved platform construction out of gpui; the window/Vulkan factory lives
-# here. A compositor feature is REQUIRED on Linux or gpui_linux compiles out its
-# compositor arms and panics with `unreachable!()` at startup. Wayland session →
-# `wayland` suffices; add "x11" under Xorg (needs the libxkbcommon-x11 dev lib).
-gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3", features = ["wayland"] }
+# GPU-native UI toolkit. Pinned to the exact Zed rev that gpui-component tracks,
+# so both resolve to one gpui (git deps unify by url + rev). Not on crates.io.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+# Platform/window factory; features match gpui-component's so its components and
+# our window construction agree. A compositor feature is REQUIRED on Linux.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+# Component library: multiline input, markdown, switches/dropdowns/lists, etc.
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 
 # Embed the SVG icon assets into the binary (no runtime file deps), served to
 # GPUI through an AssetSource. Icons are generated/committed under assets/icons/.

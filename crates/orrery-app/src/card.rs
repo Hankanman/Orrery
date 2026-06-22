@@ -7,25 +7,25 @@
 //! handler/hover closure captures owned values — never a borrow of `&Theme`.
 
 use gpui::{
-    div, px, rgb, App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled,
+    App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, rgb,
 };
 use orrery_core::{cache, launch};
 
 use crate::data::Row;
 use crate::icon::{brand, langicon, lucide};
 use crate::shell::OrreryApp;
-use crate::theme::{devicon_stem, lang_color, Theme};
+use crate::theme::{Theme, devicon_stem, lang_color};
 
 const MONO: &str = "monospace";
 
 /// The language mark: the multicolor devicon when one is bundled, else the
 /// brand-color dot (no devicon for this language).
 fn lang_mark(language: &str, t: &Theme) -> gpui::AnyElement {
-    if let Some(stem) = devicon_stem(language) {
-        if crate::assets::has_icon(&format!("devicon/{stem}.svg")) {
-            return langicon(stem, 16.).into_any_element();
-        }
+    if let Some(stem) = devicon_stem(language)
+        && crate::assets::has_icon(&format!("devicon/{stem}.svg"))
+    {
+        return langicon(stem, 16.).into_any_element();
     }
     div()
         .w(px(9.))

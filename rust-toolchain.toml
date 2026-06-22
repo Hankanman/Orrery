@@ -1,6 +1,6 @@
-# GPUI (Zed v1.6.3) requires Rust 1.95.0 (std::hint::cold_path, stabilized in
-# 1.95). Pinned workspace-wide; the legacy src-tauri crate also builds fine on
-# 1.95 (verified), so a single toolchain covers everything.
+# Pinned workspace-wide to current stable. orrery-app is on edition 2024 (gpui +
+# gpui-component, both pinned to Zed rev 1d217ee); orrery-core/platform and the
+# legacy src-tauri crate build on the same toolchain, so one channel covers all.
 [toolchain]
 channel = "1.95.0"
 profile = "minimal"

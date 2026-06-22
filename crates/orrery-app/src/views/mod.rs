@@ -3,8 +3,8 @@
 //! loaded lazily when its nav item is selected. Shared chrome lives here.
 
 use gpui::{
-    div, px, rgb, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled,
+    Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, rgb,
 };
 
 use crate::icon::lucide;
