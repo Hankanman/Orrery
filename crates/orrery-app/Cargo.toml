@@ -34,6 +34,11 @@ rust-embed = "8"
 # Receiver is awaitable inside a gpui task; its Sender is Send + Clone.
 async-channel = "2"
 
+# The shared runtime that drives async (reqwest-backed) core calls — forge/inbox/
+# ai/oauth — whose results marshal onto the GPUI foreground (see task.rs). gpui
+# has no tokio reactor, so network UI data needs an in-app runtime.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+
 [lints.rust]
 unsafe_code = "warn"
 

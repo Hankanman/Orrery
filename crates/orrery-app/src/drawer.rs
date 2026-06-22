@@ -4,15 +4,16 @@
 //!
 //! This is the workhorse primitive — most journeys (catch-up, dive, commit, PR
 //! triage) live here. Done: **Overview** (Row facts + async branches/commits/
-//! worktrees) and **Readme** (lazy-loaded, rendered via `markdown`). The
-//! Changes / PR / Notes tabs are scaffolds — Changes & PR need the network/AI
-//! async bridge (reqwest → tokio) and text input, filled in next.
+//! worktrees), **Readme** (lazy, rendered via `markdown`), and **PR** (lazy,
+//! GitHub-only, via the `task` tokio bridge — checks/review/mergeable rollups +
+//! inline approve/merge). The Changes / Notes tabs are scaffolds; both need text
+//! input (the command-palette focus work), filled in next.
 
 use gpui::{
     div, px, rgb, rgba, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
 };
-use orrery_core::{git_ops, launch};
+use orrery_core::{git_ops, inbox, launch};
 
 use crate::data::{self, Row};
 use crate::icon::{brand, lucide};
@@ -67,8 +68,35 @@ pub enum ReadmeState {
     Ready(Option<SharedString>),
 }
 
+/// A render-ready open pull request (flattened from `inbox::PrDetail`).
+pub struct PrRow {
+    pub number: u64,
+    pub title: SharedString,
+    pub url: SharedString,
+    pub draft: bool,
+    pub author: SharedString,
+    pub refs: SharedString,      // "head → base"
+    pub mergeable: SharedString, // clean | conflicting | unknown
+    pub review: SharedString,    // approved | changes_requested | review_required | none
+    pub checks: SharedString,    // success | failure | pending | none
+}
+
+/// Lazy-loaded PR panel state (network).
+#[derive(Default)]
+pub enum PrState {
+    #[default]
+    Idle,
+    Loading,
+    Ready {
+        methods: Vec<SharedString>,
+        prs: Vec<PrRow>,
+    },
+    /// Not applicable (non-GitHub) or the fetch failed.
+    Error(SharedString),
+}
+
 /// Async-loaded data for the currently open repo's drawer. Overview loads on
-/// open; the Readme loads lazily when its tab is first shown.
+/// open; the Readme and PR panel load lazily when their tabs are first shown.
 #[derive(Default)]
 pub struct DrawerData {
     pub repo: SharedString,
@@ -76,6 +104,7 @@ pub struct DrawerData {
     pub commits: Option<Vec<CommitRow>>,
     pub worktrees: Option<Vec<WorktreeRow>>,
     pub readme: ReadmeState,
+    pub pr: PrState,
 }
 
 impl DrawerData {
@@ -215,6 +244,95 @@ fn worktree_row(w: git_ops::WorktreeInfo) -> WorktreeRow {
     }
 }
 
+fn pr_row(p: inbox::PrDetail) -> PrRow {
+    PrRow {
+        number: p.number,
+        title: p.title.into(),
+        url: p.url.into(),
+        draft: p.draft,
+        author: p.author.unwrap_or_default().into(),
+        refs: format!("{} → {}", p.head, p.base).into(),
+        mergeable: p.mergeable.into(),
+        review: p.review_decision.into(),
+        checks: p.checks_state.into(),
+    }
+}
+
+fn ready_pr(panel: inbox::PrPanel) -> PrState {
+    PrState::Ready {
+        methods: panel.merge_methods.into_iter().map(Into::into).collect(),
+        prs: panel.prs.into_iter().map(pr_row).collect(),
+    }
+}
+
+/// Lazily load the GitHub PR panel for `repo` (slug = owner/name). Network — runs
+/// on the shared tokio runtime via [`crate::task`].
+pub fn load_pr(repo: SharedString, slug: SharedString, cx: &mut Context<OrreryApp>) {
+    let s = slug.to_string();
+    cx.spawn(async move |this, cx| {
+        let result = crate::task::run(async move { inbox::github_prs(&s).await }).await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo != repo {
+                return;
+            }
+            this.drawer.pr = result
+                .map(ready_pr)
+                .unwrap_or_else(|e| PrState::Error(e.into()));
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Merge PR `number` via `method`, then refresh the panel. Caller sets the
+/// loading state.
+fn merge_pr(
+    repo: SharedString,
+    slug: SharedString,
+    number: u64,
+    method: String,
+    cx: &mut Context<OrreryApp>,
+) {
+    let (do_slug, re_slug) = (slug.to_string(), slug.to_string());
+    cx.spawn(async move |this, cx| {
+        let _ = crate::task::run(
+            async move { inbox::github_merge_pr(&do_slug, number, &method).await },
+        )
+        .await;
+        let panel = crate::task::run(async move { inbox::github_prs(&re_slug).await }).await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo != repo {
+                return;
+            }
+            this.drawer.pr = panel
+                .map(ready_pr)
+                .unwrap_or_else(|e| PrState::Error(e.into()));
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Approve PR `number`, then refresh the panel. Caller sets the loading state.
+fn approve_pr(repo: SharedString, slug: SharedString, number: u64, cx: &mut Context<OrreryApp>) {
+    let (do_slug, re_slug) = (slug.to_string(), slug.to_string());
+    cx.spawn(async move |this, cx| {
+        let _ =
+            crate::task::run(async move { inbox::github_approve_pr(&do_slug, number).await }).await;
+        let panel = crate::task::run(async move { inbox::github_prs(&re_slug).await }).await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo != repo {
+                return;
+            }
+            this.drawer.pr = panel
+                .map(ready_pr)
+                .unwrap_or_else(|e| PrState::Error(e.into()));
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn drawer(
     row: &Row,
@@ -250,7 +368,7 @@ pub fn drawer(
         .border_l_1()
         .border_color(rgb(t.border))
         .child(header(row, t, app))
-        .child(tab_bar(tab, t, app, data.repo.clone()))
+        .child(tab_bar(tab, t, app, data.repo.clone(), github_slug(row)))
         .child(body(row, tab, t, data, app))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
@@ -329,11 +447,17 @@ fn header(row: &Row, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
         .child(close)
 }
 
+/// The owner/name slug if this repo is a usable GitHub remote, else `None`.
+fn github_slug(row: &Row) -> Option<SharedString> {
+    (row.host.as_ref() == "github" && row.slug.as_ref() != "no remote").then(|| row.slug.clone())
+}
+
 fn tab_bar(
     active: DrawerTab,
     t: &Theme,
     app: &Entity<OrreryApp>,
     repo: SharedString,
+    pr_slug: Option<SharedString>,
 ) -> impl IntoElement {
     let mut bar = div()
         .flex()
@@ -348,6 +472,7 @@ fn tab_bar(
         let fg = if is_active { t.fg0 } else { t.fg2 };
         let app = app.clone();
         let repo = repo.clone();
+        let pr_slug = pr_slug.clone();
         // 1px underline on the active tab; page-coloured (invisible) otherwise so
         // the row height stays constant.
         let underline = if is_active { t.accent_bright } else { t.page };
@@ -363,7 +488,7 @@ fn tab_bar(
             .hover(|s| s.text_color(rgb(t.fg0)))
             .child(SharedString::from(label))
             .on_click(move |_ev, _win, cx| {
-                let repo = repo.clone();
+                let (repo, pr_slug) = (repo.clone(), pr_slug.clone());
                 app.update(cx, |this, cx| {
                     if let Some(Overlay::Drawer { tab: cur, .. }) = &mut this.overlay {
                         *cur = tab;
@@ -372,6 +497,16 @@ fn tab_bar(
                     if tab == DrawerTab::Readme && this.drawer.readme == ReadmeState::Idle {
                         this.drawer.readme = ReadmeState::Loading;
                         load_readme(repo, cx);
+                    } else if tab == DrawerTab::Pr && matches!(this.drawer.pr, PrState::Idle) {
+                        match pr_slug {
+                            Some(slug) => {
+                                this.drawer.pr = PrState::Loading;
+                                load_pr(repo, slug, cx);
+                            }
+                            None => {
+                                this.drawer.pr = PrState::Error("PR triage is GitHub-only.".into());
+                            }
+                        }
                     }
                     cx.notify();
                 });
@@ -391,6 +526,7 @@ fn body(
     let content = match tab {
         DrawerTab::Overview => overview(row, t, data, app).into_any_element(),
         DrawerTab::Readme => readme_view(data, t).into_any_element(),
+        DrawerTab::Pr => pr_view(row, data, t, app).into_any_element(),
         other => coming_soon(other, t).into_any_element(),
     };
     div()
@@ -522,13 +658,13 @@ fn section(t: &Theme, title: &str, count: Option<usize>) -> Div {
     div().flex().flex_col().gap(px(3.)).child(head.mb(px(3.)))
 }
 
-/// A muted "Loading…" / empty placeholder line.
-fn placeholder(text: &str, t: &Theme) -> impl IntoElement {
+/// A muted "Loading…" / empty / error placeholder line.
+fn placeholder(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement {
     div()
         .py(px(3.))
         .text_size(px(t.text_data_sm))
         .text_color(rgb(t.fg3))
-        .child(SharedString::from(text.to_string()))
+        .child(text.into())
 }
 
 /// A small bordered pill tag (merged / gone).
@@ -676,6 +812,207 @@ fn worktrees_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
         }
     }
     s
+}
+
+/// Colour a PR state string (checks / mergeable / review) by sentiment.
+fn state_color(s: &str, t: &Theme) -> u32 {
+    match s {
+        "success" | "clean" | "approved" => t.clean,
+        "failure" | "conflicting" | "changes_requested" => t.behind,
+        "pending" => t.fg2,
+        _ => t.fg3,
+    }
+}
+
+/// PR tab: the open pull requests with checks/review/mergeable rollups and inline
+/// approve / merge actions.
+fn pr_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    match &data.pr {
+        PrState::Ready { prs, .. } if prs.is_empty() => {
+            placeholder("No open pull requests.", t).into_any_element()
+        }
+        PrState::Ready { methods, prs } => {
+            let repo = row.id.clone();
+            let slug = row.slug.clone();
+            let mut col = div().flex().flex_col().gap(px(10.));
+            for pr in prs {
+                col = col.child(pr_card(pr, methods, repo.clone(), slug.clone(), t, app));
+            }
+            col.into_any_element()
+        }
+        PrState::Error(e) => placeholder(e.clone(), t).into_any_element(),
+        _ => placeholder("Loading…", t).into_any_element(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pr_card(
+    pr: &PrRow,
+    methods: &[SharedString],
+    repo: SharedString,
+    slug: SharedString,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    // Title row (click opens the PR on the host).
+    let title = {
+        let url = pr.url.clone();
+        let mut row = div()
+            .id(SharedString::from(format!("pr-{}", pr.number)))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .child(
+                div()
+                    .font_family(MONO)
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg3))
+                    .child(SharedString::from(format!("#{}", pr.number))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(t.text_small))
+                    .text_color(rgb(t.fg0))
+                    .child(pr.title.clone()),
+            )
+            .on_click(move |_ev, _win, _cx| {
+                let _ = launch::open(&url);
+            });
+        if pr.draft {
+            row = row.child(tag("draft", t.fg3, t));
+        }
+        row
+    };
+
+    // State rollups.
+    let states = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(8.))
+        .child(seg("git-pull-request", pr.refs.clone(), t.fg2))
+        .child(seg_str(
+            "circle-check",
+            &pr.checks,
+            state_color(&pr.checks, t),
+        ))
+        .child(seg_str(
+            "git-merge",
+            &pr.mergeable,
+            state_color(&pr.mergeable, t),
+        ))
+        .child(seg_str("eye", &pr.review, state_color(&pr.review, t)));
+
+    // Actions: approve + each allowed merge method.
+    let mut actions = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(6.))
+        .child(pr_btn(
+            SharedString::from(format!("approve-{}", pr.number)),
+            "Approve",
+            t,
+            {
+                let (repo, slug, number) = (repo.clone(), slug.clone(), pr.number);
+                let app = app.clone();
+                move |cx: &mut gpui::App| {
+                    let (repo, slug) = (repo.clone(), slug.clone());
+                    app.update(cx, |this, cx| {
+                        this.drawer.pr = PrState::Loading;
+                        approve_pr(repo, slug, number, cx);
+                        cx.notify();
+                    });
+                }
+            },
+        ));
+    for method in methods {
+        let label = capitalize(method);
+        actions = actions.child(pr_btn(
+            SharedString::from(format!("merge-{}-{method}", pr.number)),
+            &label,
+            t,
+            {
+                let (repo, slug, number, method) =
+                    (repo.clone(), slug.clone(), pr.number, method.to_string());
+                let app = app.clone();
+                move |cx: &mut gpui::App| {
+                    let (repo, slug, method) = (repo.clone(), slug.clone(), method.clone());
+                    app.update(cx, |this, cx| {
+                        this.drawer.pr = PrState::Loading;
+                        merge_pr(repo, slug, number, method, cx);
+                        cx.notify();
+                    });
+                }
+            },
+        ));
+    }
+
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .p(px(11.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(t.surface))
+        .border_1()
+        .border_color(rgb(t.border))
+        .child(title)
+        .child(states);
+    if !pr.author.is_empty() {
+        card = card.child(
+            div()
+                .font_family(MONO)
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg3))
+                .child(SharedString::from(format!("by {}", pr.author))),
+        );
+    }
+    card.child(actions)
+}
+
+/// A small PR action button.
+fn pr_btn(
+    id: SharedString,
+    label: &str,
+    t: &Theme,
+    on: impl Fn(&mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let (hov_border, hov_fg) = (t.border_strong, t.fg0);
+    div()
+        .id(id)
+        .px(px(10.))
+        .py(px(5.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(t.button_bg))
+        .border_1()
+        .border_color(rgb(t.border))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg1))
+        .cursor_pointer()
+        .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
+        .child(SharedString::from(label.to_string()))
+        .on_click(move |_ev, _win, cx| on(cx))
+}
+
+/// Title-case a lowercase merge-method name ("squash" → "Squash").
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Like [`seg`] but takes a `&str` label.
+fn seg_str(icon: &str, label: &str, color: u32) -> impl IntoElement {
+    seg(icon, SharedString::from(label.to_string()), color)
 }
 
 /// Readme tab: the rendered README, or a placeholder while loading / when absent.
