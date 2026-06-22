@@ -105,6 +105,8 @@ pub struct OrreryApp {
     pub github_device: Option<crate::views::settings::GithubDevice>,
     /// Live AI-backend reachability (Settings AI panel).
     pub ai_status: crate::views::settings::AiStatus,
+    /// AI is enabled and reachable — gates semantic search + AI affordances.
+    pub ai_ready: bool,
     /// Whether the system tray came up — gates close-to-tray.
     pub tray_active: bool,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
@@ -146,6 +148,7 @@ impl OrreryApp {
                 d.selected = 0;
             }
             this.trigger_code_search(cx);
+            this.trigger_semantic_search(cx);
             cx.notify();
         });
         let fh = query.read(cx).focus_handle(cx);
@@ -153,6 +156,7 @@ impl OrreryApp {
             query,
             selected: 0,
             code: Vec::new(),
+            semantic: Vec::new(),
             generation: 0,
             _sub: sub,
         }));
@@ -287,7 +291,7 @@ impl OrreryApp {
     fn palette_items(&self, cx: &Context<Self>) -> Vec<crate::palette::PaletteItem> {
         match &self.overlay {
             Some(Overlay::Palette(d)) => {
-                crate::palette::items(&self.rows, &d.code, &d.query.read(cx).value())
+                crate::palette::items(&self.rows, &d.code, &d.semantic, &d.query.read(cx).value())
             }
             _ => Vec::new(),
         }
@@ -361,6 +365,49 @@ impl OrreryApp {
                         d.code = results.into_iter().map(crate::palette::code_hit).collect();
                         cx.notify();
                     }
+            });
+        })
+        .detach();
+    }
+
+    /// Debounced semantic (embedding) repo search for the current query. Gated
+    /// on AI being ready; reuses the code-search generation for stale-drop.
+    fn trigger_semantic_search(&mut self, cx: &mut Context<Self>) {
+        if !self.ai_ready {
+            return;
+        }
+        let (query, generation) = match &self.overlay {
+            Some(Overlay::Palette(d)) => (d.query.read(cx).value().to_string(), d.generation),
+            _ => return,
+        };
+        if query.trim().len() < 2 {
+            if let Some(Overlay::Palette(d)) = &mut self.overlay {
+                d.semantic.clear();
+            }
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(260))
+                .await;
+            // Bail if a newer keystroke superseded this search.
+            let current = this
+                .update(cx, |this, _| {
+                    matches!(&this.overlay, Some(Overlay::Palette(d)) if d.generation == generation)
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let hits =
+                crate::task::run(async move { orrery_core::semantic::search(&query).await }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(Overlay::Palette(d)) = &mut this.overlay
+                    && d.generation == generation
+                {
+                    d.semantic = hits.into_iter().map(|(id, _)| id.into()).collect();
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -636,11 +683,57 @@ impl OrreryApp {
                 AiStatus::Offline
             };
             let _ = this.update(cx, |this, cx| {
+                let ready = up && this.config.ai_enabled;
                 this.ai_status = status;
+                this.ai_ready = ready;
+                // Reachable now → (re)build the semantic index so the palette can
+                // search by meaning.
+                if ready {
+                    this.index_semantic();
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// One-shot at launch: if AI is enabled and reachable, mark it ready and
+    /// kick off the semantic index (so Ctrl+K works without opening Settings).
+    pub fn ai_startup(&mut self, cx: &mut Context<Self>) {
+        if !self.config.ai_enabled {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let up = crate::task::run(orrery_core::ai::available()).await;
+            let _ = this.update(cx, |this, _cx| {
+                this.ai_ready = up;
+                if up {
+                    this.index_semantic();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// (Re)build the semantic embedding index from the current rows, off the UI
+    /// thread. Cheap when nothing changed (core skips unchanged repos).
+    pub fn index_semantic(&self) {
+        if !self.ai_ready {
+            return;
+        }
+        let items: Vec<(String, String)> = self
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.id.to_string(),
+                    format!("{} {} {} {}", r.name, r.slug, r.language, r.description),
+                )
+            })
+            .collect();
+        crate::task::spawn_detached(async move {
+            let _ = orrery_core::semantic::index(&items).await;
+        });
     }
 
     /// Pull (download) a model on the AI backend, then refresh the status.
@@ -1299,7 +1392,7 @@ impl OrreryApp {
             }
             Some(Overlay::Palette(data)) => {
                 let query = data.query.read(cx).value();
-                let items = crate::palette::items(&self.rows, &data.code, &query);
+                let items = crate::palette::items(&self.rows, &data.code, &data.semantic, &query);
                 Some(
                     crate::palette::render(data, &items, &self.rows, t, &cx.entity())
                         .into_any_element(),

@@ -110,6 +110,9 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> bool {
                     let applied = this.update(cx, |app, cx| {
                         app.rows = rows;
                         app.roots = roots;
+                        // New/changed repos → refresh the semantic index (cheap
+                        // when unchanged; a no-op unless AI is ready).
+                        app.index_semantic();
                         cx.notify();
                     });
                     if applied.is_err() {

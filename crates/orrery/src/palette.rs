@@ -1,7 +1,7 @@
 //! Command palette (Ctrl+K) — a centered overlay with a query field over a
-//! filtered list of actions, repositories, and cross-repo code-search hits. Arrow
-//! keys move the selection, Enter runs it, Esc closes. Semantic search (gated on
-//! aiReady) lands on top of this in a follow-up.
+//! filtered list of actions, repositories (by substring and, when AI is ready,
+//! by meaning), and cross-repo code-search hits. Arrow keys move the selection,
+//! Enter runs it, Esc closes.
 //!
 //! State lives in `Overlay::Palette(PaletteData)`; the action handlers + executor
 //! are methods on `OrreryApp` (shell.rs). This module owns the item model + the
@@ -37,7 +37,10 @@ pub struct PaletteData {
     pub selected: usize,
     /// Cross-repo ripgrep results for the current query (debounced).
     pub code: Vec<CodeHit>,
-    /// Query generation, for debouncing/dropping stale code searches.
+    /// Repo ids ranked by semantic similarity to the query (debounced; empty
+    /// unless AI is ready). Surfaced as repo rows the substring filter missed.
+    pub semantic: Vec<SharedString>,
+    /// Query generation, for debouncing/dropping stale searches.
     pub generation: u64,
     /// Keeps the query-observation alive (re-renders the app on each keystroke).
     pub _sub: Subscription,
@@ -88,12 +91,20 @@ pub enum PaletteItem {
 
 const ACTIONS: [PaletteAction; 2] = [PaletteAction::Rescan, PaletteAction::Settings];
 
-/// Build the filtered result list for `query`: actions, then matching repos,
-/// then code-search hits. Must be deterministic — the executor rebuilds it to
-/// resolve the selected index.
-pub fn items(rows: &[Row], code: &[CodeHit], query: &str) -> Vec<PaletteItem> {
+/// Build the filtered result list for `query`: actions, matching repos (by
+/// substring, then semantic matches the substring filter missed), then
+/// code-search hits. Must be deterministic — the executor rebuilds it to resolve
+/// the selected index.
+pub fn items(
+    rows: &[Row],
+    code: &[CodeHit],
+    semantic: &[SharedString],
+    query: &str,
+) -> Vec<PaletteItem> {
+    use std::collections::HashSet;
     let q = query.trim().to_lowercase();
     let mut out = Vec::new();
+    let mut shown: HashSet<usize> = HashSet::new();
 
     for a in ACTIONS {
         if q.is_empty() || a.label().to_lowercase().contains(&q) {
@@ -106,15 +117,21 @@ pub fn items(rows: &[Row], code: &[CodeHit], query: &str) -> Vec<PaletteItem> {
             || r.name.to_lowercase().contains(&q)
             || r.slug.to_lowercase().contains(&q)
             || r.path.to_lowercase().contains(&q);
-        if hit {
+        if hit && shown.insert(i) {
             out.push(PaletteItem::Repo(i));
-            if out
-                .iter()
-                .filter(|it| matches!(it, PaletteItem::Repo(_)))
-                .count()
-                >= MAX_REPOS
-            {
+            if shown.len() >= MAX_REPOS {
                 break;
+            }
+        }
+    }
+
+    // Semantic (meaning) matches the substring pass didn't already surface.
+    if !q.is_empty() {
+        for id in semantic {
+            if let Some(i) = rows.iter().position(|r| &r.id == id)
+                && shown.insert(i)
+            {
+                out.push(PaletteItem::Repo(i));
             }
         }
     }
