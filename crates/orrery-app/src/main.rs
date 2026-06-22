@@ -18,6 +18,7 @@ mod shell;
 mod task;
 mod text_input;
 mod theme;
+mod views;
 
 use std::rc::Rc;
 
@@ -96,6 +97,7 @@ fn main() {
                             attention: Vec::new(),
                             overlay: None,
                             drawer: Default::default(),
+                            inbox: Default::default(),
                             focus: cx.focus_handle(),
                         }
                     });
