@@ -12,31 +12,39 @@ This is the living design reference. Decisions here were settled during the desi
 
 An orrery is a clockwork model of a solar system — orbiting bodies you survey at a glance. The metaphor maps directly: your projects as a little system you oversee, with "stars" built in.
 
-## Stack (locked)
+## Stack
+
+> History: Orrery began as a Tauri 2 + React/TypeScript app (Rust core ↔ webview
+> over IPC). It was rewritten as a **native Rust GPUI app** — the webview was
+> CPU-bound on the NVIDIA path; GPU compositing removed that bottleneck. The
+> tables below describe the current stack.
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Shell | **Tauri 2** | Rust core ↔ webview over IPC; small binary, native feel |
-| Frontend | **Vite + React + TypeScript + Tailwind + shadcn/ui** | TanStack Router for client-side routing. *Not* Next.js — static export disables everything useful in a desktop app. |
+| UI | **GPUI** (Zed's GPU UI framework) | Native Rust, in-process — no webview, no IPC. `gpui-component` for widgets |
+| Rendering | **`blade` (Vulkan)** | GPU-composited; Wayland/X11 direct |
 | Aesthetic | **Dark, dense, "mission control"** | 4–5 cards/row, data-rich, neon accents |
 | Git | **`git2`** (libgit2) | No per-repo subprocess |
 | Persistence | **SQLite** + **TOML config** | `~/.local/share/orrery/` (cache, models), `~/.config/orrery/config.toml` |
-| Hosts *(Ph.2)* | **`GitForge` trait** | GitHub (`octocrab`) + GitLab (incl. self-hosted), device-flow OAuth |
-| AI *(Ph.3)* | embedded **llama.cpp** | Inference engine shipped in binary; GGUF weights downloaded on first run |
+| Hosts | **`GitForge` providers** | GitHub + GitLab (incl. self-hosted), device-flow OAuth |
+| AI | **Ollama** or embedded **llama.cpp** | Ollama over HTTP, or a bundled `llama-server` (GGUF weights downloaded on first run) |
 
 ## Architecture
 
+A three-crate Cargo workspace; the UI calls the core directly (no IPC boundary).
+
 ```
-┌─────────────────────────── Rust core (src-tauri) ───────────────────────────┐
+┌──────────────────────────────── orrery-core ────────────────────────────────┐
 │  Config (toml)   Scanner (walk→.git)   GitMeta (git2)   Launcher (templates) │
 │  Cache (SQLite)  GitForge providers ── GitHub | GitLab(+self-hosted)         │
-│  AiService (llama.cpp, bundled engine + downloaded GGUF)                     │
-└───────────────────────────────── IPC commands ──────────────────────────────┘
-                                      ↕
-┌──────────────────────── Frontend (Vite + React) ────────────────────────────┐
-│  Grid view · Card · Filters/sort/search · Command palette (cmdk) · Settings  │
-│  Starred/Followed browser (Ph.4)                                             │
+│  AiService (Ollama / bundled llama.cpp + downloaded GGUF)                    │
 └──────────────────────────────────────────────────────────────────────────┘
+        ↑ direct calls (sync git/fs on a bg pool; network via a tokio bridge)
+┌──────────────────────── orrery (GPUI app) ──────┬─── orrery-platform ────────┐
+│  Shell · Card · Drawer · Command palette ·       │  appearance · tray ·       │
+│  views/ (Inbox/Feed/Explore/Cleanup/Agents/      │  notify · watcher ·        │
+│  DevTools/Settings) · new-project dialog         │  shortcut · agent detect   │
+└──────────────────────────────────────────────────┴────────────────────────┘
 ```
 
 ## Repo identity / name resolution
