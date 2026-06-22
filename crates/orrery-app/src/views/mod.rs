@@ -17,6 +17,7 @@ pub mod devtools;
 pub mod explore;
 pub mod feed;
 pub mod inbox;
+pub mod newproject;
 pub mod settings;
 
 /// A small bordered text button that runs `on` (no app-state capture needed).
