@@ -24,6 +24,11 @@ const LUCIDE_ICONS = [
   "folder-open", "external-link", "sparkles",
   // sidebar footer
   "hard-drive",
+  // drawer (header/tabs/overview/pr/notes)
+  "x", "check", "folder-tree", "history",
+  "git-pull-request", "git-merge", "circle-check", "eye",
+  // command palette
+  "box", "file-search",
 ];
 
 // Language marks: multicolor devicon "-original" SVGs, rendered in full color
