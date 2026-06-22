@@ -16,7 +16,7 @@ A Linux-native command center that puts every repo in your dev directories into 
 
 ---
 
-> **Status:** 🚧 Early development, but functional. The core is built — Mission Control, multi-host enrichment, launchers, Inbox/Feed/Explore, and local AI all work. There's no packaged release yet, so it's [built from source](https://hankanman.github.io/Orrery/guide/getting-started). Expect rough edges; track progress in [the issues](../../issues).
+> **Status:** 🚧 Early development, but functional. Now a **native Rust app on GPUI** (no webview) — the earlier Tauri 2 + React build was rewritten for GPU rendering. Mission Control, multi-host enrichment, launchers, Inbox/Feed/Explore/Cleanup/Agents/Dev Tools, and local AI all work. Tagged releases produce `.deb`/`.rpm`/`.AppImage`; you can also [build from source](https://hankanman.github.io/Orrery/guide/getting-started). Expect rough edges; track progress in [the issues](../../issues).
 
 ## What is it?
 
@@ -48,35 +48,38 @@ There's no great *workspace dashboard* for Linux. GitKraken is heavy and git-foc
 
 | Layer | Choice |
 |---|---|
-| Shell | [Tauri 2](https://tauri.app) — Rust core ↔ webview |
-| Frontend | Vite + React + TypeScript + Tailwind + [shadcn/ui](https://ui.shadcn.com), [TanStack Router](https://tanstack.com/router) + Virtual |
+| UI | Native Rust on [GPUI](https://www.gpui.rs) (Zed's GPU UI framework) — no webview |
+| Rendering | GPU via `blade` (Vulkan), Wayland/X11 direct; [gpui-component](https://github.com/longbridge/gpui-component) widgets |
 | Git | `git2` (libgit2, vendored) |
 | Persistence | SQLite (`rusqlite`, bundled) + TOML config (XDG dirs) |
 | Hosts | GitHub + GitLab REST/GraphQL via `reqwest` (rustls), incl. self-hosted |
-| Local AI | [Ollama](https://ollama.com) over HTTP — summaries, commit messages, embeddings |
-| Desktop | `zbus` (D-Bus theme/accent), tray icon, global shortcut, notifications |
+| Local AI | [Ollama](https://ollama.com) / bundled [llama.cpp](https://github.com/ggml-org/llama.cpp) — summaries, commit messages, embeddings |
+| Desktop | `zbus` (D-Bus theme/accent), `ksni` tray, global shortcut, notifications |
+
+It's a three-crate Cargo workspace: `orrery-core` (logic), `orrery-platform`
+(Linux desktop integration), `orrery` (the GPUI app + binary).
 
 ## Building
 
-Prerequisites: a recent **Rust** toolchain, **Node + pnpm**, and the Tauri Linux
-system libraries (`webkit2gtk-4.1`, `gtk3`, `libsoup-3.0`, `librsvg2`, plus a C
-toolchain and `pkg-config`).
+Prerequisites: a recent **Rust** toolchain and the GPUI system libraries (Vulkan
+loader + headers, Wayland, `libxkbcommon`, `libxcb`, `fontconfig`, plus a C/C++
+toolchain, `cmake`, and `pkg-config`). `bash scripts/setup.sh` installs them
+per-distro. **Node + pnpm are optional** — only the docs site and the icon
+generator use them.
 
 ```bash
-pnpm install          # install JS deps
-pnpm tauri dev        # run the desktop app (Vite + Rust core)
-pnpm tauri:build      # produce release bundles (deb + rpm + AppImage)
-pnpm build            # frontend-only build (tsc + vite)
-pnpm test             # Vitest suite
+cargo run -p orrery                 # run the desktop app
+cargo build --workspace             # build everything
+cargo test --workspace              # tests
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`tauri:build` runs `tauri build` with `NO_STRIP=true`. On modern distros (e.g.
-Fedora) the linker emits a `.relr.dyn` section that the old `strip` bundled
-inside `linuxdeploy` can't parse, which otherwise aborts the AppImage stage;
-`NO_STRIP` skips that pass. Plain `pnpm tauri build` still works for deb/rpm.
+Release bundles (`.deb`, `.rpm`, `.AppImage`) are built by the release workflow
+on a version tag — `cargo deb`, `cargo generate-rpm`, and `packaging/appimage.sh`
+(linuxdeploy).
 
-Full setup details — distro-specific packages, first-run configuration, the web
-demo build — are in the [Getting started guide](https://hankanman.github.io/Orrery/guide/getting-started).
+Full setup details — distro-specific packages and first-run configuration — are
+in the [Getting started guide](https://hankanman.github.io/Orrery/guide/getting-started).
 
 ## Documentation
 
@@ -90,44 +93,17 @@ pnpm docs:build       # build the static site
 
 → **https://hankanman.github.io/Orrery/**
 
-## Linux display backend
+## Rendering
 
-On Linux the app configures two environment variables at startup (in
-`run()`, before GTK/WebKit initialize). Both are only set if you haven't
-already set them, so either can be overridden from the environment.
+The UI is rendered on the GPU through GPUI's `blade` (Vulkan) backend and talks
+Wayland/X11 directly — there's no webview, so none of the old WebKitGTK
+workarounds (DMABUF renderer, `GDK_BACKEND`, accelerated-compositor flags) apply.
+This is the whole point of the native rewrite: the earlier Tauri/WebKitGTK build
+was CPU-bound and juddery on NVIDIA, and GPU compositing removes that bottleneck.
 
-- **`WEBKIT_DISABLE_DMABUF_RENDERER=1`** — WebKitGTK's DMABUF renderer is
-  broken on many drivers (notably NVIDIA), producing blank/garbled webviews
-  or `Error 71 (Protocol error) dispatching to Wayland display`. It's
-  disabled by default.
-- **`GDK_BACKEND=x11` on KDE + Wayland only** — KWin only draws its
-  server-side window decoration for X11/XWayland windows; GTK refuses
-  server-side decorations on native Wayland, so a Wayland window gets a
-  foreign-looking client-side titlebar instead of the system decoration.
-  Forcing XWayland on KDE Wayland lets KWin draw the native titlebar.
-  GNOME, wlroots, and X11 sessions are left untouched (CSD is the expected
-  convention there).
-
-This is decided at **runtime**, so a single build behaves correctly across
-distros, desktops, and package formats — no per-package flags needed.
-
-**Overrides:** run with `GDK_BACKEND=wayland orrery` to force native Wayland
-(client-side decorations) on KDE, or `WEBKIT_DISABLE_DMABUF_RENDERER=0` to
-re-enable the DMABUF renderer.
-
-### Rendering smoothness on NVIDIA
-
-WebKitGTK GPU-accelerates far less than Chromium, so the webview can feel
-juddery where a browser is smooth — worst on NVIDIA, where we disable the
-DMABUF renderer (above) and thereby give up accelerated compositing. The app
-keeps WebKitGTK's accelerated compositor pinned on
-(`hardware-acceleration-policy: ALWAYS`) and the UI is deliberately flat (no
-backdrop blur, fixed backgrounds, or large shadow repaints) to stay smooth on
-the CPU-bound path. `ORRERY_WEBKIT_ACCEL=1` keeps the DMABUF renderer enabled
-for setups where it works (NVIDIA open kernel module + recent WebKitGTK).
-
-The full investigation — every acceleration path we tried, what failed and why,
-what ships, and a re-test matrix for when WebKitGTK/NVIDIA update — is in
+The UI is still deliberately **flat** — it's a clean look and keeps overdraw low.
+For the history of why the previous webview build was CPU-bound (and the
+measurements that motivated going native), see
 [docs/rendering-performance.md](docs/rendering-performance.md).
 
 ## Roadmap
