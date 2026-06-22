@@ -37,9 +37,11 @@ enum Signal {
     Quit,
 }
 
-/// Start the three background watchers and the gpui task that applies their
-/// signals. Call once during app construction (inside `cx.new`).
-pub fn spawn(cx: &mut Context<OrreryApp>) {
+/// Start the background watchers and the gpui task that applies their signals.
+/// Call once during app construction (inside `cx.new`). Returns whether the
+/// system tray came up — the window's close-to-tray behaviour is gated on it, so
+/// there's always a way to quit when there's no tray.
+pub fn spawn(cx: &mut Context<OrreryApp>) -> bool {
     let (tx, rx) = async_channel::unbounded::<Signal>();
 
     // Filesystem watch → rescan. Debounced inside the platform watcher.
@@ -89,6 +91,7 @@ pub fn spawn(cx: &mut Context<OrreryApp>) {
             let _ = tx.try_send(signal);
         })
     };
+    let tray_active = tray.is_some();
 
     // The single foreground consumer. Holds a weak handle to the app entity; it
     // ends naturally when the entity is dropped (its `update` calls start failing
@@ -150,4 +153,6 @@ pub fn spawn(cx: &mut Context<OrreryApp>) {
         }
     })
     .detach();
+
+    tray_active
 }
