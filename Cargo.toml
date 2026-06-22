@@ -1,15 +1,12 @@
-# Workspace for the native Orrery rewrite. This IS the target codebase: a clean
-# Rust app with no webview. `src-tauri/` (the legacy Tauri shell) and `src/`
-# (the legacy React frontend) are deliberately OUTSIDE this workspace — they
-# depend on orrery-core via path and get deleted at cutover.
+# Workspace for Orrery — a clean native Rust app, no webview. The Tauri shell
+# and React frontend that used to live alongside this were removed at cutover.
 [workspace]
 resolver = "2"
 members = [
     "crates/orrery-core",     # logic: scan/git/forge/inbox/ai/cache/config/launch
-    "crates/orrery-platform", # desktop integration: appearance (+ tray/notify/… later)
-    "crates/orrery-app",      # GPUI desktop app (UI). Renamed to `orrery` at cutover.
+    "crates/orrery-platform", # desktop integration: appearance/tray/notify/watcher
+    "crates/orrery",          # the GPUI desktop app (UI + binary)
 ]
-exclude = ["src-tauri"]
 
 # Keep app release builds reasonably fast; GPUI's compile dominates regardless.
 [profile.release]

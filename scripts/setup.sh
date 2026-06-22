@@ -154,7 +154,7 @@ fetch_deps
 
 say "setup complete"
 if have cargo && cargo --version >/dev/null 2>&1; then
-  ok "you're ready — run: cargo run -p orrery-app"
+  ok "you're ready — run: cargo run -p orrery"
   if [[ ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then
     warn "open a new shell (or run: source \"\$HOME/.cargo/env\") so cargo is on PATH"
   fi

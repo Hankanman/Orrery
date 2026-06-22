@@ -1,4 +1,4 @@
-# Pinned workspace-wide to current stable. orrery-app is on edition 2024 (gpui +
+# Pinned workspace-wide to current stable. orrery (the app crate) is on edition 2024 (gpui +
 # gpui-component, both pinned to Zed rev 1d217ee); orrery-core/platform and the
 # legacy src-tauri crate build on the same toolchain, so one channel covers all.
 [toolchain]
