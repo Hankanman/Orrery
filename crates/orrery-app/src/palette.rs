@@ -149,6 +149,7 @@ pub fn render(
     }
 
     let panel = div()
+        .key_context("Palette")
         .flex()
         .flex_col()
         .w(px(PANEL_W))

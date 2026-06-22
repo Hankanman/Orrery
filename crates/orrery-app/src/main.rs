@@ -68,13 +68,15 @@ fn main() {
             gpui_component::init(cx);
             // Esc closes the active overlay (drawer/palette/dialog).
             cx.bind_keys([KeyBinding::new("escape", CloseOverlay, None)]);
-            // Command palette: Ctrl/Cmd+K opens; arrows/enter drive it when open.
+            // Command palette: Ctrl/Cmd+K opens from anywhere; arrows/enter are
+            // scoped to the "Palette" key-context so they don't shadow a focused
+            // text input's cursor/newline keys.
             cx.bind_keys([
                 KeyBinding::new("cmd-k", OpenPalette, None),
                 KeyBinding::new("ctrl-k", OpenPalette, None),
-                KeyBinding::new("up", PaletteUp, None),
-                KeyBinding::new("down", PaletteDown, None),
-                KeyBinding::new("enter", PaletteConfirm, None),
+                KeyBinding::new("up", PaletteUp, Some("Palette")),
+                KeyBinding::new("down", PaletteDown, Some("Palette")),
+                KeyBinding::new("enter", PaletteConfirm, Some("Palette")),
             ]);
             // Text-input editing key bindings (scoped to focused inputs).
             text_input::bind_keys(cx);
