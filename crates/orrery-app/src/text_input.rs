@@ -109,6 +109,21 @@ impl TextInput {
         self.content.clone()
     }
 
+    /// Like [`new`](Self::new) but pre-filled with `initial` text (Settings
+    /// fields seed from the current config).
+    pub fn new_with(
+        cx: &mut Context<Self>,
+        style: InputStyle,
+        placeholder: impl Into<SharedString>,
+        initial: impl Into<SharedString>,
+    ) -> Self {
+        let mut s = Self::new(cx, style, placeholder);
+        s.content = initial.into();
+        let end = s.content.len();
+        s.selected_range = end..end;
+        s
+    }
+
     /// The focus handle, for focusing the field when its overlay opens.
     pub fn handle(&self) -> FocusHandle {
         self.focus_handle.clone()
