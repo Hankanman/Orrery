@@ -19,10 +19,15 @@ mod theme;
 
 use std::rc::Rc;
 
-use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{
+    actions, px, size, App, AppContext, Application, Bounds, KeyBinding, WindowBounds,
+    WindowOptions,
+};
 
 use shell::{OrreryApp, View};
 use theme::Theme;
+
+actions!(orrery, [CloseOverlay]);
 
 fn main() {
     let now = data::now_unix();
@@ -47,14 +52,17 @@ fn main() {
     Application::with_platform(platform)
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
+            // Esc closes the active overlay (drawer/palette/dialog).
+            cx.bind_keys([KeyBinding::new("escape", CloseOverlay, None)]);
+
             let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_window, cx| {
-                    cx.new(|cx| {
+                |window, cx| {
+                    let view = cx.new(|cx| {
                         // Start the live wiring: filesystem watch, appearance, and
                         // attention poll all marshal back onto this entity.
                         live::spawn(cx);
@@ -67,8 +75,13 @@ fn main() {
                             attention: Vec::new(),
                             overlay: None,
                             drawer: Default::default(),
+                            focus: cx.focus_handle(),
                         }
-                    })
+                    });
+                    // Focus the app root so key bindings (Esc) dispatch to it.
+                    let focus = view.read(cx).focus.clone();
+                    window.focus(&focus, cx);
+                    view
                 },
             )
             .expect("failed to open window");
