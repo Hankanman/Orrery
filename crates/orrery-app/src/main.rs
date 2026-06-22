@@ -13,6 +13,7 @@ mod drawer;
 mod icon;
 mod live;
 mod markdown;
+mod palette;
 mod shell;
 mod task;
 mod text_input;
@@ -28,7 +29,16 @@ use gpui::{
 use shell::{OrreryApp, View};
 use theme::Theme;
 
-actions!(orrery, [CloseOverlay]);
+actions!(
+    orrery,
+    [
+        CloseOverlay,
+        OpenPalette,
+        PaletteUp,
+        PaletteDown,
+        PaletteConfirm
+    ]
+);
 
 fn main() {
     let now = data::now_unix();
@@ -55,6 +65,14 @@ fn main() {
         .run(move |cx: &mut App| {
             // Esc closes the active overlay (drawer/palette/dialog).
             cx.bind_keys([KeyBinding::new("escape", CloseOverlay, None)]);
+            // Command palette: Ctrl/Cmd+K opens; arrows/enter drive it when open.
+            cx.bind_keys([
+                KeyBinding::new("cmd-k", OpenPalette, None),
+                KeyBinding::new("ctrl-k", OpenPalette, None),
+                KeyBinding::new("up", PaletteUp, None),
+                KeyBinding::new("down", PaletteDown, None),
+                KeyBinding::new("enter", PaletteConfirm, None),
+            ]);
             // Text-input editing key bindings (scoped to focused inputs).
             text_input::bind_keys(cx);
 

@@ -43,6 +43,8 @@ pub enum Overlay {
     /// The repo detail drawer, keyed by repo id (stable across rescans), with
     /// the active tab.
     Drawer { repo: SharedString, tab: DrawerTab },
+    /// The command palette (Ctrl+K).
+    Palette(crate::palette::PaletteData),
 }
 
 /// The RepoDrawer's tabs (mirrors `RepoDrawer.tsx`).
@@ -105,10 +107,104 @@ impl OrreryApp {
     pub fn close_overlay(&mut self) {
         self.overlay = None;
     }
+
+    /// Open the command palette and focus its query field.
+    pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let istyle = crate::drawer::input_style(&self.theme);
+        let query = cx.new(|cx| {
+            crate::text_input::TextInput::new(cx, istyle, "Search repos, run a command…")
+        });
+        // Re-render the app (and reset the selection) on each keystroke.
+        let sub = cx.observe(&query, |this, _q, cx| {
+            if let Some(Overlay::Palette(d)) = &mut this.overlay {
+                d.selected = 0;
+            }
+            cx.notify();
+        });
+        let fh = query.read(cx).handle();
+        self.overlay = Some(Overlay::Palette(crate::palette::PaletteData {
+            query,
+            selected: 0,
+            _sub: sub,
+        }));
+        window.focus(&fh, cx);
+        cx.notify();
+    }
+
+    /// Move the palette selection by `delta` (wrapping), if it's open.
+    fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(query) = self.palette_query(cx) else {
+            return;
+        };
+        let len = crate::palette::items(&self.rows, &query).len();
+        if let Some(Overlay::Palette(d)) = &mut self.overlay {
+            if len > 0 {
+                let i = d.selected as isize + delta;
+                d.selected = i.rem_euclid(len as isize) as usize;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The current palette query text, if the palette is open.
+    fn palette_query(&self, cx: &Context<Self>) -> Option<SharedString> {
+        match &self.overlay {
+            Some(Overlay::Palette(d)) => Some(d.query.read(cx).content()),
+            _ => None,
+        }
+    }
+
+    /// Execute the currently-selected palette item (called on Enter).
+    fn confirm_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(query) = self.palette_query(cx) else {
+            return;
+        };
+        let items = crate::palette::items(&self.rows, &query);
+        let selected = match &self.overlay {
+            Some(Overlay::Palette(d)) => d.selected.min(items.len().saturating_sub(1)),
+            _ => return,
+        };
+        if let Some(item) = items.get(selected).cloned() {
+            self.run_palette_item(item, cx);
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    /// Close the palette and act on `item`.
+    pub fn run_palette_item(&mut self, item: crate::palette::PaletteItem, cx: &mut Context<Self>) {
+        use crate::palette::{PaletteAction, PaletteItem};
+        self.close_overlay();
+        match item {
+            PaletteItem::Action(PaletteAction::Rescan) => self.rescan(cx),
+            PaletteItem::Action(PaletteAction::Settings) => self.view = View::Settings,
+            PaletteItem::Repo(i) => {
+                if let Some(r) = self.rows.get(i) {
+                    let _ = orrery_core::launch::launch(&self.config.ide_command, &r.id);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Re-scan the roots from disk (off the UI thread) and reload the grid.
+    fn rescan(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let (rows, roots) = cx
+                .background_executor()
+                .spawn(async { crate::data::rescan() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.rows = rows;
+                this.roots = roots;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 impl OrreryApp {
-    fn header(&self, t: &Theme) -> impl IntoElement {
+    fn header(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_row()
@@ -154,9 +250,10 @@ impl OrreryApp {
             )
             // spacer (ml-auto)
             .child(div().flex_1())
-            // search box
+            // search box → opens the command palette
             .child(
                 div()
+                    .id("header-search")
                     .flex()
                     .flex_row()
                     .items_center()
@@ -169,6 +266,9 @@ impl OrreryApp {
                     .border_1()
                     .border_color(rgb(t.border))
                     .text_color(rgb(t.fg2))
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(rgb(t.border_strong)))
+                    .on_click(cx.listener(|this, _ev, window, cx| this.open_palette(window, cx)))
                     .child(lucide("search", 16., t.fg2))
                     .child(
                         div()
@@ -332,7 +432,7 @@ impl Render for OrreryApp {
             .bg(rgb(t.page))
             .text_color(rgb(t.fg1))
             .font_family("sans-serif")
-            .child(self.header(&t))
+            .child(self.header(&t, cx))
             .child(
                 div()
                     .flex()
@@ -353,11 +453,24 @@ impl Render for OrreryApp {
         // The root tracks focus + handles CloseOverlay so Esc dismisses overlays.
         let mut root = div()
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &crate::CloseOverlay, _window, cx| {
+            .on_action(cx.listener(|this, _: &crate::CloseOverlay, window, cx| {
                 if this.overlay.is_some() {
                     this.close_overlay();
+                    window.focus(&this.focus, cx);
                     cx.notify();
                 }
+            }))
+            .on_action(cx.listener(|this, _: &crate::OpenPalette, window, cx| {
+                this.open_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::PaletteDown, _window, cx| {
+                this.move_palette(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::PaletteUp, _window, cx| {
+                this.move_palette(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::PaletteConfirm, window, cx| {
+                this.confirm_palette(window, cx);
             }))
             .relative()
             .size_full()
@@ -392,6 +505,14 @@ impl OrreryApp {
                         &cmds.1,
                     )
                     .into_any_element(),
+                )
+            }
+            Some(Overlay::Palette(data)) => {
+                let query = data.query.read(cx).content();
+                let items = crate::palette::items(&self.rows, &query);
+                Some(
+                    crate::palette::render(data, &items, &self.rows, t, &cx.entity())
+                        .into_any_element(),
                 )
             }
             None => None,
