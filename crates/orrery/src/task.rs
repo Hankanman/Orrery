@@ -42,3 +42,13 @@ where
         .await
         .expect("tokio task dropped before sending its result")
 }
+
+/// Spawn `fut` on the shared runtime, detached (fire-and-forget). Use for work
+/// that reports back through its own channel rather than a single return value —
+/// e.g. a model download streaming progress. The future must be `Send`.
+pub fn spawn_detached<F>(fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    runtime().spawn(fut);
+}
