@@ -123,6 +123,7 @@ fn main() {
                             github_authed: false,
                             github_device: None,
                             ai_status: Default::default(),
+                            ai_ready: false,
                             tray_active,
                             focus: cx.focus_handle(),
                         }
@@ -136,6 +137,9 @@ fn main() {
                             false
                         });
                     }
+                    // Probe AI reachability and build the semantic index in the
+                    // background, so Ctrl+K can search by meaning.
+                    view.update(cx, |this, cx| this.ai_startup(cx));
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();
                     window.focus(&focus, cx);
