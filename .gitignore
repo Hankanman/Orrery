@@ -1,16 +1,16 @@
-# Rust / Tauri
+# Rust
 /target
 **/target
 Cargo.lock.bak
-/src-tauri/target
-/src-tauri/gen
 
-# Node / Vite
+# Node (docs + icon generation)
 node_modules
-dist
-dist-ssr
 .vite
 *.local
+
+# Release artifacts
+/dist
+/dist-appimage
 
 # VitePress
 docs/.vitepress/dist
@@ -35,10 +35,9 @@ pnpm-debug.log*
 *.sqlite3
 /models
 
-# Bundled llama-server runtime — fetched by CI into src-tauri/llama-runtime/,
-# never committed (keep only the .gitkeep that holds the directory).
-/src-tauri/llama-runtime/*
-!/src-tauri/llama-runtime/.gitkeep
+# Bundled llama-server runtime — fetched by CI into packaging/llama-runtime/ for
+# the AppImage build, never committed.
+/packaging/llama-runtime/
 
 # Cate IDE local workspace state (machine-specific layout)
 .cate/

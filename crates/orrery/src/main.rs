@@ -41,6 +41,17 @@ actions!(
 );
 
 fn main() {
+    // Point the bundled llama.cpp backend at a runtime shipped next to the
+    // binary, if any: packages install it to `<prefix>/lib/orrery/llama-runtime`
+    // (the AppImage bundles one; deb/rpm stay lean). A no-op in source builds /
+    // when nothing is there — `materialize_bundled` only acts if it finds a
+    // `llama-server`, so the discovery falls through to Ollama / PATH otherwise.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(prefix) = exe.parent().and_then(|p| p.parent())
+    {
+        orrery_core::llama::set_bundled_dir(prefix.join("lib/orrery/llama-runtime"));
+    }
+
     let now = data::now_unix();
     let (rows, roots) = data::load(now);
     eprintln!(
