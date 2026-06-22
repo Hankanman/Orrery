@@ -1345,7 +1345,9 @@ fn seg_str(icon: &str, label: &str, color: u32) -> impl IntoElement {
 /// Readme tab: the rendered README, or a placeholder while loading / when absent.
 fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
     match &data.readme {
-        ReadmeState::Ready(Some(src)) => crate::markdown::render(src, t).into_any_element(),
+        ReadmeState::Ready(Some(src)) => {
+            gpui_component::text::markdown(src.clone()).into_any_element()
+        }
         ReadmeState::Ready(None) => placeholder("No README in this repo.", t).into_any_element(),
         _ => placeholder("Loading…", t).into_any_element(),
     }
@@ -1400,7 +1402,7 @@ fn notes_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) 
             t,
         ));
     } else {
-        note = note.child(crate::markdown::render(&n.note, t));
+        note = note.child(gpui_component::text::markdown(n.note.clone()));
     }
     col.child(note)
 }

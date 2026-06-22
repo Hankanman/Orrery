@@ -12,7 +12,6 @@ mod data;
 mod drawer;
 mod icon;
 mod live;
-mod markdown;
 mod palette;
 mod shell;
 mod task;
@@ -26,6 +25,7 @@ use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, actions, px,
     size,
 };
+use gpui_component::Root;
 
 use shell::{OrreryApp, View};
 use theme::Theme;
@@ -64,6 +64,8 @@ fn main() {
     Application::with_platform(platform)
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
+            // Initialise gpui-component (theme, inputs, markdown, popovers, …).
+            gpui_component::init(cx);
             // Esc closes the active overlay (drawer/palette/dialog).
             cx.bind_keys([KeyBinding::new("escape", CloseOverlay, None)]);
             // Command palette: Ctrl/Cmd+K opens; arrows/enter drive it when open.
@@ -109,7 +111,9 @@ fn main() {
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();
                     window.focus(&focus, cx);
-                    view
+                    // gpui-component's Root provides the theme + popover/modal/
+                    // notification layers its components need.
+                    cx.new(|cx| Root::new(view, window, cx))
                 },
             )
             .expect("failed to open window");
