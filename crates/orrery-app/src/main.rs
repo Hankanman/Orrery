@@ -15,7 +15,6 @@ mod live;
 mod palette;
 mod shell;
 mod task;
-mod text_input;
 mod theme;
 mod views;
 
@@ -80,8 +79,6 @@ fn main() {
                 KeyBinding::new("down", PaletteDown, Some("Palette")),
                 KeyBinding::new("enter", PaletteConfirm, Some("Palette")),
             ]);
-            // Text-input editing key bindings (scoped to focused inputs).
-            text_input::bind_keys(cx);
 
             let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
             cx.open_window(
