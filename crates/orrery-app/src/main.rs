@@ -64,8 +64,10 @@ fn main() {
     Application::with_platform(platform)
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
-            // Initialise gpui-component (theme, inputs, markdown, popovers, …).
+            // Initialise gpui-component, then map its theme onto our --orr-* tokens
+            // so its components match the rest of the UI.
             gpui_component::init(cx);
+            theme::apply_gpui_component_theme(&theme, cx);
             // Esc closes the active overlay (drawer/palette/dialog).
             cx.bind_keys([KeyBinding::new("escape", CloseOverlay, None)]);
             // Command palette: Ctrl/Cmd+K opens from anywhere; arrows/enter are

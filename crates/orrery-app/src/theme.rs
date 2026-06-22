@@ -197,3 +197,52 @@ pub fn lang_color(language: &str, fallback: u32) -> u32 {
         _ => fallback,
     }
 }
+
+/// Map our `--orr-*` tokens onto gpui-component's shadcn-style theme, so its
+/// components (markdown, inputs, dropdowns, …) match the rest of the UI. Call
+/// once after `gpui_component::init`, before opening the window.
+pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
+    use gpui::{px, rgb};
+    use gpui_component::ThemeMode;
+
+    let c = gpui_component::Theme::global_mut(cx);
+    c.mode = ThemeMode::Dark;
+
+    // Surfaces.
+    c.background = rgb(t.page).into();
+    c.popover = rgb(t.surface).into();
+    c.secondary = rgb(t.surface).into();
+    c.muted = rgb(t.surface).into();
+    c.sidebar = rgb(t.page).into();
+    c.title_bar = rgb(t.page).into();
+    c.input = rgb(t.button_bg).into();
+    c.tab_active = rgb(t.surface).into();
+
+    // Text.
+    c.foreground = rgb(t.fg1).into();
+    c.popover_foreground = rgb(t.fg1).into();
+    c.secondary_foreground = rgb(t.fg1).into();
+    c.sidebar_foreground = rgb(t.fg1).into();
+    c.muted_foreground = rgb(t.fg3).into();
+    c.accent_foreground = rgb(t.fg0).into();
+    c.primary_foreground = rgb(t.page).into();
+
+    // Borders / accents / state.
+    c.border = rgb(t.border).into();
+    c.drag_border = rgb(t.border_accent).into();
+    c.ring = rgb(t.primary).into();
+    c.primary = rgb(t.primary).into();
+    c.accent = rgb(t.surface_hover).into();
+    c.list_active = rgb(t.accent_wash).into();
+    c.selection = rgb(t.accent_wash).into();
+    c.link = rgb(t.accent_bright).into();
+    c.scrollbar = rgb(t.border).into();
+    c.danger = rgb(t.behind).into();
+    c.success = rgb(t.clean).into();
+    c.info = rgb(t.primary).into();
+    c.warning = rgb(t.star).into();
+
+    // Shape / fonts.
+    c.radius = px(t.r_md);
+    c.mono_font_family = "monospace".into();
+}
