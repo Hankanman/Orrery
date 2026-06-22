@@ -4193,6 +4193,7 @@ dependencies = [
  "orrery-platform",
  "rust-embed",
  "tokio",
+ "unicode-segmentation",
 ]
 
 [[package]]

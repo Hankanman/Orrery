@@ -39,6 +39,9 @@ async-channel = "2"
 # has no tokio reactor, so network UI data needs an in-app runtime.
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
+# Grapheme-aware cursor movement in the text input (text_input.rs).
+unicode-segmentation = "1"
+
 [lints.rust]
 unsafe_code = "warn"
 

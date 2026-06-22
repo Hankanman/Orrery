@@ -4,13 +4,13 @@
 //!
 //! This is the workhorse primitive — most journeys (catch-up, dive, commit, PR
 //! triage) live here. Done: **Overview** (Row facts + async branches/commits/
-//! worktrees), **Readme** (lazy, rendered via `markdown`), and **PR** (lazy,
-//! GitHub-only, via the `task` tokio bridge — checks/review/mergeable rollups +
-//! inline approve/merge). The Changes / Notes tabs are scaffolds; both need text
-//! input (the command-palette focus work), filled in next.
+//! worktrees), **Readme** (lazy, `markdown`), **PR** (lazy, GitHub-only, via the
+//! `task` bridge — rollups + inline approve/merge), and **Changes** (staged diff
+//! + commit-message field via `text_input` + Commit). The Notes tab (catch-up +
+//! scratchpad) is next.
 
 use gpui::{
-    div, px, rgb, rgba, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement,
+    div, px, rgb, rgba, AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
 };
 use orrery_core::{git_ops, inbox, launch};
@@ -95,8 +95,18 @@ pub enum PrState {
     Error(SharedString),
 }
 
+/// Lazy-loaded staged-diff state (sync git, but loaded off the UI thread).
+#[derive(Default)]
+pub enum DiffState {
+    #[default]
+    Idle,
+    Loading,
+    /// The staged diff text ("" when nothing is staged).
+    Ready(SharedString),
+}
+
 /// Async-loaded data for the currently open repo's drawer. Overview loads on
-/// open; the Readme and PR panel load lazily when their tabs are first shown.
+/// open; Readme/PR/Changes load lazily when their tabs are first shown.
 #[derive(Default)]
 pub struct DrawerData {
     pub repo: SharedString,
@@ -105,6 +115,9 @@ pub struct DrawerData {
     pub worktrees: Option<Vec<WorktreeRow>>,
     pub readme: ReadmeState,
     pub pr: PrState,
+    pub diff: DiffState,
+    /// The commit-message field for the Changes tab, created when it first opens.
+    pub commit_input: Option<Entity<crate::text_input::TextInput>>,
 }
 
 impl DrawerData {
@@ -203,6 +216,60 @@ pub fn load_readme(repo: SharedString, cx: &mut Context<OrreryApp>) {
         });
     })
     .detach();
+}
+
+/// Lazily load the staged diff (sync git, off the UI thread) for the Changes tab.
+pub fn load_diff(repo: SharedString, cx: &mut Context<OrreryApp>) {
+    let id = repo.to_string();
+    cx.spawn(async move |this, cx| {
+        let diff = cx
+            .background_executor()
+            .spawn(async move { git_ops::staged_diff(&id).unwrap_or_default() })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo == repo {
+                this.drawer.diff = DiffState::Ready(diff.into());
+                cx.notify();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Commit the staged changes with `message`, then refresh the (now-empty) diff
+/// and clear the field. The commit trips the watcher, refreshing the card.
+fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp>) {
+    let id = repo.to_string();
+    cx.spawn(async move |this, cx| {
+        let _ = cx
+            .background_executor()
+            .spawn(async move { git_ops::commit(&id, message.trim()) })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo != repo {
+                return;
+            }
+            if let Some(input) = this.drawer.commit_input.clone() {
+                input.update(cx, |i, cx| i.set_content("", cx));
+            }
+            this.drawer.diff = DiffState::Loading;
+            load_diff(repo, cx);
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Build an [`InputStyle`] from the theme.
+fn input_style(t: &Theme) -> crate::text_input::InputStyle {
+    crate::text_input::InputStyle {
+        bg: t.button_bg,
+        border: t.border,
+        text: t.fg0,
+        placeholder: t.fg3,
+        cursor: t.accent_bright,
+        size: t.text_small,
+    }
 }
 
 /// Read the first matching README from the repo root (mirrors the Tauri
@@ -462,6 +529,7 @@ fn tab_bar(
     repo: SharedString,
     pr_slug: Option<SharedString>,
 ) -> impl IntoElement {
+    let istyle = input_style(t);
     let mut bar = div()
         .flex()
         .flex_row()
@@ -510,6 +578,16 @@ fn tab_bar(
                                 this.drawer.pr = PrState::Error("PR triage is GitHub-only.".into());
                             }
                         }
+                    } else if tab == DrawerTab::Changes
+                        && matches!(this.drawer.diff, DiffState::Idle)
+                    {
+                        this.drawer.diff = DiffState::Loading;
+                        if this.drawer.commit_input.is_none() {
+                            this.drawer.commit_input = Some(cx.new(|cx| {
+                                crate::text_input::TextInput::new(cx, istyle, "Commit message…")
+                            }));
+                        }
+                        load_diff(repo, cx);
                     }
                     cx.notify();
                 });
@@ -530,6 +608,7 @@ fn body(
         DrawerTab::Overview => overview(row, t, data, app).into_any_element(),
         DrawerTab::Readme => readme_view(data, t).into_any_element(),
         DrawerTab::Pr => pr_view(row, data, t, app).into_any_element(),
+        DrawerTab::Changes => changes_view(row, data, t, app).into_any_element(),
         other => coming_soon(other, t).into_any_element(),
     };
     div()
@@ -815,6 +894,76 @@ fn worktrees_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
         }
     }
     s
+}
+
+/// Changes tab: a commit-message field + Commit, then the staged diff.
+fn changes_view(
+    row: &Row,
+    data: &DrawerData,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let mut col = div().flex().flex_col().gap(px(12.));
+
+    // Commit composer (the field exists once the tab has been opened).
+    if let Some(input) = &data.commit_input {
+        let repo = row.id.clone();
+        let app2 = app.clone();
+        let input2 = input.clone();
+        col = col
+            .child(input.clone())
+            .child(div().flex().flex_row().justify_end().child(pr_btn(
+                SharedString::from("commit"),
+                "Commit",
+                t,
+                move |cx: &mut gpui::App| {
+                    let repo = repo.clone();
+                    let msg = input2.read(cx).content();
+                    if msg.trim().is_empty() {
+                        return;
+                    }
+                    app2.update(cx, |_this, cx| commit_staged(repo, msg.to_string(), cx));
+                },
+            )));
+    }
+
+    // Staged diff.
+    let diff = match &data.diff {
+        DiffState::Ready(d) if d.trim().is_empty() => {
+            placeholder("Nothing staged — `git add` your changes first.", t).into_any_element()
+        }
+        DiffState::Ready(d) => diff_block(d, t).into_any_element(),
+        _ => placeholder("Loading…", t).into_any_element(),
+    };
+    col.child(diff)
+}
+
+/// Render a unified diff with per-line sentiment colouring.
+fn diff_block(diff: &str, t: &Theme) -> impl IntoElement {
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .p(px(10.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(t.surface))
+        .border_1()
+        .border_color(rgb(t.border))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm));
+    for line in diff.lines() {
+        let color = match line.as_bytes().first() {
+            Some(b'+') => t.clean,
+            Some(b'-') => t.behind,
+            Some(b'@') => t.accent_bright,
+            _ => t.fg2,
+        };
+        block = block.child(
+            div()
+                .text_color(rgb(color))
+                .child(SharedString::from(line.to_string())),
+        );
+    }
+    block
 }
 
 /// Colour a PR state string (checks / mergeable / review) by sentiment.
