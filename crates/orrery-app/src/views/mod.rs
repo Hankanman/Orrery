@@ -11,6 +11,7 @@ use crate::icon::lucide;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
 
+pub mod agents;
 pub mod cleanup;
 pub mod devtools;
 pub mod explore;
