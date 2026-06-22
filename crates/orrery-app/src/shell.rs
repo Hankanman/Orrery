@@ -45,6 +45,8 @@ pub enum Overlay {
     Drawer { repo: SharedString, tab: DrawerTab },
     /// The command palette (Ctrl+K).
     Palette(crate::palette::PaletteData),
+    /// The new-project dialog (header "+").
+    NewProject(crate::views::newproject::NewProjectData),
 }
 
 /// The RepoDrawer's tabs (mirrors `RepoDrawer.tsx`).
@@ -153,6 +155,129 @@ impl OrreryApp {
             _sub: sub,
         }));
         window.focus(&fh, cx);
+        cx.notify();
+    }
+
+    /// Open the new-project dialog (clone / init into a workspace root).
+    pub fn open_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::views::newproject::{NewMode, NewProjectData};
+        use gpui_component::input::InputState;
+        let url =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://github.com/owner/repo"));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("repo"));
+        let subs = vec![
+            cx.observe(&url, |_this, _e, cx| cx.notify()),
+            cx.observe(&name, |_this, _e, cx| cx.notify()),
+        ];
+        self.overlay = Some(Overlay::NewProject(NewProjectData {
+            mode: NewMode::Clone,
+            url,
+            name,
+            root: 0,
+            status: "".into(),
+            busy: false,
+            _subs: subs,
+        }));
+        cx.notify();
+    }
+
+    /// Switch the new-project dialog's mode (clone vs create).
+    pub fn new_project_set_mode(
+        &mut self,
+        mode: crate::views::newproject::NewMode,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(Overlay::NewProject(d)) = &mut self.overlay {
+            d.mode = mode;
+            d.status = "".into();
+        }
+        cx.notify();
+    }
+
+    /// Cycle the new-project destination root.
+    pub fn new_project_cycle_root(&mut self, cx: &mut Context<Self>) {
+        let n = self.config.roots.len();
+        if let Some(Overlay::NewProject(d)) = &mut self.overlay
+            && n > 0
+        {
+            d.root = (d.root + 1) % n;
+        }
+        cx.notify();
+    }
+
+    /// Validate + run the new-project dialog (clone/init off the UI thread), then
+    /// rescan and close on success.
+    pub fn submit_new_project(&mut self, cx: &mut Context<Self>) {
+        use crate::views::newproject::NewMode;
+        let Some(Overlay::NewProject(d)) = &self.overlay else {
+            return;
+        };
+        if d.busy {
+            return;
+        }
+        let mode = d.mode;
+        let name = d.name.read(cx).value().trim().to_string();
+        let url = d.url.read(cx).value().trim().to_string();
+        let Some(root) = self.config.roots.get(d.root).cloned() else {
+            self.set_new_project_status("Add a workspace root in Settings first.", cx);
+            return;
+        };
+        if name.is_empty() {
+            self.set_new_project_status("Enter a folder name.", cx);
+            return;
+        }
+        if mode == NewMode::Clone && url.is_empty() {
+            self.set_new_project_status("Enter a repository URL.", cx);
+            return;
+        }
+        let dest = format!("{}/{}", root.trim_end_matches('/'), name);
+        if let Some(Overlay::NewProject(d)) = &mut self.overlay {
+            d.busy = true;
+            d.status = if mode == NewMode::Clone {
+                "Cloning…".into()
+            } else {
+                "Creating…".into()
+            };
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match mode {
+                        NewMode::Clone => orrery_core::git_ops::clone(&url, &dest),
+                        NewMode::Create => orrery_core::git_ops::init(
+                            &dest,
+                            &name,
+                            None,
+                            None,
+                            Some("Initial commit"),
+                        ),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(_) => {
+                    this.close_overlay();
+                    this.rescan(cx);
+                }
+                Err(e) => {
+                    if let Some(Overlay::NewProject(d)) = &mut this.overlay {
+                        d.busy = false;
+                        d.status = format!("Failed: {e}").into();
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn set_new_project_status(&mut self, msg: &str, cx: &mut Context<Self>) {
+        if let Some(Overlay::NewProject(d)) = &mut self.overlay {
+            d.status = msg.to_string().into();
+        }
         cx.notify();
     }
 
@@ -844,8 +969,36 @@ impl OrreryApp {
                             .child("⌘K"),
                     ),
             )
-            .child(icon_btn("plus", t))
-            .child(icon_btn("refresh-cw", t))
+            .child(
+                div()
+                    .id("header-new")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(32.))
+                    .h(px(32.))
+                    .rounded(px(t.r_sm))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(t.surface_hover)))
+                    .child(lucide("plus", 16., t.fg1))
+                    .on_click(
+                        cx.listener(|this, _ev, window, cx| this.open_new_project(window, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("header-rescan")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(32.))
+                    .h(px(32.))
+                    .rounded(px(t.r_sm))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(t.surface_hover)))
+                    .child(lucide("refresh-cw", 16., t.fg1))
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.rescan(cx))),
+            )
     }
 
     fn sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1114,22 +1267,13 @@ impl OrreryApp {
                         .into_any_element(),
                 )
             }
+            Some(Overlay::NewProject(data)) => Some(
+                crate::views::newproject::render(data, &self.config.roots, t, &cx.entity())
+                    .into_any_element(),
+            ),
             None => None,
         }
     }
-}
-
-fn icon_btn(name: &str, t: &Theme) -> impl IntoElement {
-    div()
-        .id(SharedString::from(format!("icon-{name}")))
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(32.))
-        .h(px(32.))
-        .rounded(px(t.r_sm))
-        .hover(|s| s.bg(rgb(t.surface_hover)))
-        .child(lucide(name, 16., t.fg1))
 }
 
 /// A small count pill for the sidebar (e.g. Inbox attention items).
