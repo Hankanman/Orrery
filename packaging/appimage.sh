@@ -25,6 +25,15 @@ install -Dm644 packaging/orrery.desktop "$APPDIR/usr/share/applications/orrery.d
 install -Dm644 packaging/icons/icon.png "$APPDIR/usr/share/icons/hicolor/512x512/apps/orrery.png"
 install -Dm644 packaging/icons/128x128.png "$APPDIR/usr/share/icons/hicolor/128x128/apps/orrery.png"
 
+# Bundle the llama.cpp runtime if it was fetched (the AppImage is the portable,
+# self-contained build — deb/rpm stay lean and rely on Ollama / system llama).
+# The app resolves it at <prefix>/lib/orrery/llama-runtime relative to the binary.
+if [[ -f packaging/llama-runtime/llama-server ]]; then
+  mkdir -p "$APPDIR/usr/lib/orrery/llama-runtime"
+  cp -a packaging/llama-runtime/. "$APPDIR/usr/lib/orrery/llama-runtime/"
+  echo "  bundled llama-runtime"
+fi
+
 # Fetch linuxdeploy (cached between runs if present).
 LD="$OUT/linuxdeploy-x86_64.AppImage"
 if [[ ! -x "$LD" ]]; then

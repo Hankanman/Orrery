@@ -42,6 +42,27 @@ jobs:
       - name: Build .rpm
         run: cargo generate-rpm -p crates/orrery
 
+      # Fetch a pinned llama.cpp build so the bundled AI backend works out of the
+      # box in the AppImage. Bump LLAMA_TAG to update the shipped engine. Only the
+      # AppImage bundles it; deb/rpm stay lean (Ollama / user-installed llama).
+      - name: Fetch llama-server runtime (AppImage only)
+        env:
+          LLAMA_TAG: b9551
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          asset="llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz"
+          curl -fsSL -o "$work/llama.tar.gz" \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/${asset}"
+          tar xzf "$work/llama.tar.gz" -C "$work"
+          mkdir -p packaging/llama-runtime
+          # Archive layout varies by tag; flatten llama-server + its shared libs.
+          find "$work" -type f -name 'llama-server' -exec cp {} packaging/llama-runtime/ \;
+          find "$work" -type f -name '*.so*' -exec cp {} packaging/llama-runtime/ \;
+          chmod +x packaging/llama-runtime/llama-server
+          rm -rf "$work"
+          ls -la packaging/llama-runtime
+
       - name: Build AppImage
         run: bash packaging/appimage.sh
 
