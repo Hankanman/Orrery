@@ -435,7 +435,7 @@ fn worktree_row(w: git_ops::WorktreeInfo) -> WorktreeRow {
 fn pr_row(p: inbox::PrDetail) -> PrRow {
     PrRow {
         number: p.number,
-        title: p.title.into(),
+        title: data::oneline(p.title).into(),
         url: p.url.into(),
         draft: p.draft,
         author: p.author.unwrap_or_default().into(),

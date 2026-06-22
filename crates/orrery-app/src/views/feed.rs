@@ -64,8 +64,8 @@ pub fn feed_row(f: inbox::FeedItem, now: i64) -> FeedRow {
     FeedRow {
         icon,
         repo: f.repo.into(),
-        line: line.into(),
-        detail: f.detail.into(),
+        line: data::oneline(line).into(),
+        detail: data::oneline(f.detail).into(),
         tag: f.tag.into(),
         age: data::rel_age(f.timestamp, now).into(),
         prerelease: f.prerelease,
