@@ -252,6 +252,26 @@ fn action(
         })
 }
 
+fn terminate_button(pid: u32, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let app = app.clone();
+    div()
+        .id(SharedString::from(format!("agent-kill-{pid}")))
+        .px(px(12.))
+        .py(px(6.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(t.button_bg))
+        .border_1()
+        .border_color(rgb(t.border))
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg1))
+        .cursor_pointer()
+        .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
+        .child(SharedString::from("Terminate"))
+        .on_click(move |_ev, _win, cx| {
+            app.update(cx, |this, cx| this.terminate_agent(pid, cx));
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,24 +302,4 @@ mod tests {
         let p = programs("xterm -e mycoolagent {path}");
         assert!(p.iter().any(|s| s == "mycoolagent"));
     }
-}
-
-fn terminate_button(pid: u32, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let app = app.clone();
-    div()
-        .id(SharedString::from(format!("agent-kill-{pid}")))
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
-        .child(SharedString::from("Terminate"))
-        .on_click(move |_ev, _win, cx| {
-            app.update(cx, |this, cx| this.terminate_agent(pid, cx));
-        })
 }

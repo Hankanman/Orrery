@@ -15,7 +15,13 @@ const SEVEN_DAYS: i64 = 7 * 24 * 3600;
 const THIRTY_DAYS: i64 = 30 * 24 * 3600;
 
 /// Scan all roots and return the discovered repos, marking favorites.
-pub fn scan(roots: &[String], depth: usize, ignore: &[String], favorites: &HashSet<String>, now: i64) -> Vec<Repo> {
+pub fn scan(
+    roots: &[String],
+    depth: usize,
+    ignore: &[String],
+    favorites: &HashSet<String>,
+    now: i64,
+) -> Vec<Repo> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let ignore_set = build_ignore(ignore);
@@ -34,7 +40,10 @@ pub fn scan(roots: &[String], depth: usize, ignore: &[String], favorites: &HashS
         }
     }
 
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(targets.len().max(1));
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(targets.len().max(1));
     let out = std::sync::Mutex::new(Vec::with_capacity(targets.len()));
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
@@ -42,7 +51,9 @@ pub fn scan(roots: &[String], depth: usize, ignore: &[String], favorites: &HashS
         for _ in 0..threads {
             scope.spawn(move || loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some((path, root, fav)) = targets.get(i) else { break };
+                let Some((path, root, fav)) = targets.get(i) else {
+                    break;
+                };
                 if let Some(repo) = build_repo(path, root, *fav, now) {
                     out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
                 }
@@ -133,7 +144,10 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
 
     let (readme_title, description) = read_readme(path);
     let display_name = readme_title
-        .or_else(|| slug.as_ref().and_then(|s| s.rsplit('/').next().map(String::from)))
+        .or_else(|| {
+            slug.as_ref()
+                .and_then(|s| s.rsplit('/').next().map(String::from))
+        })
         .unwrap_or_else(|| dir_name.clone());
 
     let activity = classify_activity(last_commit_unix, now);
@@ -237,7 +251,11 @@ fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
     let slug = {
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         if parts.len() >= 2 {
-            Some(format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1]))
+            Some(format!(
+                "{}/{}",
+                parts[parts.len() - 2],
+                parts[parts.len() - 1]
+            ))
         } else {
             None
         }
@@ -249,7 +267,13 @@ fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
 
 /// Returns (display title from first H1, first descriptive paragraph).
 fn read_readme(path: &Path) -> (Option<String>, Option<String>) {
-    let candidates = ["README.md", "Readme.md", "readme.md", "README.markdown", "README"];
+    let candidates = [
+        "README.md",
+        "Readme.md",
+        "readme.md",
+        "README.markdown",
+        "README",
+    ];
     let content = candidates
         .iter()
         .find_map(|name| std::fs::read_to_string(path.join(name)).ok());
@@ -447,28 +471,46 @@ mod tests {
     fn parse_remote_https_and_ssh_github() {
         assert_eq!(
             parse_remote("https://github.com/owner/repo.git"),
-            (Some(Host::Github), Some("owner/repo".into()), Some("github.com".into()))
+            (
+                Some(Host::Github),
+                Some("owner/repo".into()),
+                Some("github.com".into())
+            )
         );
         assert_eq!(
             parse_remote("git@github.com:owner/repo.git"),
-            (Some(Host::Github), Some("owner/repo".into()), Some("github.com".into()))
+            (
+                Some(Host::Github),
+                Some("owner/repo".into()),
+                Some("github.com".into())
+            )
         );
         // no trailing .git
-        assert_eq!(parse_remote("https://github.com/owner/repo").1, Some("owner/repo".into()));
+        assert_eq!(
+            parse_remote("https://github.com/owner/repo").1,
+            Some("owner/repo".into())
+        );
     }
 
     #[test]
     fn parse_remote_gitlab_including_self_hosted_and_nested() {
         assert_eq!(
             parse_remote("https://gitlab.com/group/proj.git"),
-            (Some(Host::Gitlab), Some("group/proj".into()), Some("gitlab.com".into()))
+            (
+                Some(Host::Gitlab),
+                Some("group/proj".into()),
+                Some("gitlab.com".into())
+            )
         );
         // self-hosted GitLab → detected by host, domain captured for API base
         let (host, _, domain) = parse_remote("ssh://git@gitlab.example.com/team/app.git");
         assert_eq!(host, Some(Host::Gitlab));
         assert_eq!(domain, Some("gitlab.example.com".into()));
         // nested groups → last two path components
-        assert_eq!(parse_remote("https://gitlab.com/group/sub/proj.git").1, Some("sub/proj".into()));
+        assert_eq!(
+            parse_remote("https://gitlab.com/group/sub/proj.git").1,
+            Some("sub/proj".into())
+        );
     }
 
     #[test]
@@ -482,7 +524,10 @@ mod tests {
     #[test]
     fn clean_markdown_strips_emphasis_and_links() {
         assert_eq!(clean_markdown("**Bold** `code` _x_"), "Bold code x");
-        assert_eq!(clean_markdown("[Orrery](https://orrery.app) rocks"), "Orrery rocks");
+        assert_eq!(
+            clean_markdown("[Orrery](https://orrery.app) rocks"),
+            "Orrery rocks"
+        );
         // multiple links on one line must all collapse to their text
         assert_eq!(clean_markdown("[A](u1) and [B](u2)"), "A and B");
     }
@@ -499,10 +544,16 @@ mod tests {
         assert_eq!(classify_activity(0, now), Activity::Stale);
         assert_eq!(classify_activity(now - 3600, now), Activity::Active);
         assert_eq!(classify_activity(now - 10 * 24 * 3600, now), Activity::Idle);
-        assert_eq!(classify_activity(now - 40 * 24 * 3600, now), Activity::Stale);
+        assert_eq!(
+            classify_activity(now - 40 * 24 * 3600, now),
+            Activity::Stale
+        );
         // exact boundaries: comparison is strict `<`, so 7d → Idle, 30d → Stale
         assert_eq!(classify_activity(now - 7 * 24 * 3600, now), Activity::Idle);
-        assert_eq!(classify_activity(now - 30 * 24 * 3600, now), Activity::Stale);
+        assert_eq!(
+            classify_activity(now - 30 * 24 * 3600, now),
+            Activity::Stale
+        );
     }
 
     #[test]
@@ -559,7 +610,10 @@ mod tests {
         assert_eq!(found.len(), 2, "found: {names:?}");
         assert!(names.contains(&"a".to_string()));
         assert!(names.contains(&"b".to_string()));
-        assert!(!names.iter().any(|n| n == "sub"), "must not descend into a found repo");
+        assert!(
+            !names.iter().any(|n| n == "sub"),
+            "must not descend into a found repo"
+        );
         assert!(!names.iter().any(|n| n == "pkg"), "must skip ignored dirs");
     }
 }

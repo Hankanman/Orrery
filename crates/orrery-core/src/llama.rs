@@ -43,7 +43,10 @@ pub fn set_bundled_dir(dir: PathBuf) {
 /// the bundler copied the resource. Idempotent and cheap: a single stat once the
 /// binary is in place. Does nothing when no runtime was bundled.
 fn materialize_bundled() {
-    let Some(src) = BUNDLED_DIR.get().filter(|d| d.join("llama-server").is_file()) else {
+    let Some(src) = BUNDLED_DIR
+        .get()
+        .filter(|d| d.join("llama-server").is_file())
+    else {
         return;
     };
     let Some(dest) = data_dir().map(|d| d.join("bin")) else {

@@ -1,14 +1,15 @@
 # Maintainer: Seb Burrell <sebburrell@outlook.com>
 pkgname=orrery-git
 _pkgname=orrery
-pkgver=0.1.0.r0.g0000000
+pkgver=0.2.0.r0.g0000000
 pkgrel=1
 pkgdesc="every repo in orbit — a Linux-native command center for your git repos"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Hankanman/Orrery"
 license=('MIT')
-depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme' 'libayatana-appindicator')
-makedepends=('git' 'rust' 'cargo' 'pnpm' 'nodejs' 'cmake' 'pkgconf')
+# Native GPUI app: GPU (Vulkan) rendering + Wayland/X11 + fontconfig. No webview.
+depends=('vulkan-icd-loader' 'fontconfig' 'libxkbcommon' 'hicolor-icon-theme')
+makedepends=('git' 'rust' 'cargo' 'cmake' 'pkgconf' 'vulkan-headers')
 provides=('orrery')
 conflicts=('orrery')
 options=('!lto')
@@ -18,39 +19,31 @@ sha256sums=('SKIP')
 pkgver() {
 	cd "$srcdir/$_pkgname"
 	local ver
-	ver="$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+	ver="$(grep -m1 '^version' crates/orrery/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
 	printf "%s.r%s.g%s" "$ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
-
-prepare() {
-	cd "$srcdir/$_pkgname"
-	# Fetch JS deps up front (the only step that needs network beyond the clone).
-	pnpm install --frozen-lockfile
 }
 
 build() {
 	cd "$srcdir/$_pkgname"
-	# --no-bundle: compile the binary only; AUR installs files itself rather than
-	# producing a deb/AppImage. beforeBuildCommand (pnpm build) runs the frontend.
-	pnpm tauri build --no-bundle
+	cargo build --release --locked -p orrery
 }
 
 package() {
 	cd "$srcdir/$_pkgname"
-	install -Dm755 "src-tauri/target/release/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
+	install -Dm755 "target/release/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
 
 	# Desktop entry (shipped in-repo so the AUR package needs only PKGBUILD).
-	install -Dm644 "packaging/aur/$_pkgname.desktop" \
+	install -Dm644 "packaging/$_pkgname.desktop" \
 		"$pkgdir/usr/share/applications/$_pkgname.desktop"
 
 	# Icons.
 	local s
 	for s in 32 64 128; do
-		install -Dm644 "src-tauri/icons/${s}x${s}.png" \
+		install -Dm644 "packaging/icons/${s}x${s}.png" \
 			"$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/$_pkgname.png"
 	done
-	install -Dm644 "src-tauri/icons/128x128@2x.png" \
-		"$pkgdir/usr/share/icons/hicolor/256x256/apps/$_pkgname.png"
+	install -Dm644 "packaging/icons/icon.png" \
+		"$pkgdir/usr/share/icons/hicolor/512x512/apps/$_pkgname.png"
 
 	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

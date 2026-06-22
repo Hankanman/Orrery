@@ -59,7 +59,8 @@ fn save_token(token: &str) -> Result<(), String> {
             .mode(0o600)
             .open(&path)
             .map_err(|e| e.to_string())?;
-        file.write_all(token.as_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(token.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(not(unix))]
     {
@@ -69,7 +70,10 @@ fn save_token(token: &str) -> Result<(), String> {
 }
 
 fn cli_token(bin: &str) -> Option<String> {
-    let out = std::process::Command::new(bin).args(["auth", "token"]).output().ok()?;
+    let out = std::process::Command::new(bin)
+        .args(["auth", "token"])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -80,7 +84,11 @@ fn cli_token(bin: &str) -> Option<String> {
 /// Resolve a GitHub token: stored OAuth → env → `gh auth token`.
 pub fn github_token() -> Option<String> {
     stored_github_token()
-        .or_else(|| std::env::var("ORRERY_GITHUB_TOKEN").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("ORRERY_GITHUB_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| cli_token("gh"))
 }
 
@@ -168,7 +176,9 @@ pub async fn device_poll(client_id: &str, device_code: &str) -> Result<PollResul
             return Err("received a malformed access token".into());
         }
         save_token(token)?;
-        return Ok(PollResult { status: "authorized".into() });
+        return Ok(PollResult {
+            status: "authorized".into(),
+        });
     }
     Ok(PollResult {
         status: resp.error.unwrap_or_else(|| "error".into()),
