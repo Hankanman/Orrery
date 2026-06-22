@@ -3,17 +3,19 @@
 //! dismisses it. Tabs: Overview / Changes / PR / Notes / Readme.
 //!
 //! This is the workhorse primitive — most journeys (catch-up, dive, commit, PR
-//! triage) live here. Done: **Overview** (Row facts + async branches/commits/
-//! worktrees), **Readme** (lazy, `markdown`), **PR** (lazy, GitHub-only, via the
-//! `task` bridge — rollups + inline approve/merge), and **Changes** (staged diff
-//! + commit-message field via `text_input` + Commit). The Notes tab (catch-up +
-//! scratchpad) is next.
+//! triage) live here. All five tabs are in: Overview (Row facts + async
+//! branches/commits/worktrees, with worktree add/remove), Readme (lazy,
+//! `markdown`), PR (lazy, GitHub-only, via the `task` bridge — rollups + inline
+//! approve/merge), Changes (staged diff + commit-message field + Commit), and
+//! Notes (resume-where-I-left-off catch-up + the saved note). Follow-ups: the
+//! multiline scratchpad editor and the AI "generate commit message" (gated on
+//! the aiReady status, #102).
 
 use gpui::{
     div, px, rgb, rgba, AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
 };
-use orrery_core::{git_ops, inbox, launch};
+use orrery_core::{cache, git_ops, inbox, launch};
 
 use crate::data::{self, Row};
 use crate::icon::{brand, lucide};
@@ -105,8 +107,17 @@ pub enum DiffState {
     Ready(SharedString),
 }
 
+/// Notes tab data: the saved note + a "resume where I left off" catch-up line.
+pub struct NotesData {
+    pub note: SharedString,
+    pub catchup: SharedString,
+    /// Commits since last seen — drives whether "Mark caught up" is offered.
+    pub count: usize,
+    pub first_visit: bool,
+}
+
 /// Async-loaded data for the currently open repo's drawer. Overview loads on
-/// open; Readme/PR/Changes load lazily when their tabs are first shown.
+/// open; Readme/PR/Changes/Notes load lazily when their tabs are first shown.
 #[derive(Default)]
 pub struct DrawerData {
     pub repo: SharedString,
@@ -116,8 +127,12 @@ pub struct DrawerData {
     pub readme: ReadmeState,
     pub pr: PrState,
     pub diff: DiffState,
+    /// Notes tab (catch-up + saved note); `None` until first shown.
+    pub notes: Option<NotesData>,
     /// The commit-message field for the Changes tab, created when it first opens.
     pub commit_input: Option<Entity<crate::text_input::TextInput>>,
+    /// The new-worktree name field (Overview), created when the drawer opens.
+    pub worktree_input: Option<Entity<crate::text_input::TextInput>>,
 }
 
 impl DrawerData {
@@ -261,7 +276,7 @@ fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp
 }
 
 /// Build an [`InputStyle`] from the theme.
-fn input_style(t: &Theme) -> crate::text_input::InputStyle {
+pub fn input_style(t: &Theme) -> crate::text_input::InputStyle {
     crate::text_input::InputStyle {
         bg: t.button_bg,
         border: t.border,
@@ -270,6 +285,118 @@ fn input_style(t: &Theme) -> crate::text_input::InputStyle {
         cursor: t.accent_bright,
         size: t.text_small,
     }
+}
+
+/// Read the saved note + "resume where I left off" catch-up for a repo (sync).
+fn read_notes(id: &str) -> NotesData {
+    let note = cache::note(id);
+    let (catchup, count, first_visit) = match cache::seen_sha(id) {
+        None => (
+            "First visit — nothing to catch up on yet.".to_string(),
+            0,
+            true,
+        ),
+        Some(since) => {
+            let n = git_ops::log_since_sha(id, &since, 50)
+                .map(|c| c.len())
+                .unwrap_or(0);
+            let msg = match n {
+                0 => "All caught up since you last looked.".to_string(),
+                1 => "1 commit since you last looked.".to_string(),
+                n => format!("{n} commits since you last looked."),
+            };
+            (msg, n, false)
+        }
+    };
+    NotesData {
+        note: note.into(),
+        catchup: catchup.into(),
+        count,
+        first_visit,
+    }
+}
+
+/// Lazily load the Notes tab data when it first opens.
+pub fn load_notes(repo: SharedString, cx: &mut Context<OrreryApp>) {
+    let id = repo.to_string();
+    cx.spawn(async move |this, cx| {
+        let notes = cx
+            .background_executor()
+            .spawn(async move { read_notes(&id) })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo == repo {
+                this.drawer.notes = Some(notes);
+                cx.notify();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Record the current HEAD as "seen", then refresh the catch-up.
+fn mark_seen(repo: SharedString, cx: &mut Context<OrreryApp>) {
+    let now = data::now_unix();
+    let id = repo.to_string();
+    cx.spawn(async move |this, cx| {
+        let notes = cx
+            .background_executor()
+            .spawn(async move {
+                if let Ok(sha) = git_ops::head_sha(&id) {
+                    let _ = cache::set_seen(&id, &sha, now);
+                }
+                read_notes(&id)
+            })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            if this.drawer.repo == repo {
+                this.drawer.notes = Some(notes);
+                cx.notify();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Create a worktree (+ branch) `name` in a sibling dir, then refresh Overview.
+fn add_worktree(repo: SharedString, name: String, cx: &mut Context<OrreryApp>) {
+    let now = data::now_unix();
+    let id = repo.to_string();
+    let dest = format!("{id}-{name}");
+    cx.spawn(async move |this, cx| {
+        let loaded = cx
+            .background_executor()
+            .spawn(async move {
+                let _ = git_ops::add_worktree(&id, &name, &dest);
+                read_overview(&id)
+            })
+            .await;
+        store_overview(&this, cx, &repo, loaded, now);
+        let _ = this.update(cx, |this, cx| {
+            if let Some(input) = this.drawer.worktree_input.clone() {
+                input.update(cx, |i, cx| i.set_content("", cx));
+            }
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+/// Unlink worktree `name` (leaves files on disk), then refresh Overview.
+fn remove_worktree(repo: SharedString, name: String, cx: &mut Context<OrreryApp>) {
+    let now = data::now_unix();
+    let id = repo.to_string();
+    cx.spawn(async move |this, cx| {
+        let loaded = cx
+            .background_executor()
+            .spawn(async move {
+                let _ = git_ops::remove_worktree(&id, &name);
+                read_overview(&id)
+            })
+            .await;
+        store_overview(&this, cx, &repo, loaded, now);
+    })
+    .detach();
 }
 
 /// Read the first matching README from the repo root (mirrors the Tauri
@@ -588,6 +715,8 @@ fn tab_bar(
                             }));
                         }
                         load_diff(repo, cx);
+                    } else if tab == DrawerTab::Notes && this.drawer.notes.is_none() {
+                        load_notes(repo, cx);
                     }
                     cx.notify();
                 });
@@ -609,7 +738,7 @@ fn body(
         DrawerTab::Readme => readme_view(data, t).into_any_element(),
         DrawerTab::Pr => pr_view(row, data, t, app).into_any_element(),
         DrawerTab::Changes => changes_view(row, data, t, app).into_any_element(),
-        other => coming_soon(other, t).into_any_element(),
+        DrawerTab::Notes => notes_view(row, data, t, app).into_any_element(),
     };
     div()
         .id("drawer-body")
@@ -720,7 +849,7 @@ fn overview(row: &Row, t: &Theme, data: &DrawerData, app: &Entity<OrreryApp>) ->
     // Async git data.
     col = col.child(branches_section(data, t, app));
     col = col.child(commits_section(data, t));
-    col.child(worktrees_section(data, t))
+    col.child(worktrees_section(data, t, app))
 }
 
 /// Section wrapper: an uppercase label (+ optional count) over a list.
@@ -864,13 +993,32 @@ fn commits_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
     s
 }
 
-fn worktrees_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
+fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let repo = data.repo.clone();
     let mut s = section(t, "Worktrees", data.worktrees.as_ref().map(|w| w.len()));
     match &data.worktrees {
         None => s = s.child(placeholder("Loading…", t)),
         Some(list) if list.is_empty() => s = s.child(placeholder("None.", t)),
         Some(list) => {
             for w in list {
+                let remove = {
+                    let (app, repo, name) = (app.clone(), repo.clone(), w.name.to_string());
+                    div()
+                        .id(SharedString::from(format!("wt-rm-{}", w.name)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(22.))
+                        .h(px(22.))
+                        .rounded(px(t.r_xs))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(t.surface_hover)))
+                        .child(lucide("x", 12., t.fg3))
+                        .on_click(move |_ev, _win, cx| {
+                            let (repo, name) = (repo.clone(), name.clone());
+                            app.update(cx, |_this, cx| remove_worktree(repo, name, cx));
+                        })
+                };
                 s = s.child(
                     div()
                         .flex()
@@ -884,14 +1032,40 @@ fn worktrees_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
                         .child(div().text_color(rgb(t.fg1)).child(w.name.clone()))
                         .child(
                             div()
+                                .flex_1()
                                 .min_w(px(0.))
                                 .truncate()
                                 .text_color(rgb(t.fg3))
                                 .child(w.path.clone()),
-                        ),
+                        )
+                        .child(remove),
                 );
             }
         }
+    }
+
+    // Add a worktree: name field + Add button.
+    if let Some(input) = &data.worktree_input {
+        let (app, repo, input2) = (app.clone(), repo.clone(), input.clone());
+        s = s.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .mt(px(4.))
+                .child(div().flex_1().min_w(px(0.)).child(input.clone()))
+                .child(pr_btn(SharedString::from("wt-add"), "Add", t, move |cx| {
+                    let repo = repo.clone();
+                    let name = input2.read(cx).content();
+                    if name.trim().is_empty() {
+                        return;
+                    }
+                    app.update(cx, |_this, cx| {
+                        add_worktree(repo, name.trim().to_string(), cx)
+                    });
+                })),
+        );
     }
     s
 }
@@ -1176,30 +1350,58 @@ fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
     }
 }
 
-/// Placeholder for a tab not yet ported — clearly labelled so it reads as
-/// scaffold, not breakage.
-fn coming_soon(tab: DrawerTab, t: &Theme) -> impl IntoElement {
-    let label = match tab {
-        DrawerTab::Changes => "Staged diff + AI commit message",
-        DrawerTab::Pr => "Open PRs · checks · review · merge",
-        DrawerTab::Notes => "Catch-up summary + scratchpad",
-        DrawerTab::Readme => "Rendered README",
-        DrawerTab::Overview => "",
+/// Notes tab: a "resume where I left off" catch-up + the saved note (read-only
+/// markdown for now; multiline editing is a follow-up).
+fn notes_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> Div {
+    let mut col = div().flex().flex_col().gap(px(14.));
+    let Some(n) = &data.notes else {
+        return col.child(placeholder("Loading…", t));
     };
-    div()
+
+    // Catch-up row.
+    let mut catch = div()
         .flex()
-        .flex_col()
+        .flex_row()
         .items_center()
-        .justify_center()
-        .flex_1()
-        .gap(px(6.))
-        .text_color(rgb(t.fg3))
-        .child(lucide("hammer", 20., t.fg3))
+        .gap(px(9.))
+        .p(px(11.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(t.surface))
+        .border_1()
+        .border_color(rgb(t.border))
+        .child(lucide("history", 15., t.accent_bright))
         .child(
             div()
-                .text_size(px(t.text_data_sm))
-                .child(SharedString::from(label)),
-        )
+                .flex_1()
+                .text_size(px(t.text_small))
+                .text_color(rgb(t.fg1))
+                .child(n.catchup.clone()),
+        );
+    if n.count > 0 || n.first_visit {
+        let (app, repo) = (app.clone(), row.id.clone());
+        catch = catch.child(pr_btn(
+            SharedString::from("mark-seen"),
+            "Mark caught up",
+            t,
+            move |cx| {
+                let repo = repo.clone();
+                app.update(cx, |_this, cx| mark_seen(repo, cx));
+            },
+        ));
+    }
+    col = col.child(catch);
+
+    // Saved note.
+    let mut note = section(t, "Note", None);
+    if n.note.trim().is_empty() {
+        note = note.child(placeholder(
+            "No note yet — editing arrives with the multiline field.",
+            t,
+        ));
+    } else {
+        note = note.child(crate::markdown::render(&n.note, t));
+    }
+    col.child(note)
 }
 
 fn footer(row: &Row, t: &Theme, ide_cmd: &str, agent_cmd: &str) -> impl IntoElement {

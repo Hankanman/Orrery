@@ -9,8 +9,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, px, rgb, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, rgb, AppContext, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 use orrery_core::model::AppConfig;
@@ -93,6 +93,10 @@ impl OrreryApp {
             tab: DrawerTab::Overview,
         });
         self.drawer = crate::drawer::DrawerData::loading(repo.clone());
+        // The new-worktree field lives in Overview, shown immediately on open.
+        let istyle = crate::drawer::input_style(&self.theme);
+        self.drawer.worktree_input =
+            Some(cx.new(|cx| crate::text_input::TextInput::new(cx, istyle, "new-worktree-name")));
         crate::drawer::load_overview(repo, cx);
         cx.notify();
     }
