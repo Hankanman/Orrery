@@ -88,9 +88,10 @@ fn main() {
                 },
                 |window, cx| {
                     let view = cx.new(|cx| {
-                        // Start the live wiring: filesystem watch, appearance, and
-                        // attention poll all marshal back onto this entity.
-                        live::spawn(cx);
+                        // Start the live wiring: filesystem watch, appearance,
+                        // attention poll, and system tray all marshal back onto
+                        // this entity. Returns whether the tray came up.
+                        let tray_active = live::spawn(cx);
                         OrreryApp {
                             view: View::Grid,
                             rows,
@@ -111,9 +112,19 @@ fn main() {
                             github_authed: false,
                             github_device: None,
                             ai_status: Default::default(),
+                            tray_active,
                             focus: cx.focus_handle(),
                         }
                     });
+                    // Close-to-tray: when the tray is up, the window's close
+                    // button minimizes to the tray instead of quitting. Without a
+                    // tray we leave the default (close quits) so there's a way out.
+                    if view.read(cx).tray_active {
+                        window.on_window_should_close(cx, |window, _cx| {
+                            window.minimize_window();
+                            false
+                        });
+                    }
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();
                     window.focus(&focus, cx);

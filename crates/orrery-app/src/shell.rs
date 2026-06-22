@@ -105,6 +105,8 @@ pub struct OrreryApp {
     pub github_device: Option<crate::views::settings::GithubDevice>,
     /// Live AI-backend reachability (Settings AI panel).
     pub ai_status: crate::views::settings::AiStatus,
+    /// Whether the system tray came up — gates close-to-tray.
+    pub tray_active: bool,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
