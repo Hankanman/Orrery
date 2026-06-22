@@ -379,6 +379,9 @@ pub fn drawer(
         .size_full()
         .flex()
         .flex_row()
+        // Modal: block all mouse interaction with the grid behind, so clicks on
+        // the panel don't also fall through to a card.
+        .occlude()
         .child(backdrop)
         .child(panel)
 }
