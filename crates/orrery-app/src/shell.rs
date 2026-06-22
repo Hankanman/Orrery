@@ -84,6 +84,12 @@ pub struct OrreryApp {
     pub drawer: crate::drawer::DrawerData,
     /// Inbox view state (lazy, loaded when the nav item is first selected).
     pub inbox: crate::views::inbox::InboxState,
+    /// Feed / Explore / Cleanup view state (lazy, loaded on first select).
+    pub feed: crate::views::feed::FeedState,
+    pub explore: crate::views::explore::ExploreState,
+    pub cleanup: crate::views::cleanup::CleanupState,
+    /// Slugs currently being cloned from the Explore view.
+    pub explore_cloning: std::collections::HashSet<SharedString>,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
@@ -276,6 +282,144 @@ impl OrreryApp {
         .detach();
     }
 
+    /// Lazy-load a view's data the first time it's opened (Idle → Loading).
+    fn maybe_load_view(&mut self, view: View, cx: &mut Context<Self>) {
+        use crate::views;
+        match view {
+            View::Inbox if matches!(self.inbox, views::inbox::InboxState::Idle) => {
+                self.load_inbox(cx)
+            }
+            View::Feed if matches!(self.feed, views::feed::FeedState::Idle) => self.load_feed(cx),
+            View::Explore if matches!(self.explore, views::explore::ExploreState::Idle) => {
+                self.load_starred(cx)
+            }
+            View::Janitor if matches!(self.cleanup, views::cleanup::CleanupState::Idle) => {
+                self.load_cleanup(cx)
+            }
+            _ => {}
+        }
+    }
+
+    /// Load the activity/release feed over the network.
+    pub fn load_feed(&mut self, cx: &mut Context<Self>) {
+        use crate::views::feed::{feed_row, FeedState};
+        self.feed = FeedState::Loading;
+        cx.notify();
+        let now = crate::data::now_unix();
+        cx.spawn(async move |this, cx| {
+            let res = crate::task::run(async { orrery_core::inbox::github_feed().await }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.feed = match res {
+                    Ok(items) => {
+                        FeedState::Ready(items.into_iter().map(|f| feed_row(f, now)).collect())
+                    }
+                    Err(e) => FeedState::Error(e.into()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Load the starred-repo browser over the network.
+    pub fn load_starred(&mut self, cx: &mut Context<Self>) {
+        use crate::views::explore::{star_row, ExploreState};
+        self.explore = ExploreState::Loading;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = crate::task::run(async { orrery_core::inbox::github_starred().await }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.explore = match res {
+                    Ok(repos) => ExploreState::Ready(repos.into_iter().map(star_row).collect()),
+                    Err(e) => ExploreState::Error(e.into()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Clone a starred repo into the first root, then rescan so it appears.
+    pub fn clone_starred(
+        &mut self,
+        slug: SharedString,
+        clone_url: SharedString,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.config.roots.first().cloned() else {
+            return;
+        };
+        self.explore_cloning.insert(slug.clone());
+        cx.notify();
+        let dest = orrery_core::scan::expand(&root)
+            .join(name.as_ref())
+            .to_string_lossy()
+            .into_owned();
+        let url = clone_url.to_string();
+        cx.spawn(async move |this, cx| {
+            let (rows, roots) = cx
+                .background_executor()
+                .spawn(async move {
+                    if !std::path::Path::new(&dest).exists() {
+                        let _ = orrery_core::git_ops::clone(&url, &dest);
+                    }
+                    crate::data::rescan()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.rows = rows;
+                this.roots = roots;
+                this.explore_cloning.remove(&slug);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Scan all repos for prunable branches (sync git, off-thread).
+    pub fn load_cleanup(&mut self, cx: &mut Context<Self>) {
+        use crate::views::cleanup::CleanupState;
+        self.cleanup = CleanupState::Loading;
+        cx.notify();
+        let rows = self.rows.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::views::cleanup::scan(&rows) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.cleanup = CleanupState::Ready(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Prune the given repo's stale branches, then refresh the Cleanup list.
+    pub fn prune_repo(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        let path = id.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = orrery_core::git_ops::prune_branches(&path);
+                })
+                .await;
+            let Ok(rows) = this.update(cx, |this, _| this.rows.clone()) else {
+                return;
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::views::cleanup::scan(&rows) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.cleanup = crate::views::cleanup::CleanupState::Ready(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Re-scan the roots from disk (off the UI thread) and reload the grid.
     fn rescan(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -400,12 +544,7 @@ impl OrreryApp {
                 .hover(|s| s.bg(rgb(t.surface_hover)))
                 .on_click(cx.listener(move |this, _ev, _win, cx| {
                     this.view = view;
-                    // Lazy-load a view's data the first time it's opened.
-                    if view == View::Inbox
-                        && matches!(this.inbox, crate::views::inbox::InboxState::Idle)
-                    {
-                        this.load_inbox(cx);
-                    }
+                    this.maybe_load_view(view, cx);
                     cx.notify();
                 }))
                 .child(lucide(icon_name, 16., fg))
@@ -458,6 +597,24 @@ impl OrreryApp {
             View::Grid => self.grid(t, cx, cols).into_any_element(),
             View::Inbox => {
                 crate::views::inbox::render(&self.inbox, t, &cx.entity()).into_any_element()
+            }
+            View::Feed => {
+                crate::views::feed::render(&self.feed, t, &cx.entity()).into_any_element()
+            }
+            View::Explore => {
+                let cloned: std::collections::HashSet<SharedString> =
+                    self.rows.iter().map(|r| r.slug.clone()).collect();
+                crate::views::explore::render(
+                    &self.explore,
+                    &cloned,
+                    &self.explore_cloning,
+                    t,
+                    &cx.entity(),
+                )
+                .into_any_element()
+            }
+            View::Janitor => {
+                crate::views::cleanup::render(&self.cleanup, t, &cx.entity()).into_any_element()
             }
             other => placeholder(other, t).into_any_element(),
         }

@@ -98,6 +98,10 @@ fn main() {
                             overlay: None,
                             drawer: Default::default(),
                             inbox: Default::default(),
+                            feed: Default::default(),
+                            explore: Default::default(),
+                            cleanup: Default::default(),
+                            explore_cloning: Default::default(),
                             focus: cx.focus_handle(),
                         }
                     });
