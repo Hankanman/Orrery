@@ -14,6 +14,7 @@ mod icon;
 mod live;
 mod markdown;
 mod shell;
+mod task;
 mod theme;
 
 use std::rc::Rc;

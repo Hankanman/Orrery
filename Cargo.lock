@@ -4192,6 +4192,7 @@ dependencies = [
  "orrery-core",
  "orrery-platform",
  "rust-embed",
+ "tokio",
 ]
 
 [[package]]
