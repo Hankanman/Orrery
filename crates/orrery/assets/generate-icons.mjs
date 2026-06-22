@@ -2,7 +2,7 @@
 // icon packages (lucide-react, simple-icons). Mirrors the repo convention:
 // generated icon data is committed; the source packages stay devDeps and are
 // never imported at runtime. Re-run from the repo root:
-//   node crates/orrery-app/assets/generate-icons.mjs
+//   node crates/orrery/assets/generate-icons.mjs
 //
 // lucide icons are stroke-based; we emit stroke="#000" so usvg rasterizes the
 // strokes into an alpha mask that GPUI's svg() element tints via text_color.

@@ -13,7 +13,7 @@ you can run it next to the Tauri build and compare CPU directly.
 
 All logic lives in the **`orrery-core`** crate (`crates/orrery-core`) — scan,
 git, host APIs, AI, cache, config, launchers — with zero UI and zero Tauri.
-`orrery-app` depends on it directly; the grid reads `orrery_core::cache::load_repos()`,
+The app crate depends on it directly; the grid reads `orrery_core::cache::load_repos()`,
 which loads `~/.local/share/orrery/cache.sqlite`. The legacy Tauri shell
 (`src-tauri/`) re-exports the same core, so both apps share one source of truth
 until the Tauri shell is deleted at cutover.
@@ -39,7 +39,7 @@ pkg-config --exists vulkan wayland-client xkbcommon fontconfig freetype2 && echo
 ## Build & run
 
 ```bash
-cd crates/orrery-app
+cd crates/orrery
 cargo run --release      # first build is slow: it compiles all of GPUI
 ```
 
@@ -80,7 +80,7 @@ for the *same* interaction (scroll the grid up and down for ~15s).
 # Native spike
 cargo run --release &
 # find its pid, then sample:
-pidstat -h -u -p $(pgrep -f orrery-app) 1 20
+pidstat -h -u -p $(pgrep -f orrery) 1 20
 
 # Tauri build (separately) — measure the WebKit render process, not just the shell:
 pnpm tauri dev   # or the release binary

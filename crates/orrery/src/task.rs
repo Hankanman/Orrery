@@ -6,7 +6,7 @@
 //! runtime and hand each result back through a one-shot channel that the calling
 //! gpui task awaits.
 //!
-//! This is the one spot `orrery-app` owns a runtime (everything else lives in
+//! This is the one spot `orrery` (the app) owns a runtime (everything else lives in
 //! `orrery-platform`); on-demand UI data fundamentally needs an in-app reactor.
 
 use std::future::Future;
