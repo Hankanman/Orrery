@@ -15,6 +15,7 @@ pub mod cleanup;
 pub mod explore;
 pub mod feed;
 pub mod inbox;
+pub mod settings;
 
 /// A view's chrome: a 52px header (title + refresh) over a scrolling body.
 pub fn frame(

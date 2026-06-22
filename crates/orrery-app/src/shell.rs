@@ -90,6 +90,9 @@ pub struct OrreryApp {
     pub cleanup: crate::views::cleanup::CleanupState,
     /// Slugs currently being cloned from the Explore view.
     pub explore_cloning: std::collections::HashSet<SharedString>,
+    /// Settings editing session (draft config + field inputs); created on first
+    /// open, kept so edits survive navigating away.
+    pub settings: Option<crate::views::settings::SettingsState>,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
@@ -296,8 +299,65 @@ impl OrreryApp {
             View::Janitor if matches!(self.cleanup, views::cleanup::CleanupState::Idle) => {
                 self.load_cleanup(cx)
             }
+            View::Settings if self.settings.is_none() => self.open_settings(cx),
             _ => {}
         }
+    }
+
+    /// Start a settings editing session, seeding the field inputs from config.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let style = crate::drawer::input_style(&self.theme);
+        self.settings = Some(crate::views::settings::SettingsState::new(
+            &self.config,
+            style,
+            cx,
+        ));
+        cx.notify();
+    }
+
+    /// Append the typed root to the draft and clear the add field.
+    pub fn settings_add_root(&mut self, cx: &mut Context<Self>) {
+        let Some(s) = &self.settings else { return };
+        let val = s.add_root.read(cx).content().trim().to_string();
+        let input = s.add_root.clone();
+        if val.is_empty() {
+            return;
+        }
+        input.update(cx, |i, cx| i.set_content("", cx));
+        if let Some(s) = &mut self.settings {
+            s.draft.roots.push(val);
+            s.saved = false;
+        }
+        cx.notify();
+    }
+
+    /// Read the field inputs into the draft, persist it, and rescan.
+    pub fn settings_save(&mut self, cx: &mut Context<Self>) {
+        let Some(s) = &self.settings else { return };
+        let mut draft = s.draft.clone();
+        draft.ide_command = s.ide.read(cx).content().to_string();
+        draft.agent_command = s.agent.read(cx).content().to_string();
+        draft.ollama_host = s.ollama_host.read(cx).content().to_string();
+        draft.ai_model = s.ai_model.read(cx).content().to_string();
+        draft.embed_model = s.embed_model.read(cx).content().to_string();
+        draft.github_client_id = s.client_id.read(cx).content().to_string();
+        draft.ignore = s
+            .ignore
+            .read(cx)
+            .content()
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+
+        let _ = orrery_core::config::save(&draft);
+        self.config = draft.clone();
+        if let Some(s) = &mut self.settings {
+            s.draft = draft;
+            s.saved = true;
+        }
+        self.rescan(cx);
+        cx.notify();
     }
 
     /// Load the activity/release feed over the network.
@@ -616,6 +676,10 @@ impl OrreryApp {
             View::Janitor => {
                 crate::views::cleanup::render(&self.cleanup, t, &cx.entity()).into_any_element()
             }
+            View::Settings => match &self.settings {
+                Some(s) => crate::views::settings::render(s, t, &cx.entity()).into_any_element(),
+                None => placeholder(View::Settings, t).into_any_element(),
+            },
             other => placeholder(other, t).into_any_element(),
         }
     }
