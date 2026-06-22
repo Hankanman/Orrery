@@ -8,46 +8,50 @@
 
 use gpui::{
     AppContext, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px, rgb,
+    StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
+use gpui_component::input::{Input, InputState};
 use orrery_core::model::AppConfig;
 
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
-use crate::text_input::{InputStyle, TextInput};
 use crate::theme::Theme;
 
 /// The editable settings session: a draft config + the string-field inputs.
 pub struct SettingsState {
     pub draft: AppConfig,
-    pub ide: Entity<TextInput>,
-    pub agent: Entity<TextInput>,
-    pub ollama_host: Entity<TextInput>,
-    pub ai_model: Entity<TextInput>,
-    pub embed_model: Entity<TextInput>,
-    pub client_id: Entity<TextInput>,
-    pub ignore: Entity<TextInput>,
-    pub add_root: Entity<TextInput>,
+    pub ide: Entity<InputState>,
+    pub agent: Entity<InputState>,
+    pub ollama_host: Entity<InputState>,
+    pub ai_model: Entity<InputState>,
+    pub embed_model: Entity<InputState>,
+    pub client_id: Entity<InputState>,
+    pub ignore: Entity<InputState>,
+    pub add_root: Entity<InputState>,
     /// Flash a "Saved" confirmation after a successful save.
     pub saved: bool,
 }
 
 impl SettingsState {
     /// Seed a session from the live config.
-    pub fn new(cfg: &AppConfig, style: InputStyle, cx: &mut gpui::App) -> Self {
-        let field = |cx: &mut gpui::App, ph: &'static str, val: &str| {
-            let (val, ph) = (val.to_string(), ph);
-            cx.new(|cx| TextInput::new_with(cx, style, ph, val))
+    pub fn new(cfg: &AppConfig, window: &mut Window, cx: &mut gpui::App) -> Self {
+        let field = |window: &mut Window, cx: &mut gpui::App, ph: &'static str, val: &str| {
+            let val = val.to_string();
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(ph)
+                    .default_value(val)
+            })
         };
         SettingsState {
-            ide: field(cx, "code {path}", &cfg.ide_command),
-            agent: field(cx, "agent command", &cfg.agent_command),
-            ollama_host: field(cx, "http://localhost:11434", &cfg.ollama_host),
-            ai_model: field(cx, "model name", &cfg.ai_model),
-            embed_model: field(cx, "embed model", &cfg.embed_model),
-            client_id: field(cx, "GitHub OAuth client id", &cfg.github_client_id),
-            ignore: field(cx, "node_modules, .cache", &cfg.ignore.join(", ")),
-            add_root: field(cx, "~/dev", ""),
+            ide: field(window, cx, "code {path}", &cfg.ide_command),
+            agent: field(window, cx, "agent command", &cfg.agent_command),
+            ollama_host: field(window, cx, "http://localhost:11434", &cfg.ollama_host),
+            ai_model: field(window, cx, "model name", &cfg.ai_model),
+            embed_model: field(window, cx, "embed model", &cfg.embed_model),
+            client_id: field(window, cx, "GitHub OAuth client id", &cfg.github_client_id),
+            ignore: field(window, cx, "node_modules, .cache", &cfg.ignore.join(", ")),
+            add_root: field(window, cx, "~/dev", ""),
             draft: cfg.clone(),
             saved: false,
         }
@@ -142,7 +146,7 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
             .flex_row()
             .items_center()
             .gap(px(8.))
-            .child(div().flex_1().min_w(px(0.)).child(s.add_root.clone()))
+            .child(div().flex_1().min_w(px(0.)).child(Input::new(&s.add_root)))
             .child(add),
     );
 
@@ -280,13 +284,13 @@ fn section(t: &Theme, title: &str) -> gpui::Div {
 }
 
 /// A labelled text-input row.
-fn labeled(label: &str, input: Entity<TextInput>, t: &Theme) -> impl IntoElement {
+fn labeled(label: &str, input: Entity<InputState>, t: &Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
         .gap(px(4.))
         .child(field_label(label, t))
-        .child(input)
+        .child(Input::new(&input))
 }
 
 fn field_label(label: &str, t: &Theme) -> impl IntoElement {

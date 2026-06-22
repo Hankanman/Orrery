@@ -100,16 +100,16 @@ pub struct OrreryApp {
 impl OrreryApp {
     /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
     /// async git load.
-    pub fn open_drawer(&mut self, repo: SharedString, cx: &mut Context<Self>) {
+    pub fn open_drawer(&mut self, repo: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         self.overlay = Some(Overlay::Drawer {
             repo: repo.clone(),
             tab: DrawerTab::Overview,
         });
         self.drawer = crate::drawer::DrawerData::loading(repo.clone());
         // The new-worktree field lives in Overview, shown immediately on open.
-        let istyle = crate::drawer::input_style(&self.theme);
-        self.drawer.worktree_input =
-            Some(cx.new(|cx| crate::text_input::TextInput::new(cx, istyle, "new-worktree-name")));
+        self.drawer.worktree_input = Some(cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx).placeholder("new-worktree-name")
+        }));
         crate::drawer::load_overview(repo, cx);
         cx.notify();
     }
@@ -285,7 +285,7 @@ impl OrreryApp {
     }
 
     /// Lazy-load a view's data the first time it's opened (Idle → Loading).
-    fn maybe_load_view(&mut self, view: View, cx: &mut Context<Self>) {
+    fn maybe_load_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
         use crate::views;
         match view {
             View::Inbox if matches!(self.inbox, views::inbox::InboxState::Idle) => {
@@ -298,31 +298,28 @@ impl OrreryApp {
             View::Janitor if matches!(self.cleanup, views::cleanup::CleanupState::Idle) => {
                 self.load_cleanup(cx)
             }
-            View::Settings if self.settings.is_none() => self.open_settings(cx),
+            View::Settings if self.settings.is_none() => self.open_settings(window, cx),
             _ => {}
         }
     }
 
     /// Start a settings editing session, seeding the field inputs from config.
-    fn open_settings(&mut self, cx: &mut Context<Self>) {
-        let style = crate::drawer::input_style(&self.theme);
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = Some(crate::views::settings::SettingsState::new(
             &self.config,
-            style,
+            window,
             cx,
         ));
         cx.notify();
     }
 
-    /// Append the typed root to the draft and clear the add field.
+    /// Append the typed root to the draft.
     pub fn settings_add_root(&mut self, cx: &mut Context<Self>) {
         let Some(s) = &self.settings else { return };
-        let val = s.add_root.read(cx).content().trim().to_string();
-        let input = s.add_root.clone();
+        let val = s.add_root.read(cx).value().trim().to_string();
         if val.is_empty() {
             return;
         }
-        input.update(cx, |i, cx| i.set_content("", cx));
         if let Some(s) = &mut self.settings {
             s.draft.roots.push(val);
             s.saved = false;
@@ -334,16 +331,16 @@ impl OrreryApp {
     pub fn settings_save(&mut self, cx: &mut Context<Self>) {
         let Some(s) = &self.settings else { return };
         let mut draft = s.draft.clone();
-        draft.ide_command = s.ide.read(cx).content().to_string();
-        draft.agent_command = s.agent.read(cx).content().to_string();
-        draft.ollama_host = s.ollama_host.read(cx).content().to_string();
-        draft.ai_model = s.ai_model.read(cx).content().to_string();
-        draft.embed_model = s.embed_model.read(cx).content().to_string();
-        draft.github_client_id = s.client_id.read(cx).content().to_string();
+        draft.ide_command = s.ide.read(cx).value().to_string();
+        draft.agent_command = s.agent.read(cx).value().to_string();
+        draft.ollama_host = s.ollama_host.read(cx).value().to_string();
+        draft.ai_model = s.ai_model.read(cx).value().to_string();
+        draft.embed_model = s.embed_model.read(cx).value().to_string();
+        draft.github_client_id = s.client_id.read(cx).value().to_string();
         draft.ignore = s
             .ignore
             .read(cx)
-            .content()
+            .value()
             .split(',')
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
@@ -601,9 +598,9 @@ impl OrreryApp {
                 .text_size(px(t.text_small))
                 .text_color(rgb(fg))
                 .hover(|s| s.bg(rgb(t.surface_hover)))
-                .on_click(cx.listener(move |this, _ev, _win, cx| {
+                .on_click(cx.listener(move |this, _ev, window, cx| {
                     this.view = view;
-                    this.maybe_load_view(view, cx);
+                    this.maybe_load_view(view, window, cx);
                     cx.notify();
                 }))
                 .child(lucide(icon_name, 16., fg))

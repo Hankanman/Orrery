@@ -292,9 +292,9 @@ pub fn card(
             .flex()
             .flex_col()
             .cursor_pointer()
-            .on_click(move |_ev, _win, cx| {
+            .on_click(move |_ev, window, cx| {
                 let id = id.clone();
-                app.update(cx, |this, cx| this.open_drawer(id, cx));
+                app.update(cx, |this, cx| this.open_drawer(id, window, cx));
             })
             .child(head)
             .child(slug)

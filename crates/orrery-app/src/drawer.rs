@@ -133,9 +133,9 @@ pub struct DrawerData {
     /// saved note when the Notes tab first opens.
     pub note_input: Option<Entity<gpui_component::input::InputState>>,
     /// The commit-message field for the Changes tab, created when it first opens.
-    pub commit_input: Option<Entity<crate::text_input::TextInput>>,
+    pub commit_input: Option<Entity<gpui_component::input::InputState>>,
     /// The new-worktree name field (Overview), created when the drawer opens.
-    pub worktree_input: Option<Entity<crate::text_input::TextInput>>,
+    pub worktree_input: Option<Entity<gpui_component::input::InputState>>,
 }
 
 impl DrawerData {
@@ -267,27 +267,12 @@ fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp
             if this.drawer.repo != repo {
                 return;
             }
-            if let Some(input) = this.drawer.commit_input.clone() {
-                input.update(cx, |i, cx| i.set_content("", cx));
-            }
             this.drawer.diff = DiffState::Loading;
             load_diff(repo, cx);
             cx.notify();
         });
     })
     .detach();
-}
-
-/// Build an [`InputStyle`] from the theme.
-pub fn input_style(t: &Theme) -> crate::text_input::InputStyle {
-    crate::text_input::InputStyle {
-        bg: t.button_bg,
-        border: t.border,
-        text: t.fg0,
-        placeholder: t.fg3,
-        cursor: t.accent_bright,
-        size: t.text_small,
-    }
 }
 
 /// Read the "resume where I left off" catch-up for a repo (sync). The note text
@@ -387,12 +372,6 @@ fn add_worktree(repo: SharedString, name: String, cx: &mut Context<OrreryApp>) {
             })
             .await;
         store_overview(&this, cx, &repo, loaded, now);
-        let _ = this.update(cx, |this, cx| {
-            if let Some(input) = this.drawer.worktree_input.clone() {
-                input.update(cx, |i, cx| i.set_content("", cx));
-            }
-            cx.notify();
-        });
     })
     .detach();
 }
@@ -671,7 +650,6 @@ fn tab_bar(
     repo: SharedString,
     pr_slug: Option<SharedString>,
 ) -> impl IntoElement {
-    let istyle = input_style(t);
     let mut bar = div()
         .flex()
         .flex_row()
@@ -726,7 +704,8 @@ fn tab_bar(
                         this.drawer.diff = DiffState::Loading;
                         if this.drawer.commit_input.is_none() {
                             this.drawer.commit_input = Some(cx.new(|cx| {
-                                crate::text_input::TextInput::new(cx, istyle, "Commit message…")
+                                gpui_component::input::InputState::new(window, cx)
+                                    .placeholder("Commit message…")
                             }));
                         }
                         load_diff(repo, cx);
@@ -1081,10 +1060,15 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
                 .items_center()
                 .gap(px(6.))
                 .mt(px(4.))
-                .child(div().flex_1().min_w(px(0.)).child(input.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(gpui_component::input::Input::new(input)),
+                )
                 .child(pr_btn(SharedString::from("wt-add"), "Add", t, move |cx| {
                     let repo = repo.clone();
-                    let name = input2.read(cx).content();
+                    let name = input2.read(cx).value();
                     if name.trim().is_empty() {
                         return;
                     }
@@ -1111,21 +1095,21 @@ fn changes_view(
         let repo = row.id.clone();
         let app2 = app.clone();
         let input2 = input.clone();
-        col = col
-            .child(input.clone())
-            .child(div().flex().flex_row().justify_end().child(pr_btn(
+        col = col.child(gpui_component::input::Input::new(input)).child(
+            div().flex().flex_row().justify_end().child(pr_btn(
                 SharedString::from("commit"),
                 "Commit",
                 t,
                 move |cx: &mut gpui::App| {
                     let repo = repo.clone();
-                    let msg = input2.read(cx).content();
+                    let msg = input2.read(cx).value();
                     if msg.trim().is_empty() {
                         return;
                     }
                     app2.update(cx, |_this, cx| commit_staged(repo, msg.to_string(), cx));
                 },
-            )));
+            )),
+        );
     }
 
     // Staged diff.
