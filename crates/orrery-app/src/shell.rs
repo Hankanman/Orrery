@@ -20,7 +20,10 @@ use crate::data::Row;
 use crate::icon::lucide;
 use crate::theme::Theme;
 
-const ROW_H: f32 = 232.;
+/// Grid row height without / with AI summary lines (the launcher row is the
+/// bottom of the card, so the row must be tall enough not to clip it).
+const ROW_H: f32 = 260.;
+const ROW_H_AI: f32 = 288.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -261,6 +264,12 @@ impl OrreryApp {
         let ide = self.config.ide_command.clone();
         let agent = self.config.agent_command.clone();
         let grid_rows = self.rows.len().div_ceil(cols);
+        // uniform_list needs one row height, so size it to the tallest card. The
+        // AI-summary line is all-or-nothing per user (gated on aiReady), so pick
+        // the taller height only when summaries are present — keeping cards snug
+        // either way rather than clipping the launcher row at the bottom.
+        let has_ai = self.rows.iter().any(|r| !r.ai_summary.is_empty());
+        let row_h = if has_ai { ROW_H_AI } else { ROW_H };
 
         gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
             let app = entity.read(cx);
@@ -284,7 +293,7 @@ impl OrreryApp {
                         .flex()
                         .flex_row()
                         .items_stretch()
-                        .h(px(ROW_H))
+                        .h(px(row_h))
                         .gap(px(12.))
                         .px(px(16.))
                         .py(px(8.))
