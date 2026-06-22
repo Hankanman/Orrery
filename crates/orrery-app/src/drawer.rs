@@ -4,12 +4,11 @@
 //!
 //! This is the workhorse primitive — most journeys (catch-up, dive, commit, PR
 //! triage) live here. All five tabs are in: Overview (Row facts + async
-//! branches/commits/worktrees, with worktree add/remove), Readme (lazy,
-//! `markdown`), PR (lazy, GitHub-only, via the `task` bridge — rollups + inline
+//! branches/commits/worktrees, with worktree add/remove), Readme (gpui-component
+//! markdown), PR (lazy, GitHub-only, via the `task` bridge — rollups + inline
 //! approve/merge), Changes (staged diff + commit-message field + Commit), and
-//! Notes (resume-where-I-left-off catch-up + the saved note). Follow-ups: the
-//! multiline scratchpad editor and the AI "generate commit message" (gated on
-//! the aiReady status, #102).
+//! Notes (catch-up + an editable markdown note via gpui-component's multiline
+//! input). Follow-up: the AI "generate commit message" (gated on aiReady, #102).
 
 use gpui::{
     AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
@@ -108,9 +107,9 @@ pub enum DiffState {
     Ready(SharedString),
 }
 
-/// Notes tab data: the saved note + a "resume where I left off" catch-up line.
+/// Notes tab data: the "resume where I left off" catch-up line (the note text
+/// itself lives in `DrawerData::note_input`).
 pub struct NotesData {
-    pub note: SharedString,
     pub catchup: SharedString,
     /// Commits since last seen — drives whether "Mark caught up" is offered.
     pub count: usize,
@@ -130,6 +129,9 @@ pub struct DrawerData {
     pub diff: DiffState,
     /// Notes tab (catch-up + saved note); `None` until first shown.
     pub notes: Option<NotesData>,
+    /// The editable note field (gpui-component multiline input), seeded from the
+    /// saved note when the Notes tab first opens.
+    pub note_input: Option<Entity<gpui_component::input::InputState>>,
     /// The commit-message field for the Changes tab, created when it first opens.
     pub commit_input: Option<Entity<crate::text_input::TextInput>>,
     /// The new-worktree name field (Overview), created when the drawer opens.
@@ -288,9 +290,9 @@ pub fn input_style(t: &Theme) -> crate::text_input::InputStyle {
     }
 }
 
-/// Read the saved note + "resume where I left off" catch-up for a repo (sync).
+/// Read the "resume where I left off" catch-up for a repo (sync). The note text
+/// itself is seeded straight into the editable field at tab-open.
 fn read_notes(id: &str) -> NotesData {
-    let note = cache::note(id);
     let (catchup, count, first_visit) = match cache::seen_sha(id) {
         None => (
             "First visit — nothing to catch up on yet.".to_string(),
@@ -310,7 +312,6 @@ fn read_notes(id: &str) -> NotesData {
         }
     };
     NotesData {
-        note: note.into(),
         catchup: catchup.into(),
         count,
         first_visit,
@@ -331,6 +332,19 @@ pub fn load_notes(repo: SharedString, cx: &mut Context<OrreryApp>) {
                 cx.notify();
             }
         });
+    })
+    .detach();
+}
+
+/// Persist the edited note (off the UI thread).
+fn save_note(repo: SharedString, text: String, cx: &mut Context<OrreryApp>) {
+    let id = repo.to_string();
+    cx.spawn(async move |_this, cx| {
+        cx.background_executor()
+            .spawn(async move {
+                let _ = cache::set_note(&id, &text);
+            })
+            .await;
     })
     .detach();
 }
@@ -686,7 +700,7 @@ fn tab_bar(
             .border_color(rgb(underline))
             .hover(|s| s.text_color(rgb(t.fg0)))
             .child(SharedString::from(label))
-            .on_click(move |_ev, _win, cx| {
+            .on_click(move |_ev, window, cx| {
                 let (repo, pr_slug) = (repo.clone(), pr_slug.clone());
                 app.update(cx, |this, cx| {
                     if let Some(Overlay::Drawer { tab: cur, .. }) = &mut this.overlay {
@@ -716,8 +730,20 @@ fn tab_bar(
                             }));
                         }
                         load_diff(repo, cx);
-                    } else if tab == DrawerTab::Notes && this.drawer.notes.is_none() {
-                        load_notes(repo, cx);
+                    } else if tab == DrawerTab::Notes {
+                        if this.drawer.notes.is_none() {
+                            load_notes(repo.clone(), cx);
+                        }
+                        // Seed the editable note field from the saved note (sync).
+                        if this.drawer.note_input.is_none() {
+                            let initial = cache::note(&repo);
+                            this.drawer.note_input = Some(cx.new(|cx| {
+                                gpui_component::input::InputState::new(window, cx)
+                                    .multi_line(true)
+                                    .placeholder("Notes (markdown)…")
+                                    .default_value(initial)
+                            }));
+                        }
                     }
                     cx.notify();
                 });
@@ -1353,8 +1379,8 @@ fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
     }
 }
 
-/// Notes tab: a "resume where I left off" catch-up + the saved note (read-only
-/// markdown for now; multiline editing is a follow-up).
+/// Notes tab: a "resume where I left off" catch-up + an editable markdown note
+/// (gpui-component multiline input) with Save.
 fn notes_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> Div {
     let mut col = div().flex().flex_col().gap(px(14.));
     let Some(n) = &data.notes else {
@@ -1394,15 +1420,25 @@ fn notes_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) 
     }
     col = col.child(catch);
 
-    // Saved note.
+    // Editable note field + Save.
     let mut note = section(t, "Note", None);
-    if n.note.trim().is_empty() {
-        note = note.child(placeholder(
-            "No note yet — editing arrives with the multiline field.",
-            t,
-        ));
-    } else {
-        note = note.child(gpui_component::text::markdown(n.note.clone()));
+    if let Some(input) = &data.note_input {
+        let (app, repo, input2) = (app.clone(), row.id.clone(), input.clone());
+        note = note
+            .child(
+                div()
+                    .min_h(px(160.))
+                    .child(gpui_component::input::Input::new(input).h_full()),
+            )
+            .child(div().flex().flex_row().justify_end().child(pr_btn(
+                SharedString::from("save-note"),
+                "Save note",
+                t,
+                move |cx| {
+                    let (repo, text) = (repo.clone(), input2.read(cx).value());
+                    app.update(cx, |_this, cx| save_note(repo, text.to_string(), cx));
+                },
+            )));
     }
     col.child(note)
 }
