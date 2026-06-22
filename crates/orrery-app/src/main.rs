@@ -106,6 +106,7 @@ fn main() {
                             cleanup: Default::default(),
                             explore_cloning: Default::default(),
                             settings: None,
+                            devtools: None,
                             focus: cx.focus_handle(),
                         }
                     });

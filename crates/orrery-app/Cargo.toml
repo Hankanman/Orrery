@@ -40,8 +40,12 @@ async-channel = "2"
 # has no tokio reactor, so network UI data needs an in-app runtime.
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
-# Grapheme-aware cursor movement in the text input (text_input.rs).
-unicode-segmentation = "1"
+# Dev Tools view — offline utility belt (UUID, hash, base64/url, JSON, …).
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+sha2 = "0.10"
+serde_json = "1"
+urlencoding = "2"
 
 [lints.rust]
 unsafe_code = "warn"

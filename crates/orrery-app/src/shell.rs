@@ -93,6 +93,8 @@ pub struct OrreryApp {
     /// Settings editing session (draft config + field inputs); created on first
     /// open, kept so edits survive navigating away.
     pub settings: Option<crate::views::settings::SettingsState>,
+    /// Dev Tools fields (created on first open).
+    pub devtools: Option<crate::views::devtools::DevToolsState>,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
@@ -299,8 +301,43 @@ impl OrreryApp {
                 self.load_cleanup(cx)
             }
             View::Settings if self.settings.is_none() => self.open_settings(window, cx),
+            View::Tools if self.devtools.is_none() => self.open_devtools(window, cx),
             _ => {}
         }
+    }
+
+    /// Create the Dev Tools input fields + per-input observations (so each tool's
+    /// output recomputes live as you type).
+    fn open_devtools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::views::devtools::{DevToolsState, new_uuid};
+        use gpui_component::input::InputState;
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter tools…"));
+        let base64 = cx.new(|cx| InputState::new(window, cx).placeholder("text"));
+        let hash = cx.new(|cx| InputState::new(window, cx).placeholder("text"));
+        let json = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .placeholder("{ }")
+        });
+        let base_conv = cx.new(|cx| InputState::new(window, cx).placeholder("decimal number"));
+        let case_conv = cx.new(|cx| InputState::new(window, cx).placeholder("text"));
+        let url = cx.new(|cx| InputState::new(window, cx).placeholder("text"));
+        let mut subs = Vec::new();
+        for input in [&search, &base64, &hash, &json, &base_conv, &case_conv, &url] {
+            subs.push(cx.observe(input, |_this, _e, cx| cx.notify()));
+        }
+        self.devtools = Some(DevToolsState {
+            search,
+            uuid: new_uuid(),
+            base64,
+            hash,
+            json,
+            base_conv,
+            case_conv,
+            url,
+            _subs: subs,
+        });
+        cx.notify();
     }
 
     /// Start a settings editing session, seeding the field inputs from config.
@@ -672,6 +709,12 @@ impl OrreryApp {
             View::Janitor => {
                 crate::views::cleanup::render(&self.cleanup, t, &cx.entity()).into_any_element()
             }
+            View::Tools => match &self.devtools {
+                Some(d) => {
+                    crate::views::devtools::render(d, t, &cx.entity(), cx).into_any_element()
+                }
+                None => placeholder(View::Tools, t).into_any_element(),
+            },
             View::Settings => match &self.settings {
                 Some(s) => crate::views::settings::render(s, t, &cx.entity()).into_any_element(),
                 None => placeholder(View::Settings, t).into_any_element(),

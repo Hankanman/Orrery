@@ -12,10 +12,30 @@ use crate::shell::OrreryApp;
 use crate::theme::Theme;
 
 pub mod cleanup;
+pub mod devtools;
 pub mod explore;
 pub mod feed;
 pub mod inbox;
 pub mod settings;
+
+/// A small bordered text button that runs `on` (no app-state capture needed).
+pub fn button(label: &str, t: &Theme, on: impl Fn(&mut gpui::App) + 'static) -> impl IntoElement {
+    let (hb, hf) = (t.border_strong, t.fg0);
+    div()
+        .id(SharedString::from(format!("vbtn-{label}")))
+        .px(px(12.))
+        .py(px(6.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(t.button_bg))
+        .border_1()
+        .border_color(rgb(t.border))
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg1))
+        .cursor_pointer()
+        .hover(move |s| s.border_color(rgb(hb)).text_color(rgb(hf)))
+        .child(SharedString::from(label.to_string()))
+        .on_click(move |_ev, _win, cx| on(cx))
+}
 
 /// A view's chrome: a 52px header (title + refresh) over a scrolling body.
 pub fn frame(

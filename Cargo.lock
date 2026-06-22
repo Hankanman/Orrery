@@ -4648,14 +4648,18 @@ name = "orrery-app"
 version = "0.0.0"
 dependencies = [
  "async-channel 2.5.0",
+ "base64",
  "gpui",
  "gpui-component",
  "gpui_platform",
  "orrery-core",
  "orrery-platform",
  "rust-embed",
+ "serde_json",
+ "sha2",
  "tokio",
- "unicode-segmentation",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]
