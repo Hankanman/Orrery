@@ -9,8 +9,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, px, rgb, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, rgb, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    Render, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 use orrery_core::model::AppConfig;
@@ -80,6 +80,8 @@ pub struct OrreryApp {
     pub overlay: Option<Overlay>,
     /// Async-loaded git data for the open drawer (branches/commits/worktrees).
     pub drawer: crate::drawer::DrawerData,
+    /// App-root focus handle, so global key bindings (Esc) dispatch here.
+    pub focus: FocusHandle,
 }
 
 impl OrreryApp {
@@ -344,7 +346,18 @@ impl Render for OrreryApp {
             );
 
         // The shell, with any overlay (drawer/palette/dialog) layered on top.
-        let mut root = div().relative().size_full().child(shell);
+        // The root tracks focus + handles CloseOverlay so Esc dismisses overlays.
+        let mut root = div()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &crate::CloseOverlay, _window, cx| {
+                if this.overlay.is_some() {
+                    this.close_overlay();
+                    cx.notify();
+                }
+            }))
+            .relative()
+            .size_full()
+            .child(shell);
         if let Some(overlay) = self.overlay_element(&t, cx) {
             root = root.child(overlay);
         }
