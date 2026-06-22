@@ -51,6 +51,22 @@ pub(crate) fn rel_age(last_commit_unix: i64, now: i64) -> String {
     }
 }
 
+/// Human-readable byte size ("3.8 GB", "512 MB") for model listings.
+pub(crate) fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 /// Mirror of `formatStars` in the frontend: 1234 → "1.2k".
 fn fmt_stars(stars: u32) -> String {
     if stars >= 1000 {

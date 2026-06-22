@@ -29,6 +29,8 @@ const LUCIDE_ICONS = [
   "git-pull-request", "git-merge", "circle-check", "eye",
   // command palette
   "box", "file-search",
+  // settings (status rows)
+  "circle-alert",
 ];
 
 // Language marks: multicolor devicon "-original" SVGs, rendered in full color

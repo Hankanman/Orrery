@@ -97,6 +97,12 @@ pub struct OrreryApp {
     pub settings: Option<crate::views::settings::SettingsState>,
     /// Dev Tools fields (created on first open).
     pub devtools: Option<crate::views::devtools::DevToolsState>,
+    /// Whether a GitHub token is currently resolvable (Settings account panel).
+    pub github_authed: bool,
+    /// An in-progress GitHub device-flow login, if any.
+    pub github_device: Option<crate::views::settings::GithubDevice>,
+    /// Live AI-backend reachability (Settings AI panel).
+    pub ai_status: crate::views::settings::AiStatus,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
@@ -345,14 +351,190 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// Start a settings editing session, seeding the field inputs from config.
+    /// Start a settings editing session, seeding the field inputs from config,
+    /// and kick off the live network checks (GitHub auth + AI reachability).
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = Some(crate::views::settings::SettingsState::new(
             &self.config,
             window,
             cx,
         ));
+        self.refresh_github_authed(cx);
+        self.ai_refresh(cx);
         cx.notify();
+    }
+
+    /// Re-resolve whether a GitHub token is available (may shell out to `gh`, so
+    /// off the UI thread).
+    fn refresh_github_authed(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let authed = cx
+                .background_executor()
+                .spawn(async { orrery_core::oauth::github_authed() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.github_authed = authed;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Begin the GitHub device-flow login: request a code, show it, then poll
+    /// until the user authorizes (or it fails / expires).
+    pub fn github_connect(&mut self, cx: &mut Context<Self>) {
+        use crate::views::settings::GithubDevice;
+        if self.github_device.is_some() {
+            return;
+        }
+        self.github_device = Some(GithubDevice {
+            user_code: "…".into(),
+            verification_uri: "https://github.com/login/device".into(),
+            status: "Requesting a device code…".into(),
+        });
+        cx.notify();
+
+        let client_id = orrery_core::oauth::github_client_id();
+        cx.spawn(async move |this, cx| {
+            let id = client_id.clone();
+            let started =
+                crate::task::run(async move { orrery_core::oauth::device_start(&id).await }).await;
+            let start = match started {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(d) = &mut this.github_device {
+                            d.status = format!("Failed: {e}").into();
+                        }
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let device_code = start.device_code.clone();
+            let interval = start.interval.max(1);
+            if this
+                .update(cx, |this, cx| {
+                    this.github_device = Some(GithubDevice {
+                        user_code: start.user_code.into(),
+                        verification_uri: start.verification_uri.into(),
+                        status: "Waiting for authorization…".into(),
+                    });
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(interval))
+                    .await;
+                // Stop if the user dismissed the flow (e.g. navigated / signed out).
+                if this
+                    .update(cx, |this, _| this.github_device.is_none())
+                    .unwrap_or(true)
+                {
+                    return;
+                }
+                let id = client_id.clone();
+                let code = device_code.clone();
+                let poll =
+                    crate::task::run(
+                        async move { orrery_core::oauth::device_poll(&id, &code).await },
+                    )
+                    .await;
+                let status = match poll {
+                    Ok(p) => p.status,
+                    Err(e) => e,
+                };
+                match status.as_str() {
+                    "authorized" => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.github_device = None;
+                            this.github_authed = true;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    "authorization_pending" | "slow_down" => continue,
+                    other => {
+                        let msg = match other {
+                            "expired_token" => "The code expired — try again.".to_string(),
+                            "access_denied" => "Authorization was denied.".to_string(),
+                            e => format!("Login failed: {e}"),
+                        };
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(d) = &mut this.github_device {
+                                d.status = msg.into();
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Forget the stored GitHub token.
+    pub fn github_sign_out(&mut self, cx: &mut Context<Self>) {
+        orrery_core::oauth::sign_out();
+        self.github_device = None;
+        self.github_authed = orrery_core::oauth::github_authed();
+        cx.notify();
+    }
+
+    /// Re-check AI-backend reachability and list installed models.
+    pub fn ai_refresh(&mut self, cx: &mut Context<Self>) {
+        use crate::views::settings::AiStatus;
+        if matches!(self.ai_status, AiStatus::Pulling(_)) {
+            return;
+        }
+        self.ai_status = AiStatus::Checking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let up = crate::task::run(orrery_core::ai::available()).await;
+            let status = if up {
+                let models = crate::task::run(orrery_core::ai::installed_models()).await;
+                AiStatus::Ready(
+                    models
+                        .into_iter()
+                        .map(|(n, sz)| (n.into(), crate::data::human_bytes(sz).into()))
+                        .collect(),
+                )
+            } else {
+                AiStatus::Offline
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.ai_status = status;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Pull (download) a model on the AI backend, then refresh the status.
+    pub fn ai_pull(&mut self, model: String, cx: &mut Context<Self>) {
+        use crate::views::settings::AiStatus;
+        if model.trim().is_empty() || matches!(self.ai_status, AiStatus::Pulling(_)) {
+            return;
+        }
+        self.ai_status = AiStatus::Pulling(model.clone().into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let m = model.clone();
+            let _ = crate::task::run(async move { orrery_core::ai::pull(&m, |_, _, _| {}).await })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Drop the Pulling state so the refresh isn't short-circuited.
+                this.ai_status = AiStatus::Unknown;
+                this.ai_refresh(cx);
+            });
+        })
+        .detach();
     }
 
     /// Append the typed root to the draft.
@@ -767,7 +949,15 @@ impl OrreryApp {
                 None => placeholder(View::Tools, t).into_any_element(),
             },
             View::Settings => match &self.settings {
-                Some(s) => crate::views::settings::render(s, t, &cx.entity()).into_any_element(),
+                Some(s) => crate::views::settings::render(
+                    s,
+                    self.github_authed,
+                    &self.github_device,
+                    &self.ai_status,
+                    t,
+                    &cx.entity(),
+                )
+                .into_any_element(),
                 None => placeholder(View::Settings, t).into_any_element(),
             },
         }

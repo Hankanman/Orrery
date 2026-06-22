@@ -3,8 +3,8 @@
 //! A draft `AppConfig` (toggles / scan depth / roots) lives on `OrreryApp`
 //! alongside text-input entities for the string fields; "Save & rescan" reads
 //! them back, persists via `config::save`, and re-scans. This first cut covers
-//! roots, launchers, AI toggles/endpoints, and notifications; the GitHub
-//! device-flow login and live AI status/model-pull (network) come next.
+//! roots, launchers, AI toggles/endpoints, and notifications, plus the live
+//! network panels: GitHub device-flow login and AI (Ollama) status/model-pull.
 
 use gpui::{
     AppContext, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -16,6 +16,28 @@ use orrery_core::model::AppConfig;
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
+
+/// A GitHub device-flow login in progress: the code the user types at the
+/// verification URL, plus a live status line.
+pub struct GithubDevice {
+    pub user_code: SharedString,
+    pub verification_uri: SharedString,
+    pub status: SharedString,
+}
+
+/// Live reachability of the AI backend, refreshed when Settings opens and on
+/// demand. Drives the AI-status panel.
+#[derive(Default, Clone)]
+pub enum AiStatus {
+    #[default]
+    Unknown,
+    Checking,
+    Offline,
+    /// Reachable — the installed models as (name, human size).
+    Ready(Vec<(SharedString, SharedString)>),
+    /// A model download is in flight.
+    Pulling(SharedString),
+}
 
 /// The editable settings session: a draft config + the string-field inputs.
 pub struct SettingsState {
@@ -58,7 +80,14 @@ impl SettingsState {
     }
 }
 
-pub fn render(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+pub fn render(
+    s: &SettingsState,
+    authed: bool,
+    device: &Option<GithubDevice>,
+    ai: &AiStatus,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -92,13 +121,87 @@ pub fn render(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl Int
                 .overflow_y_scroll()
                 .p(px(20.))
                 .gap(px(16.))
+                .child(account_section(authed, device, t, app))
                 .child(roots_section(s, t, app))
                 .child(launchers_section(s, t))
-                .child(ai_section(s, t, app))
+                .child(ai_section(s, ai, t, app))
                 .child(notifications_section(s, t, app)),
         )
         // Save footer
         .child(save_footer(s, t, app))
+}
+
+/// GitHub account panel: connection status + Connect (device flow) / Sign out.
+fn account_section(
+    authed: bool,
+    device: &Option<GithubDevice>,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let mut col = section(t, "GitHub account");
+
+    if let Some(d) = device {
+        // A device-flow login is in progress: show the code + verification URL.
+        let uri = d.verification_uri.clone();
+        col = col
+            .child(field_label(
+                "Enter this code at the verification page, then authorize:",
+                t,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .px(px(10.))
+                            .py(px(6.))
+                            .rounded(px(t.r_sm))
+                            .bg(rgb(t.button_bg))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .font_family("monospace")
+                            .text_size(px(t.text_h3))
+                            .text_color(rgb(t.fg0))
+                            .child(d.user_code.clone()),
+                    )
+                    .child(button("Open page", t, move |_cx| {
+                        let _ = orrery_core::launch::open(&uri);
+                    })),
+            )
+            .child(note_line(d.status.clone(), t.fg3, t));
+    } else if authed {
+        col = col
+            .child(status_row(
+                "circle-check",
+                "Connected to GitHub",
+                t.clean,
+                t,
+            ))
+            .child(div().child(button("Sign out", t, {
+                let app = app.clone();
+                move |cx| {
+                    app.update(cx, |this, cx| this.github_sign_out(cx));
+                }
+            })));
+    } else {
+        col = col
+            .child(status_row(
+                "circle-alert",
+                "Not connected — sign in to use Inbox, Feed, Explore and PR actions.",
+                t.fg3,
+                t,
+            ))
+            .child(div().child(button("Connect GitHub", t, {
+                let app = app.clone();
+                move |cx| {
+                    app.update(cx, |this, cx| this.github_connect(cx));
+                }
+            })));
+    }
+    col
 }
 
 // ── sections ────────────────────────────────────────────────────────────────
@@ -161,7 +264,12 @@ fn launchers_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
         .child(labeled("Agent command", s.agent.clone(), t))
 }
 
-fn ai_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+fn ai_section(
+    s: &SettingsState,
+    ai: &AiStatus,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     section(t, "AI & search")
         .child(toggle(
             "Enable AI features",
@@ -178,6 +286,91 @@ fn ai_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl Int
         .child(labeled("Chat model", s.ai_model.clone(), t))
         .child(labeled("Embedding model", s.embed_model.clone(), t))
         .child(labeled("GitHub OAuth client id", s.client_id.clone(), t))
+        .child(ai_status_block(s, ai, t, app))
+}
+
+/// The live AI-backend status row + installed models + refresh/pull actions.
+fn ai_status_block(
+    s: &SettingsState,
+    ai: &AiStatus,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let mut block = div().flex().flex_col().gap(px(8.)).pt(px(4.));
+
+    let head = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.))
+        .child(div().flex_1().child(match ai {
+            AiStatus::Unknown => status_row("clock", "Status unknown".to_string(), t.fg3, t),
+            AiStatus::Checking => status_row("clock", "Checking…".to_string(), t.fg3, t),
+            AiStatus::Offline => status_row(
+                "circle-alert",
+                "Backend unreachable".to_string(),
+                t.behind,
+                t,
+            ),
+            AiStatus::Ready(m) => status_row(
+                "circle-check",
+                format!(
+                    "Reachable — {} model{}",
+                    m.len(),
+                    if m.len() == 1 { "" } else { "s" }
+                ),
+                t.clean,
+                t,
+            ),
+            AiStatus::Pulling(name) => status_row("clock", format!("Pulling {name}…"), t.fg2, t),
+        }))
+        .child(button("Refresh", t, {
+            let app = app.clone();
+            move |cx| {
+                app.update(cx, |this, cx| this.ai_refresh(cx));
+            }
+        }));
+    block = block.child(head);
+
+    if let AiStatus::Ready(models) = ai {
+        if models.is_empty() {
+            block = block.child(note_line("No models installed.".into(), t.fg3, t));
+        } else {
+            for (name, size) in models {
+                block = block.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .font_family("monospace")
+                        .text_size(px(t.text_data_sm))
+                        .child(lucide("box", 12., t.fg3))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(rgb(t.fg1))
+                                .child(name.clone()),
+                        )
+                        .child(muted_mono(size.clone(), t)),
+                );
+            }
+        }
+        // Pull the configured (last-saved) chat model.
+        let model = s.draft.ai_model.clone();
+        if !model.trim().is_empty() {
+            block = block.child(div().child(button(&format!("Pull \"{model}\""), t, {
+                let app = app.clone();
+                move |cx| {
+                    let model = model.clone();
+                    app.update(cx, |this, cx| this.ai_pull(model.clone(), cx));
+                }
+            })));
+        }
+    }
+    block
 }
 
 fn notifications_section(
@@ -298,6 +491,43 @@ fn field_label(label: &str, t: &Theme) -> impl IntoElement {
         .text_size(px(t.text_data_sm))
         .text_color(rgb(t.fg3))
         .child(SharedString::from(label.to_string()))
+}
+
+/// A status icon + label row (connection / reachability).
+fn status_row(
+    icon: &str,
+    label: impl Into<SharedString>,
+    color: u32,
+    t: &Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .child(lucide(icon, 14., color))
+        .child(
+            div()
+                .text_size(px(t.text_small))
+                .text_color(rgb(t.fg1))
+                .child(label.into()),
+        )
+}
+
+/// A small coloured note line (status / hint).
+fn note_line(text: SharedString, color: u32, t: &Theme) -> impl IntoElement {
+    div()
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(color))
+        .child(text)
+}
+
+fn muted_mono(text: SharedString, t: &Theme) -> impl IntoElement {
+    div()
+        .font_family("monospace")
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg3))
+        .child(text)
 }
 
 /// A label + on/off switch row.

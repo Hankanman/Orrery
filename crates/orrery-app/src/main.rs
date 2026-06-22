@@ -108,6 +108,9 @@ fn main() {
                             explore_cloning: Default::default(),
                             settings: None,
                             devtools: None,
+                            github_authed: false,
+                            github_device: None,
+                            ai_status: Default::default(),
                             focus: cx.focus_handle(),
                         }
                     });
