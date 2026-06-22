@@ -15,6 +15,7 @@ mod live;
 mod markdown;
 mod shell;
 mod task;
+mod text_input;
 mod theme;
 
 use std::rc::Rc;
@@ -54,6 +55,8 @@ fn main() {
         .run(move |cx: &mut App| {
             // Esc closes the active overlay (drawer/palette/dialog).
             cx.bind_keys([KeyBinding::new("escape", CloseOverlay, None)]);
+            // Text-input editing key bindings (scoped to focused inputs).
+            text_input::bind_keys(cx);
 
             let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
             cx.open_window(
