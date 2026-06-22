@@ -1,6 +1,7 @@
 //! Command palette (Ctrl+K) — a centered overlay with a query field over a
-//! filtered list of actions + repositories. Arrow keys move the selection, Enter
-//! runs it, Esc closes. Code/semantic search land on top of this in a follow-up.
+//! filtered list of actions, repositories, and cross-repo code-search hits. Arrow
+//! keys move the selection, Enter runs it, Esc closes. Semantic search (gated on
+//! aiReady) lands on top of this in a follow-up.
 //!
 //! State lives in `Overlay::Palette(PaletteData)`; the action handlers + executor
 //! are methods on `OrreryApp` (shell.rs). This module owns the item model + the
@@ -21,12 +22,34 @@ const PANEL_W: f32 = 640.;
 /// Cap on repo rows shown, to keep the list quick.
 const MAX_REPOS: usize = 40;
 
+/// A cross-repo code-search result (flattened from `search::SearchHit`).
+pub struct CodeHit {
+    pub file: SharedString, // path relative to its repo, for display
+    pub line: u32,
+    pub text: SharedString, // the matching line
+    pub abs: SharedString,  // absolute path, for launching the editor
+}
+
 /// Live palette state.
 pub struct PaletteData {
     pub query: Entity<TextInput>,
     pub selected: usize,
+    /// Cross-repo ripgrep results for the current query (debounced).
+    pub code: Vec<CodeHit>,
+    /// Query generation, for debouncing/dropping stale code searches.
+    pub gen: u64,
     /// Keeps the query-observation alive (re-renders the app on each keystroke).
     pub _sub: Subscription,
+}
+
+/// Flatten a core search hit into a render-ready [`CodeHit`].
+pub fn code_hit(h: orrery_core::search::SearchHit) -> CodeHit {
+    CodeHit {
+        file: h.file.into(),
+        line: h.line,
+        text: h.text.into(),
+        abs: h.abs.into(),
+    }
 }
 
 /// A standing command (not tied to a repo).
@@ -58,13 +81,16 @@ pub enum PaletteItem {
     Action(PaletteAction),
     /// Index into `OrreryApp::rows`.
     Repo(usize),
+    /// Index into `PaletteData::code`.
+    Code(usize),
 }
 
 const ACTIONS: [PaletteAction; 2] = [PaletteAction::Rescan, PaletteAction::Settings];
 
-/// Build the filtered result list for `query` (actions first, then repos). Must
-/// be deterministic — the executor rebuilds it to resolve the selected index.
-pub fn items(rows: &[Row], query: &str) -> Vec<PaletteItem> {
+/// Build the filtered result list for `query`: actions, then matching repos,
+/// then code-search hits. Must be deterministic — the executor rebuilds it to
+/// resolve the selected index.
+pub fn items(rows: &[Row], code: &[CodeHit], query: &str) -> Vec<PaletteItem> {
     let q = query.trim().to_lowercase();
     let mut out = Vec::new();
 
@@ -81,10 +107,19 @@ pub fn items(rows: &[Row], query: &str) -> Vec<PaletteItem> {
             || r.path.to_lowercase().contains(&q);
         if hit {
             out.push(PaletteItem::Repo(i));
-            if out.len() >= MAX_REPOS {
+            if out
+                .iter()
+                .filter(|it| matches!(it, PaletteItem::Repo(_)))
+                .count()
+                >= MAX_REPOS
+            {
                 break;
             }
         }
+    }
+
+    for i in 0..code.len() {
+        out.push(PaletteItem::Code(i));
     }
     out
 }
@@ -110,7 +145,7 @@ pub fn render(
         );
     }
     for (i, item) in items.iter().enumerate() {
-        list = list.child(row_view(item, i, i == selected, rows, t, app));
+        list = list.child(row_view(item, i, i == selected, rows, &data.code, t, app));
     }
 
     let panel = div()
@@ -162,6 +197,7 @@ fn row_view(
     idx: usize,
     selected: bool,
     rows: &[Row],
+    code: &[CodeHit],
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -174,6 +210,14 @@ fn row_view(
         PaletteItem::Repo(i) => {
             let r = &rows[*i];
             ("box", r.name.clone(), r.slug.clone())
+        }
+        PaletteItem::Code(i) => {
+            let h = &code[*i];
+            (
+                "file-search",
+                SharedString::from(format!("{}:{}", h.file, h.line)),
+                h.text.clone(),
+            )
         }
     };
 

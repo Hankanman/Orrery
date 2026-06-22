@@ -114,29 +114,40 @@ impl OrreryApp {
         let query = cx.new(|cx| {
             crate::text_input::TextInput::new(cx, istyle, "Search repos, run a command…")
         });
-        // Re-render the app (and reset the selection) on each keystroke.
+        // On each keystroke: reset the selection, kick off a (debounced) code
+        // search, and re-render.
         let sub = cx.observe(&query, |this, _q, cx| {
             if let Some(Overlay::Palette(d)) = &mut this.overlay {
                 d.selected = 0;
             }
+            this.trigger_code_search(cx);
             cx.notify();
         });
         let fh = query.read(cx).handle();
         self.overlay = Some(Overlay::Palette(crate::palette::PaletteData {
             query,
             selected: 0,
+            code: Vec::new(),
+            gen: 0,
             _sub: sub,
         }));
         window.focus(&fh, cx);
         cx.notify();
     }
 
+    /// The current palette result list (actions + repos + code hits).
+    fn palette_items(&self, cx: &Context<Self>) -> Vec<crate::palette::PaletteItem> {
+        match &self.overlay {
+            Some(Overlay::Palette(d)) => {
+                crate::palette::items(&self.rows, &d.code, &d.query.read(cx).content())
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Move the palette selection by `delta` (wrapping), if it's open.
     fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some(query) = self.palette_query(cx) else {
-            return;
-        };
-        let len = crate::palette::items(&self.rows, &query).len();
+        let len = self.palette_items(cx).len();
         if let Some(Overlay::Palette(d)) = &mut self.overlay {
             if len > 0 {
                 let i = d.selected as isize + delta;
@@ -146,22 +157,14 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// The current palette query text, if the palette is open.
-    fn palette_query(&self, cx: &Context<Self>) -> Option<SharedString> {
-        match &self.overlay {
-            Some(Overlay::Palette(d)) => Some(d.query.read(cx).content()),
-            _ => None,
-        }
-    }
-
     /// Execute the currently-selected palette item (called on Enter).
     fn confirm_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(query) = self.palette_query(cx) else {
+        let items = self.palette_items(cx);
+        if items.is_empty() {
             return;
-        };
-        let items = crate::palette::items(&self.rows, &query);
+        }
         let selected = match &self.overlay {
-            Some(Overlay::Palette(d)) => d.selected.min(items.len().saturating_sub(1)),
+            Some(Overlay::Palette(d)) => d.selected.min(items.len() - 1),
             _ => return,
         };
         if let Some(item) = items.get(selected).cloned() {
@@ -170,9 +173,62 @@ impl OrreryApp {
         }
     }
 
+    /// Debounced cross-repo code search for the current query.
+    fn trigger_code_search(&mut self, cx: &mut Context<Self>) {
+        let (query, gen) = match &mut self.overlay {
+            Some(Overlay::Palette(d)) => {
+                d.gen += 1;
+                (d.query.read(cx).content().to_string(), d.gen)
+            }
+            _ => return,
+        };
+        let paths: Vec<String> = self.rows.iter().map(|r| r.id.to_string()).collect();
+        cx.spawn(async move |this, cx| {
+            // Debounce keystrokes before doing the (expensive) ripgrep pass.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(220))
+                .await;
+            // Bail if a newer keystroke superseded this search.
+            let current = this
+                .update(
+                    cx,
+                    |this, _| matches!(&this.overlay, Some(Overlay::Palette(d)) if d.gen == gen),
+                )
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let results = if query.trim().len() >= 2 {
+                cx.background_executor()
+                    .spawn(async move {
+                        orrery_core::search::search(&query, &paths, 60).unwrap_or_default()
+                    })
+                    .await
+            } else {
+                Vec::new()
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(Overlay::Palette(d)) = &mut this.overlay {
+                    if d.gen == gen {
+                        d.code = results.into_iter().map(crate::palette::code_hit).collect();
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Close the palette and act on `item`.
     pub fn run_palette_item(&mut self, item: crate::palette::PaletteItem, cx: &mut Context<Self>) {
         use crate::palette::{PaletteAction, PaletteItem};
+        // Resolve data living in the (about-to-close) palette first.
+        let code_abs = match (&item, &self.overlay) {
+            (PaletteItem::Code(i), Some(Overlay::Palette(d))) => {
+                d.code.get(*i).map(|h| h.abs.to_string())
+            }
+            _ => None,
+        };
         self.close_overlay();
         match item {
             PaletteItem::Action(PaletteAction::Rescan) => self.rescan(cx),
@@ -180,6 +236,11 @@ impl OrreryApp {
             PaletteItem::Repo(i) => {
                 if let Some(r) = self.rows.get(i) {
                     let _ = orrery_core::launch::launch(&self.config.ide_command, &r.id);
+                }
+            }
+            PaletteItem::Code(_) => {
+                if let Some(abs) = code_abs {
+                    let _ = orrery_core::launch::launch(&self.config.ide_command, &abs);
                 }
             }
         }
@@ -509,7 +570,7 @@ impl OrreryApp {
             }
             Some(Overlay::Palette(data)) => {
                 let query = data.query.read(cx).content();
-                let items = crate::palette::items(&self.rows, &query);
+                let items = crate::palette::items(&self.rows, &data.code, &query);
                 Some(
                     crate::palette::render(data, &items, &self.rows, t, &cx.entity())
                         .into_any_element(),
