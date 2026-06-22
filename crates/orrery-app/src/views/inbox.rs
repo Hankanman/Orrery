@@ -3,12 +3,12 @@
 //! Loaded lazily (network, via the `task` bridge) when the nav item is selected.
 
 use gpui::{
-    div, px, rgb, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    div, px, rgb, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled,
 };
 use orrery_core::{inbox, launch};
 
-use crate::icon::lucide;
+use super::{note, section_header, tag};
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
 
@@ -75,61 +75,7 @@ pub fn render(state: &InboxState, t: &Theme, app: &Entity<OrreryApp>) -> impl In
         }
         InboxState::Ready(d) => ready(d, t).into_any_element(),
     };
-
-    div()
-        .flex()
-        .flex_col()
-        .size_full()
-        .bg(rgb(t.page))
-        .child(header(t, app))
-        .child(
-            div()
-                .id("inbox-scroll")
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.))
-                .overflow_y_scroll()
-                .p(px(20.))
-                .child(body),
-        )
-}
-
-fn header(t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let app = app.clone();
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.))
-        .h(px(52.))
-        .px(px(20.))
-        .border_b_1()
-        .border_color(rgb(t.border))
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(t.text_h3))
-                .text_color(rgb(t.fg0))
-                .child("Inbox"),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .id("inbox-refresh")
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(32.))
-                .h(px(32.))
-                .rounded(px(t.r_sm))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(t.surface_hover)))
-                .child(lucide("refresh-cw", 16., t.fg1))
-                .on_click(move |_ev, _win, cx| {
-                    app.update(cx, |this, cx| this.load_inbox(cx));
-                }),
-        )
+    super::frame("Inbox", t, app, OrreryApp::load_inbox, "inbox-scroll", body)
 }
 
 fn ready(d: &InboxData, t: &Theme) -> impl IntoElement {
@@ -195,7 +141,7 @@ fn item_row(it: &InboxRow, t: &Theme) -> impl IntoElement {
                 .child(it.title.clone()),
         );
     if it.draft {
-        row = row.child(tag("draft", t));
+        row = row.child(tag("draft", t.fg3, t));
     }
     row.child(
         div()
@@ -236,50 +182,4 @@ fn notifications(notes: &[NoticeRow], t: &Theme) -> impl IntoElement {
         );
     }
     col
-}
-
-fn section_header(icon: &str, title: &str, count: usize, t: &Theme) -> gpui::Div {
-    div().flex().flex_col().gap(px(2.)).child(
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.))
-            .mb(px(6.))
-            .text_color(rgb(t.fg2))
-            .child(lucide(icon, 15., t.fg2))
-            .child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(t.text_small))
-                    .child(SharedString::from(title.to_string())),
-            )
-            .child(
-                div()
-                    .font_family("monospace")
-                    .text_size(px(t.text_data_sm))
-                    .text_color(rgb(t.fg3))
-                    .child(SharedString::from(format!("{count}"))),
-            ),
-    )
-}
-
-fn tag(text: &str, t: &Theme) -> impl IntoElement {
-    div()
-        .px(px(5.))
-        .py(px(1.))
-        .rounded(px(t.r_xs))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family("monospace")
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(SharedString::from(text.to_string()))
-}
-
-fn note(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement {
-    div()
-        .text_size(px(t.text_small))
-        .text_color(rgb(t.fg3))
-        .child(text.into())
 }

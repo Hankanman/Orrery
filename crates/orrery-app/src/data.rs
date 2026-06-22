@@ -8,6 +8,7 @@ use gpui::SharedString;
 use orrery_core::{cache, config, model, scan};
 
 /// Everything the grid card renders, flattened from `model::Repo`.
+#[derive(Clone)]
 pub struct Row {
     pub id: SharedString,  // absolute path — launch cwd + favorite/cache key
     pub url: SharedString, // host web URL, or "" (open-on-host button)
