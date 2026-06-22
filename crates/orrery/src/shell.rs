@@ -649,14 +649,50 @@ impl OrreryApp {
         if model.trim().is_empty() || matches!(self.ai_status, AiStatus::Pulling(_)) {
             return;
         }
-        self.ai_status = AiStatus::Pulling(model.clone().into());
+        self.ai_status = AiStatus::Pulling(format!("{model} · starting…").into());
         cx.notify();
+
+        // The pull runs on the tokio runtime and streams (status, done, total)
+        // back over a channel; a gpui task drains it to update the live %. When
+        // the pull finishes the sender drops, closing the channel — our cue to
+        // refresh the model list. (The one-shot `task::run` can't stream, hence
+        // the detached spawn + channel.)
+        let (tx, rx) = async_channel::unbounded::<(String, u64, u64)>();
+        let m = model.clone();
+        crate::task::spawn_detached(async move {
+            let mut last_pct = u64::MAX;
+            let _ = orrery_core::ai::pull(&m, |status, done, total| {
+                // Throttle to ~1% steps (and every status-only update, total==0).
+                match (done * 100).checked_div(total) {
+                    Some(pct) if pct == last_pct => {}
+                    pct => {
+                        last_pct = pct.unwrap_or(u64::MAX);
+                        let _ = tx.try_send((status.to_string(), done, total));
+                    }
+                }
+            })
+            .await;
+        });
+
         cx.spawn(async move |this, cx| {
-            let m = model.clone();
-            let _ = crate::task::run(async move { orrery_core::ai::pull(&m, |_, _, _| {}).await })
-                .await;
+            while let Ok((status, done, total)) = rx.recv().await {
+                let label = match (done * 100).checked_div(total) {
+                    Some(pct) => format!("{model} · {pct}%"),
+                    None => format!("{model} · {status}"),
+                };
+                if this
+                    .update(cx, |this, cx| {
+                        this.ai_status = AiStatus::Pulling(label.into());
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // Channel closed → pull finished. Drop Pulling so the refresh isn't
+            // short-circuited, then re-list models.
             let _ = this.update(cx, |this, cx| {
-                // Drop the Pulling state so the refresh isn't short-circuited.
                 this.ai_status = AiStatus::Unknown;
                 this.ai_refresh(cx);
             });
