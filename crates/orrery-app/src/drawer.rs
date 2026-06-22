@@ -1356,7 +1356,9 @@ fn seg_str(icon: &str, label: &str, color: u32) -> impl IntoElement {
 fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
     match &data.readme {
         ReadmeState::Ready(Some(src)) => {
-            gpui_component::text::markdown(src.clone()).into_any_element()
+            // Reflow soft-wrapped lines first — gpui-component's renderer panics
+            // on a paragraph's embedded newlines (see data::unwrap_soft_breaks).
+            gpui_component::text::markdown(crate::data::unwrap_soft_breaks(src)).into_any_element()
         }
         ReadmeState::Ready(None) => placeholder("No README in this repo.", t).into_any_element(),
         _ => placeholder("Loading…", t).into_any_element(),
