@@ -88,6 +88,8 @@ pub struct OrreryApp {
     pub feed: crate::views::feed::FeedState,
     pub explore: crate::views::explore::ExploreState,
     pub cleanup: crate::views::cleanup::CleanupState,
+    /// Agents view state (lazy; detected agent sessions on the machine).
+    pub agents: crate::views::agents::AgentsState,
     /// Slugs currently being cloned from the Explore view.
     pub explore_cloning: std::collections::HashSet<SharedString>,
     /// Settings editing session (draft config + field inputs); created on first
@@ -300,6 +302,9 @@ impl OrreryApp {
             View::Janitor if matches!(self.cleanup, views::cleanup::CleanupState::Idle) => {
                 self.load_cleanup(cx)
             }
+            View::Agents if matches!(self.agents, views::agents::AgentsState::Idle) => {
+                self.load_agents(cx)
+            }
             View::Settings if self.settings.is_none() => self.open_settings(window, cx),
             View::Tools if self.devtools.is_none() => self.open_devtools(window, cx),
             _ => {}
@@ -483,6 +488,49 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.cleanup = CleanupState::Ready(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Scan the machine for running agent sessions (off the UI thread).
+    pub fn load_agents(&mut self, cx: &mut Context<Self>) {
+        use crate::views::agents::AgentsState;
+        self.agents = AgentsState::Loading;
+        cx.notify();
+        let rows = self.rows.clone();
+        let agent_command = self.config.agent_command.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::views::agents::scan(&rows, &agent_command) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agents = AgentsState::Ready(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Terminate an agent process by pid, then re-scan the list.
+    pub fn terminate_agent(&mut self, pid: u32, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move { orrery_platform::agents::terminate(pid) })
+                .await;
+            let Ok((rows, agent_command)) = this.update(cx, |this, _| {
+                (this.rows.clone(), this.config.agent_command.clone())
+            }) else {
+                return;
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::views::agents::scan(&rows, &agent_command) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agents = crate::views::agents::AgentsState::Ready(result);
                 cx.notify();
             });
         })
@@ -709,6 +757,9 @@ impl OrreryApp {
             View::Janitor => {
                 crate::views::cleanup::render(&self.cleanup, t, &cx.entity()).into_any_element()
             }
+            View::Agents => {
+                crate::views::agents::render(&self.agents, t, &cx.entity()).into_any_element()
+            }
             View::Tools => match &self.devtools {
                 Some(d) => {
                     crate::views::devtools::render(d, t, &cx.entity(), cx).into_any_element()
@@ -719,7 +770,6 @@ impl OrreryApp {
                 Some(s) => crate::views::settings::render(s, t, &cx.entity()).into_any_element(),
                 None => placeholder(View::Settings, t).into_any_element(),
             },
-            other => placeholder(other, t).into_any_element(),
         }
     }
 

@@ -104,6 +104,7 @@ fn main() {
                             feed: Default::default(),
                             explore: Default::default(),
                             cleanup: Default::default(),
+                            agents: Default::default(),
                             explore_cloning: Default::default(),
                             settings: None,
                             devtools: None,
