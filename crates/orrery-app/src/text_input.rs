@@ -124,11 +124,6 @@ impl TextInput {
         s
     }
 
-    /// The focus handle, for focusing the field when its overlay opens.
-    pub fn handle(&self) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-
     /// Replace the text (e.g. clear after commit, or seed a generated message).
     pub fn set_content(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = text.into();

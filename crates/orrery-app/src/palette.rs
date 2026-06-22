@@ -12,10 +12,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, Subscription, div, px, rgb, rgba,
 };
 
+use gpui_component::input::{Input, InputState};
+
 use crate::data::Row;
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
-use crate::text_input::TextInput;
 use crate::theme::Theme;
 
 const PANEL_W: f32 = 640.;
@@ -32,7 +33,7 @@ pub struct CodeHit {
 
 /// Live palette state.
 pub struct PaletteData {
-    pub query: Entity<TextInput>,
+    pub query: Entity<InputState>,
     pub selected: usize,
     /// Cross-repo ripgrep results for the current query (debounced).
     pub code: Vec<CodeHit>,
@@ -164,7 +165,7 @@ pub fn render(
                 .p(px(8.))
                 .border_b_1()
                 .border_color(rgb(t.border))
-                .child(data.query.clone()),
+                .child(Input::new(&data.query).appearance(false)),
         )
         // Results.
         .child(

@@ -9,8 +9,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AppContext, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    AppContext, Context, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
 use orrery_core::model::AppConfig;
@@ -121,9 +121,9 @@ impl OrreryApp {
 
     /// Open the command palette and focus its query field.
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let istyle = crate::drawer::input_style(&self.theme);
         let query = cx.new(|cx| {
-            crate::text_input::TextInput::new(cx, istyle, "Search repos, run a command…")
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder("Search repos, run a command…")
         });
         // On each keystroke: reset the selection, kick off a (debounced) code
         // search, and re-render.
@@ -134,7 +134,7 @@ impl OrreryApp {
             this.trigger_code_search(cx);
             cx.notify();
         });
-        let fh = query.read(cx).handle();
+        let fh = query.read(cx).focus_handle(cx);
         self.overlay = Some(Overlay::Palette(crate::palette::PaletteData {
             query,
             selected: 0,
@@ -150,7 +150,7 @@ impl OrreryApp {
     fn palette_items(&self, cx: &Context<Self>) -> Vec<crate::palette::PaletteItem> {
         match &self.overlay {
             Some(Overlay::Palette(d)) => {
-                crate::palette::items(&self.rows, &d.code, &d.query.read(cx).content())
+                crate::palette::items(&self.rows, &d.code, &d.query.read(cx).value())
             }
             _ => Vec::new(),
         }
@@ -189,7 +189,7 @@ impl OrreryApp {
         let (query, generation) = match &mut self.overlay {
             Some(Overlay::Palette(d)) => {
                 d.generation += 1;
-                (d.query.read(cx).content().to_string(), d.generation)
+                (d.query.read(cx).value().to_string(), d.generation)
             }
             _ => return,
         };
@@ -827,7 +827,7 @@ impl OrreryApp {
                 )
             }
             Some(Overlay::Palette(data)) => {
-                let query = data.query.read(cx).content();
+                let query = data.query.read(cx).value();
                 let items = crate::palette::items(&self.rows, &data.code, &query);
                 Some(
                     crate::palette::render(data, &items, &self.rows, t, &cx.entity())
