@@ -82,6 +82,8 @@ pub struct OrreryApp {
     pub overlay: Option<Overlay>,
     /// Async-loaded git data for the open drawer (branches/commits/worktrees).
     pub drawer: crate::drawer::DrawerData,
+    /// Inbox view state (lazy, loaded when the nav item is first selected).
+    pub inbox: crate::views::inbox::InboxState,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
@@ -247,6 +249,33 @@ impl OrreryApp {
         cx.notify();
     }
 
+    /// Load the inbox (PRs / reviews / issues / notifications) over the network.
+    pub fn load_inbox(&mut self, cx: &mut Context<Self>) {
+        use crate::views::inbox::{inbox_row, notice_row, InboxData, InboxState};
+        self.inbox = InboxState::Loading;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let items = crate::task::run(async { orrery_core::inbox::github_inbox().await }).await;
+            let notes =
+                crate::task::run(async { orrery_core::inbox::github_notifications().await }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.inbox = match items {
+                    Ok(i) => InboxState::Ready(InboxData {
+                        items: i.into_iter().map(inbox_row).collect(),
+                        notifications: notes
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(notice_row)
+                            .collect(),
+                    }),
+                    Err(e) => InboxState::Error(e.into()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Re-scan the roots from disk (off the UI thread) and reload the grid.
     fn rescan(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -371,6 +400,12 @@ impl OrreryApp {
                 .hover(|s| s.bg(rgb(t.surface_hover)))
                 .on_click(cx.listener(move |this, _ev, _win, cx| {
                     this.view = view;
+                    // Lazy-load a view's data the first time it's opened.
+                    if view == View::Inbox
+                        && matches!(this.inbox, crate::views::inbox::InboxState::Idle)
+                    {
+                        this.load_inbox(cx);
+                    }
                     cx.notify();
                 }))
                 .child(lucide(icon_name, 16., fg))
@@ -421,6 +456,9 @@ impl OrreryApp {
     fn main_view(&self, t: &Theme, cx: &mut Context<Self>, cols: usize) -> gpui::AnyElement {
         match self.view {
             View::Grid => self.grid(t, cx, cols).into_any_element(),
+            View::Inbox => {
+                crate::views::inbox::render(&self.inbox, t, &cx.entity()).into_any_element()
+            }
             other => placeholder(other, t).into_any_element(),
         }
     }
