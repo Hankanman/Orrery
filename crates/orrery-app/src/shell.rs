@@ -20,7 +20,6 @@ use crate::data::Row;
 use crate::icon::lucide;
 use crate::theme::Theme;
 
-const COLS: usize = 4;
 const ROW_H: f32 = 232.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -249,35 +248,39 @@ impl OrreryApp {
             )
     }
 
-    fn main_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn main_view(&self, t: &Theme, cx: &mut Context<Self>, cols: usize) -> gpui::AnyElement {
         match self.view {
-            View::Grid => self.grid(t, cx).into_any_element(),
+            View::Grid => self.grid(t, cx, cols).into_any_element(),
             other => placeholder(other, t).into_any_element(),
         }
     }
 
-    fn grid(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn grid(&self, t: &Theme, cx: &mut Context<Self>, cols: usize) -> impl IntoElement {
         let entity = cx.entity();
         let theme = self.theme.clone();
         let ide = self.config.ide_command.clone();
         let agent = self.config.agent_command.clone();
-        let grid_rows = self.rows.len().div_ceil(COLS);
+        let grid_rows = self.rows.len().div_ceil(cols);
 
         gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
             let app = entity.read(cx);
             range
                 .map(|gi| {
-                    let start = gi * COLS;
-                    let end = (start + COLS).min(app.rows.len());
+                    let start = gi * cols;
+                    let end = (start + cols).min(app.rows.len());
                     let mut cells: Vec<gpui::AnyElement> = (start..end)
                         .map(|i| {
                             card(&app.rows[i], i, &theme, &entity, &ide, &agent).into_any_element()
                         })
                         .collect();
-                    while cells.len() < COLS {
+                    while cells.len() < cols {
                         cells.push(div().flex_1().min_w(px(0.)).into_any_element());
                     }
+                    // w_full so the row fills the list width and the flex_1 cells
+                    // divide it equally — otherwise the row shrink-wraps to the
+                    // cards' content width and overflows horizontally.
                     div()
+                        .w_full()
                         .flex()
                         .flex_row()
                         .items_stretch()
@@ -296,9 +299,17 @@ impl OrreryApp {
     }
 }
 
+/// Responsive column count from the window width: aim for ~340px-wide cards
+/// (after the 236px sidebar), clamped to a sensible range.
+fn columns(viewport_width: f32) -> usize {
+    (((viewport_width - 236.) / 340.).floor() as usize).clamp(1, 6)
+}
+
 impl Render for OrreryApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme.clone();
+        // Responsive grid columns from the current window width.
+        let cols = columns(f32::from(window.viewport_size().width));
         let shell = div()
             .flex()
             .flex_col()
@@ -319,7 +330,7 @@ impl Render for OrreryApp {
                             .flex()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(self.main_view(&t, cx)),
+                            .child(self.main_view(&t, cx, cols)),
                     ),
             );
 
