@@ -40,7 +40,11 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
 /// host enrichment is version-sensitive today; favorites/AI cache are untouched.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let current: Option<i64> = conn
-        .query_row("SELECT value FROM meta WHERE key = 'cache_schema'", [], |r| r.get::<_, String>(0))
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'cache_schema'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
         .ok()
         .and_then(|s| s.parse().ok());
     if current != Some(CACHE_SCHEMA) {
@@ -188,7 +192,9 @@ fn apply_host_info_on(conn: &Connection, repos: &mut [Repo]) {
         return;
     }
     for r in repos.iter_mut() {
-        let Some(slug) = r.slug.as_deref() else { continue };
+        let Some(slug) = r.slug.as_deref() else {
+            continue;
+        };
         if let Some(info) = cache.get(slug) {
             r.stars = info.stars;
             r.topics = info.topics.clone();
@@ -229,8 +235,9 @@ pub fn cached_summary(id: &str, last_commit: i64) -> Option<String> {
     let mut stmt = conn
         .prepare("SELECT summary, last_commit FROM ai_cache WHERE id = ?1")
         .ok()?;
-    let (summary, cached_commit): (String, i64) =
-        stmt.query_row([id], |row| Ok((row.get(0)?, row.get(1)?))).ok()?;
+    let (summary, cached_commit): (String, i64) = stmt
+        .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?;
     (cached_commit == last_commit).then_some(summary)
 }
 
@@ -264,11 +271,17 @@ pub fn load_embeddings() -> Vec<(String, Vec<f32>)> {
     let Ok(mut stmt) = conn.prepare("SELECT id, vec FROM embeddings") else {
         return Vec::new();
     };
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)));
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    });
     match rows {
         Ok(iter) => iter
             .flatten()
-            .filter_map(|(id, json)| serde_json::from_str::<Vec<f32>>(&json).ok().map(|v| (id, v)))
+            .filter_map(|(id, json)| {
+                serde_json::from_str::<Vec<f32>>(&json)
+                    .ok()
+                    .map(|v| (id, v))
+            })
             .collect(),
         Err(_) => Vec::new(),
     }
@@ -309,7 +322,9 @@ fn set_note_on(conn: &Connection, id: &str, text: &str) -> rusqlite::Result<()> 
 }
 
 fn seen_sha_on(conn: &Connection, id: &str) -> Option<String> {
-    let mut stmt = conn.prepare("SELECT last_seen_sha FROM notes WHERE id = ?1").ok()?;
+    let mut stmt = conn
+        .prepare("SELECT last_seen_sha FROM notes WHERE id = ?1")
+        .ok()?;
     let sha: String = stmt.query_row([id], |row| row.get(0)).ok()?;
     (!sha.is_empty()).then_some(sha)
 }
@@ -325,7 +340,10 @@ fn set_seen_on(conn: &Connection, id: &str, sha: &str, unix: i64) -> rusqlite::R
 
 /// The markdown note pinned to a repo (empty string if none).
 pub fn note(id: &str) -> String {
-    open().ok().and_then(|c| note_on(&c, id)).unwrap_or_default()
+    open()
+        .ok()
+        .and_then(|c| note_on(&c, id))
+        .unwrap_or_default()
 }
 
 /// Persist a repo's markdown note.
@@ -436,14 +454,22 @@ mod tests {
         let conn = mem(); // init() sets cache_schema to the current version
         store_host_info_on(&conn, "o/test", &HostInfo::default(), 1_000);
         // Simulate an older schema, then migrate.
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', '1')", []).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', '1')",
+            [],
+        )
+        .unwrap();
         migrate(&conn).unwrap();
-        let rows: i64 = conn.query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0)).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(rows, 0, "stale host_cache should be cleared on schema bump");
         // Re-running is a no-op now that the version matches.
         store_host_info_on(&conn, "o/test", &HostInfo::default(), 1_000);
         migrate(&conn).unwrap();
-        let rows: i64 = conn.query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0)).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(rows, 1, "matching schema must not clear the cache");
     }
 
@@ -466,7 +492,10 @@ mod tests {
         assert_eq!(repos[0].latest_release.as_deref(), Some("v1.2.3"));
 
         // A repo with no cached slug is left untouched.
-        let mut other = vec![Repo { slug: Some("o/none".into()), ..sample("/b") }];
+        let mut other = vec![Repo {
+            slug: Some("o/none".into()),
+            ..sample("/b")
+        }];
         apply_host_info_on(&conn, &mut other);
         assert!(!other[0].private);
         assert_eq!(other[0].stars, 0);
@@ -475,18 +504,50 @@ mod tests {
     #[test]
     fn clear_ai_removes_summaries_embeddings_and_sigs() {
         let conn = mem();
-        conn.execute("INSERT INTO ai_cache (id, summary, last_commit) VALUES ('/a', 's', 1)", []).unwrap();
-        conn.execute("INSERT INTO embeddings (id, vec) VALUES ('/a', '[0.1]')", []).unwrap();
-        conn.execute("INSERT INTO meta (key, value) VALUES ('embed_sig:/a', 'x')", []).unwrap();
-        conn.execute("INSERT INTO meta (key, value) VALUES ('keep', 'me')", []).unwrap();
+        conn.execute(
+            "INSERT INTO ai_cache (id, summary, last_commit) VALUES ('/a', 's', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO embeddings (id, vec) VALUES ('/a', '[0.1]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('embed_sig:/a', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO meta (key, value) VALUES ('keep', 'me')", [])
+            .unwrap();
 
         let (summaries, embeddings) = clear_ai_on(&conn).unwrap();
         assert_eq!((summaries, embeddings), (1, 1));
-        assert_eq!(conn.query_row("SELECT count(*) FROM ai_cache", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(conn.query_row("SELECT count(*) FROM embeddings", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM ai_cache", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM embeddings", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         // unrelated meta is preserved; embed_sig is removed
-        let keep: i64 = conn.query_row("SELECT count(*) FROM meta WHERE key = 'keep'", [], |r| r.get(0)).unwrap();
-        let sig: i64 = conn.query_row("SELECT count(*) FROM meta WHERE key = 'embed_sig:/a'", [], |r| r.get(0)).unwrap();
+        let keep: i64 = conn
+            .query_row("SELECT count(*) FROM meta WHERE key = 'keep'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let sig: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key = 'embed_sig:/a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!((keep, sig), (1, 0));
     }
 

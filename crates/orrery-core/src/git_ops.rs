@@ -97,7 +97,12 @@ fn status_of(repo: &Repository) -> GitStatus {
         .statuses(Some(&mut opts))
         .map(|s| s.iter().filter(|e| !e.status().is_ignored()).count() as u32)
         .unwrap_or(0);
-    GitStatus { branch, ahead, behind, dirty }
+    GitStatus {
+        branch,
+        ahead,
+        behind,
+        dirty,
+    }
 }
 
 /// Fetch the `origin` remote, then return refreshed git status.
@@ -131,11 +136,16 @@ fn default_branch_oid(repo: &Repository) -> Option<git2::Oid> {
 
 pub fn branches(path: &str) -> Result<Vec<BranchInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    let head_name = repo.head().ok().and_then(|h| h.shorthand().map(String::from));
+    let head_name = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(String::from));
     let default_oid = default_branch_oid(&repo);
 
     let mut out = Vec::new();
-    let iter = repo.branches(Some(BranchType::Local)).map_err(|e| e.to_string())?;
+    let iter = repo
+        .branches(Some(BranchType::Local))
+        .map_err(|e| e.to_string())?;
     for entry in iter {
         let Ok((branch, _)) = entry else { continue };
         let Some(name) = branch.name().ok().flatten().map(String::from) else {
@@ -156,9 +166,10 @@ pub fn branches(path: &str) -> Result<Vec<BranchInfo>, String> {
         let gone = has_upstream_cfg && upstream.is_none();
 
         let merged = match (tip, default_oid) {
-            (Some(t), Some(d)) if t != d => {
-                repo.graph_ahead_behind(t, d).map(|(a, _)| a == 0).unwrap_or(false)
-            }
+            (Some(t), Some(d)) if t != d => repo
+                .graph_ahead_behind(t, d)
+                .map(|(a, _)| a == 0)
+                .unwrap_or(false),
             _ => false,
         };
 
@@ -178,7 +189,8 @@ pub fn switch_branch(path: &str, name: &str) -> Result<(), String> {
     let (object, reference) = repo
         .revparse_ext(name)
         .map_err(|e| format!("branch not found: {e}"))?;
-    repo.checkout_tree(&object, None).map_err(|e| e.to_string())?;
+    repo.checkout_tree(&object, None)
+        .map_err(|e| e.to_string())?;
     match reference {
         Some(r) => repo.set_head(r.name().ok_or("invalid ref")?),
         None => repo.set_head_detached(object.id()),
@@ -205,7 +217,9 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
             .fetch_refspecs()
             .map(|r| r.iter().flatten().map(String::from).collect())
             .unwrap_or_default();
-        remote.fetch(&refspecs, Some(&mut opts), None).map_err(|e| e.to_string())?;
+        remote
+            .fetch(&refspecs, Some(&mut opts), None)
+            .map_err(|e| e.to_string())?;
     }
 
     let (branch, local_oid) = {
@@ -218,7 +232,11 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
             _ => return Ok(OpOutcome::Skipped("unborn branch".into())),
         }
     };
-    let upstream = match repo.find_branch(&branch, BranchType::Local).ok().and_then(|b| b.upstream().ok()) {
+    let upstream = match repo
+        .find_branch(&branch, BranchType::Local)
+        .ok()
+        .and_then(|b| b.upstream().ok())
+    {
         Some(u) => u,
         None => return Ok(OpOutcome::Skipped("no upstream".into())),
     };
@@ -228,7 +246,9 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
     if up_oid == local_oid {
         return Ok(OpOutcome::Done("up to date".into()));
     }
-    let (ahead, behind) = repo.graph_ahead_behind(local_oid, up_oid).map_err(|e| e.to_string())?;
+    let (ahead, behind) = repo
+        .graph_ahead_behind(local_oid, up_oid)
+        .map_err(|e| e.to_string())?;
     if ahead > 0 {
         return Ok(OpOutcome::Skipped("diverged".into()));
     }
@@ -243,7 +263,8 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
         .and_then(|mut r| r.set_target(up_oid, "pull: fast-forward"))
         .map_err(|e| e.to_string())?;
     repo.set_head(&refname).map_err(|e| e.to_string())?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).map_err(|e| e.to_string())?;
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .map_err(|e| e.to_string())?;
     Ok(OpOutcome::Done(format!("fast-forwarded {behind}")))
 }
 
@@ -253,9 +274,15 @@ pub fn stash(path: &str) -> Result<OpOutcome, String> {
     if status_of(&repo).dirty == 0 {
         return Ok(OpOutcome::Skipped("clean".into()));
     }
-    let sig = repo.signature().map_err(|_| "set git user.name and user.email first".to_string())?;
-    repo.stash_save(&sig, "orrery: fleet stash", Some(git2::StashFlags::INCLUDE_UNTRACKED))
-        .map_err(|e| e.to_string())?;
+    let sig = repo
+        .signature()
+        .map_err(|_| "set git user.name and user.email first".to_string())?;
+    repo.stash_save(
+        &sig,
+        "orrery: fleet stash",
+        Some(git2::StashFlags::INCLUDE_UNTRACKED),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(OpOutcome::Done("stashed".into()))
 }
 
@@ -279,7 +306,12 @@ pub fn checkout_default(path: &str) -> Result<OpOutcome, String> {
         return Ok(OpOutcome::Skipped("uncommitted changes".into()));
     }
     let branch = default_branch_name(&repo).ok_or("no default branch")?;
-    let on_default = repo.head().ok().and_then(|h| h.shorthand().map(String::from)).as_deref() == Some(branch.as_str());
+    let on_default = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(String::from))
+        .as_deref()
+        == Some(branch.as_str());
     if on_default {
         return Ok(OpOutcome::Skipped(format!("already on {branch}")));
     }
@@ -304,7 +336,13 @@ fn tail_lines(s: &str, n: usize) -> String {
     let start = lines.len().saturating_sub(n);
     let tail = lines[start..].join("\n");
     if tail.chars().count() > 400 {
-        tail.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect()
+        tail.chars()
+            .rev()
+            .take(400)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     } else {
         tail
     }
@@ -335,7 +373,11 @@ fn protected_branches(repo: &Repository) -> Vec<String> {
     ["main", "master"]
         .iter()
         .map(|s| s.to_string())
-        .chain(repo.head().ok().and_then(|h| h.shorthand().map(String::from)))
+        .chain(
+            repo.head()
+                .ok()
+                .and_then(|h| h.shorthand().map(String::from)),
+        )
         .collect()
 }
 
@@ -413,7 +455,8 @@ pub fn log_since_sha(path: &str, since_sha: &str, max: usize) -> Result<Vec<Comm
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let since = repo.revparse_single(since_sha).map(|o| o.id()).ok();
     let mut walk = repo.revwalk().map_err(|e| e.to_string())?;
-    walk.set_sorting(git2::Sort::TIME).map_err(|e| e.to_string())?;
+    walk.set_sorting(git2::Sort::TIME)
+        .map_err(|e| e.to_string())?;
     walk.push_head().map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for oid in walk.flatten() {
@@ -477,7 +520,10 @@ pub fn contributions(paths: &[String], since_day: i64) -> Vec<DayCount> {
         emails.insert(email.to_lowercase());
     }
     for path in paths {
-        if let Ok(email) = Repository::open(path).and_then(|r| r.config()).and_then(|c| c.get_string("user.email")) {
+        if let Ok(email) = Repository::open(path)
+            .and_then(|r| r.config())
+            .and_then(|c| c.get_string("user.email"))
+        {
             emails.insert(email.to_lowercase());
         }
     }
@@ -485,7 +531,10 @@ pub fn contributions(paths: &[String], since_day: i64) -> Vec<DayCount> {
     // fan out across cores. A shared work index hands each worker the next repo,
     // so heavy repos (deep histories) don't pile up behind each other.
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(paths.len().max(1));
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(paths.len().max(1));
     let partials = std::sync::Mutex::new(Vec::<HashMap<i64, u32>>::new());
     let next = AtomicUsize::new(0);
 
@@ -499,27 +548,40 @@ pub fn contributions(paths: &[String], since_day: i64) -> Vec<DayCount> {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(path) = paths.get(i) else { break };
-                    let Ok(repo) = Repository::open(path) else { continue };
-                    let Ok(mut walk) = repo.revwalk() else { continue };
+                    let Ok(repo) = Repository::open(path) else {
+                        continue;
+                    };
+                    let Ok(mut walk) = repo.revwalk() else {
+                        continue;
+                    };
                     if walk.set_sorting(git2::Sort::TIME).is_err() || walk.push_head().is_err() {
                         continue;
                     }
                     for oid in walk.flatten() {
-                        let Ok(commit) = repo.find_commit(oid) else { continue };
+                        let Ok(commit) = repo.find_commit(oid) else {
+                            continue;
+                        };
                         let author = commit.author();
                         let when = author.when();
-                        let day = (when.seconds() + i64::from(when.offset_minutes()) * 60).div_euclid(86_400);
+                        let day = (when.seconds() + i64::from(when.offset_minutes()) * 60)
+                            .div_euclid(86_400);
                         if day < since_day {
                             break; // TIME order: everything after this is older still.
                         }
                         let mine = emails.is_empty()
-                            || author.email().map(|e| emails.contains(&e.to_lowercase())).unwrap_or(false);
+                            || author
+                                .email()
+                                .map(|e| emails.contains(&e.to_lowercase()))
+                                .unwrap_or(false);
                         if mine {
                             *local.entry(day).or_insert(0) += 1;
                         }
                     }
                 }
-                partials.lock().unwrap_or_else(|e| e.into_inner()).push(local);
+                partials
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(local);
             });
         }
     });
@@ -531,7 +593,10 @@ pub fn contributions(paths: &[String], since_day: i64) -> Vec<DayCount> {
         }
     }
 
-    let mut out: Vec<DayCount> = counts.into_iter().map(|(day, count)| DayCount { day, count }).collect();
+    let mut out: Vec<DayCount> = counts
+        .into_iter()
+        .map(|(day, count)| DayCount { day, count })
+        .collect();
     out.sort_by_key(|d| d.day);
     out
 }
@@ -553,7 +618,10 @@ pub fn clone(url: &str, dest: &str) -> Result<String, String> {
 /// Recursively copy a template directory's contents into `dst`, skipping the
 /// template's own `.git` so its history doesn't contaminate the new repo.
 fn copy_template(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    for entry in walkdir::WalkDir::new(src).into_iter().filter_map(Result::ok) {
+    for entry in walkdir::WalkDir::new(src)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
         let rel = match entry.path().strip_prefix(src) {
             Ok(r) if !r.as_os_str().is_empty() => r,
             _ => continue, // the root itself
@@ -605,7 +673,8 @@ pub fn init(
             .map(|it| it.filter_map(Result::ok).any(|e| e.file_name() != ".git"))
             .unwrap_or(false);
         if !has_content {
-            std::fs::write(dest_path.join("README.md"), format!("# {name}\n")).map_err(|e| e.to_string())?;
+            std::fs::write(dest_path.join("README.md"), format!("# {name}\n"))
+                .map_err(|e| e.to_string())?;
         }
 
         let mut index = repo.index().map_err(|e| e.to_string())?;
@@ -613,11 +682,14 @@ pub fn init(
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
             .map_err(|e| e.to_string())?;
         index.write().map_err(|e| e.to_string())?;
-        let tree = repo.find_tree(index.write_tree().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let tree = repo
+            .find_tree(index.write_tree().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
         let sig = repo
             .signature()
             .map_err(|_| "set git user.name and user.email first".to_string())?;
-        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[]).map_err(|e| e.to_string())?;
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[])
+            .map_err(|e| e.to_string())?;
     }
 
     Ok(repo
@@ -723,7 +795,8 @@ mod tests {
         index.write().unwrap();
         let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
         let sig = repo.signature().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
         let path = dir.path().to_string_lossy().into_owned();
         (dir, path)
     }
@@ -771,14 +844,30 @@ mod tests {
         std::env::set_var("GIT_COMMITTER_NAME", "t");
         std::env::set_var("GIT_COMMITTER_EMAIL", "t@t");
 
-        let workdir = init(&dest_str, "newproj", None, Some("https://example.com/x.git"), Some("Initial commit"));
+        let workdir = init(
+            &dest_str,
+            "newproj",
+            None,
+            Some("https://example.com/x.git"),
+            Some("Initial commit"),
+        );
         // Skip the assertion if the environment has no usable git identity.
         if let Ok(workdir) = workdir {
             assert!(dest.join(".git").is_dir(), "should be a git repo");
-            assert!(dest.join("README.md").is_file(), "empty init should seed a README");
+            assert!(
+                dest.join("README.md").is_file(),
+                "empty init should seed a README"
+            );
             let repo = Repository::open(&workdir).unwrap();
-            assert!(repo.find_remote("origin").is_ok(), "origin remote should be set");
-            assert_eq!(recent_log(&workdir, 5).unwrap().len(), 1, "one first commit");
+            assert!(
+                repo.find_remote("origin").is_ok(),
+                "origin remote should be set"
+            );
+            assert_eq!(
+                recent_log(&workdir, 5).unwrap().len(),
+                1,
+                "one first commit"
+            );
         }
     }
 
@@ -827,11 +916,22 @@ mod tests {
         idx.write().unwrap();
         let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
         let sig = repo.signature().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&first]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&first])
+            .unwrap();
 
-        let names: Vec<String> = prunable(&path).unwrap().into_iter().map(|b| b.name).collect();
-        assert!(names.contains(&"feature".to_string()), "merged branch is prunable: {names:?}");
-        assert!(prunable(&path).unwrap().iter().all(|b| !b.is_head), "HEAD is never prunable");
+        let names: Vec<String> = prunable(&path)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(
+            names.contains(&"feature".to_string()),
+            "merged branch is prunable: {names:?}"
+        );
+        assert!(
+            prunable(&path).unwrap().iter().all(|b| !b.is_head),
+            "HEAD is never prunable"
+        );
     }
 
     #[test]
@@ -842,14 +942,21 @@ mod tests {
         repo.branch("feature", &head, false).unwrap();
 
         switch_branch(&path, "feature").unwrap();
-        let head_branch = branches(&path).unwrap().into_iter().find(|b| b.is_head).unwrap();
+        let head_branch = branches(&path)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.is_head)
+            .unwrap();
         assert_eq!(head_branch.name, "feature");
     }
 
     #[test]
     fn working_diff_reflects_uncommitted_changes() {
         let (dir, path) = init_repo();
-        assert!(working_diff(&path).unwrap().is_empty(), "clean tree → empty diff");
+        assert!(
+            working_diff(&path).unwrap().is_empty(),
+            "clean tree → empty diff"
+        );
         fs::write(dir.path().join("README.md"), "# Test\nchanged").unwrap();
         assert!(working_diff(&path).unwrap().contains("changed"));
     }
@@ -867,7 +974,10 @@ mod tests {
         let short = commit(&path, "feat: add new").unwrap();
         assert_eq!(short.len(), 7);
         assert_eq!(recent_log(&path, 5).unwrap()[0].summary, "feat: add new");
-        assert!(staged_diff(&path).unwrap().is_empty(), "nothing staged after commit");
+        assert!(
+            staged_diff(&path).unwrap().is_empty(),
+            "nothing staged after commit"
+        );
     }
 
     #[test]
@@ -904,7 +1014,13 @@ mod tests {
             .as_secs() as i64;
 
         let t = Instant::now();
-        let repos = crate::scan::scan(&cfg.roots, cfg.scan_depth, &cfg.ignore, &crate::cache::favorites(), now);
+        let repos = crate::scan::scan(
+            &cfg.roots,
+            cfg.scan_depth,
+            &cfg.ignore,
+            &crate::cache::favorites(),
+            now,
+        );
         let scan_ms = t.elapsed().as_secs_f64() * 1000.0;
         let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
         let today = now.div_euclid(86_400);
@@ -915,13 +1031,20 @@ mod tests {
 
         let t = Instant::now();
         let just_open = ids.iter().filter_map(|p| Repository::open(p).ok()).count();
-        eprintln!("open all repos: {:.1} ms ({just_open} opened)", t.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "open all repos: {:.1} ms ({just_open} opened)",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
 
         for i in 1..=3 {
             let t = Instant::now();
             let graph = contributions(&ids, since);
             let total: u32 = graph.iter().map(|d| d.count).sum();
-            eprintln!("contributions() run {i}: {:.1} ms  ({} active days, {total} commits)", t.elapsed().as_secs_f64() * 1000.0, graph.len());
+            eprintln!(
+                "contributions() run {i}: {:.1} ms  ({} active days, {total} commits)",
+                t.elapsed().as_secs_f64() * 1000.0,
+                graph.len()
+            );
         }
         eprintln!("──────────────────────────────────────────\n");
     }

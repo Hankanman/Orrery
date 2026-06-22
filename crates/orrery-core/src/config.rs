@@ -37,13 +37,22 @@ impl Default for AppConfig {
             .unwrap_or_else(|| "xdg-open {path}".to_string());
 
         // Open the user's terminal at the repo and start a coding agent.
-        let term = ["kitty", "alacritty", "foot", "wezterm", "konsole", "gnome-terminal"]
-            .iter()
-            .find(|t| which::which(t).is_ok())
-            .copied();
+        let term = [
+            "kitty",
+            "alacritty",
+            "foot",
+            "wezterm",
+            "konsole",
+            "gnome-terminal",
+        ]
+        .iter()
+        .find(|t| which::which(t).is_ok())
+        .copied();
         let agent_command = match term {
             Some("konsole") => "konsole --workdir {path} -e claude".to_string(),
-            Some("gnome-terminal") => "gnome-terminal --working-directory={path} -- claude".to_string(),
+            Some("gnome-terminal") => {
+                "gnome-terminal --working-directory={path} -- claude".to_string()
+            }
             Some("wezterm") => "wezterm start --cwd {path} -- claude".to_string(),
             Some(t) => format!("{t} --working-directory {{path}} -e claude"),
             None => "xterm -e claude".to_string(),
@@ -127,13 +136,19 @@ mod tests {
         assert!(!cfg.roots.is_empty(), "must have at least one root");
         assert_eq!(cfg.scan_depth, 3);
         assert!(cfg.ignore.iter().any(|i| i == "node_modules"));
-        assert!(cfg.ide_command.contains("{path}"), "ide template needs {{path}}");
+        assert!(
+            cfg.ide_command.contains("{path}"),
+            "ide template needs {{path}}"
+        );
         // The agent command launches the agent; the repo dir comes from the
         // launcher's working directory (launch::spawn sets current_dir), so
         // {path} isn't required — and the fallback terminal (xterm) has no
         // working-dir flag. Asserting {path} here would be env-dependent (it
         // only appears when a terminal with such a flag is detected).
-        assert!(cfg.agent_command.contains("claude"), "agent command should launch the agent");
+        assert!(
+            cfg.agent_command.contains("claude"),
+            "agent command should launch the agent"
+        );
         assert!(!cfg.agent_command.is_empty());
     }
 

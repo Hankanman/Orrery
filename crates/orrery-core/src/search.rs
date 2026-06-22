@@ -57,14 +57,22 @@ pub fn search(query: &str, paths: &[String], limit: usize) -> Result<Vec<SearchH
         if hits.len() >= limit {
             break;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         if v.get("type").and_then(|t| t.as_str()) != Some("match") {
             continue;
         }
         let data = &v["data"];
         // rg encodes non-UTF8 paths/lines as { "bytes": ... }; we only handle text.
-        let Some(abs) = data["path"]["text"].as_str() else { continue };
-        let text = data["lines"]["text"].as_str().unwrap_or("").trim_end().to_string();
+        let Some(abs) = data["path"]["text"].as_str() else {
+            continue;
+        };
+        let text = data["lines"]["text"]
+            .as_str()
+            .unwrap_or("")
+            .trim_end()
+            .to_string();
         let line_no = data["line_number"].as_u64().unwrap_or(0) as u32;
 
         // Attribute the hit to the longest matching repo prefix.
@@ -74,9 +82,18 @@ pub fn search(query: &str, paths: &[String], limit: usize) -> Result<Vec<SearchH
             .max_by_key(|p| p.len())
             .cloned()
             .unwrap_or_default();
-        let file = abs.strip_prefix(&repo).map(|s| s.trim_start_matches('/').to_string()).unwrap_or_else(|| abs.to_string());
+        let file = abs
+            .strip_prefix(&repo)
+            .map(|s| s.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| abs.to_string());
 
-        hits.push(SearchHit { repo, file, abs: abs.to_string(), line: line_no, text });
+        hits.push(SearchHit {
+            repo,
+            file,
+            abs: abs.to_string(),
+            line: line_no,
+            text,
+        });
     }
     Ok(hits)
 }
@@ -92,10 +109,14 @@ mod tests {
             return; // rg not installed in this environment — skip
         }
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("foo.txt"), "alpha\nthe needle is here\nbeta\n").unwrap();
+        fs::write(
+            dir.path().join("foo.txt"),
+            "alpha\nthe needle is here\nbeta\n",
+        )
+        .unwrap();
         let root = dir.path().to_string_lossy().into_owned();
 
-        let hits = search("needle", &[root.clone()], 10).unwrap();
+        let hits = search("needle", std::slice::from_ref(&root), 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].file, "foo.txt");
         assert_eq!(hits[0].repo, root);

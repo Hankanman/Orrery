@@ -15,45 +15,33 @@ permissions:
   contents: read
 
 jobs:
-  web:
-    name: Frontend (build + test)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Type-check & build
-        run: pnpm build
-      - name: Unit tests
-        run: pnpm test
-
   rust:
-    name: Rust (clippy + test)
+    name: Rust (fmt + clippy + test)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
-      - name: Install Tauri system dependencies
+
+      # GPUI renders with Vulkan (blade) and talks Wayland/X11 directly, so the
+      # build needs the Vulkan/Wayland/xkbcommon/fontconfig headers — not the old
+      # WebKitGTK stack.
+      - name: Install GPUI build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-            librsvg2-dev libssl-dev libxdo-dev build-essential cmake pkg-config
-      # Pinned (not @stable) so a newer clippy can't fail CI on untouched code
-      # with new lints. Bump deliberately.
-      - uses: dtolnay/rust-toolchain@1.94.0
+            libvulkan-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libfontconfig-1-dev libssl-dev \
+            build-essential cmake pkg-config
+
+      # Pinned (matches rust-toolchain.toml) so a newer clippy can't fail CI on
+      # untouched code with new lints. Bump deliberately.
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+
+      - name: Format
+        run: cargo fmt --all --check
       - name: Clippy (deny warnings)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
-        run: cargo test
+        run: cargo test --workspace

@@ -7,7 +7,9 @@ use std::process::{Child, Command, Stdio};
 /// `path`, returning the child handle. Each whitespace-separated token is
 /// substituted, so both `code {path}` and `term --cwd={path} -- claude` work.
 pub fn spawn(template: &str, path: &str) -> Result<Child, String> {
-    let mut tokens = template.split_whitespace().map(|t| t.replace("{path}", path));
+    let mut tokens = template
+        .split_whitespace()
+        .map(|t| t.replace("{path}", path));
     let program = tokens.next().ok_or("empty command template")?;
     let args: Vec<String> = tokens.collect();
 

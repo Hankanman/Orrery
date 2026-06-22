@@ -68,7 +68,9 @@ pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
 pub async fn pull(model: &str, on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
     match active_backend() {
         Backend::Ollama => ollama_pull(model, on_progress).await,
-        Backend::LlamaCpp => Err("use the model download in Settings for the llama.cpp backend".into()),
+        Backend::LlamaCpp => {
+            Err("use the model download in Settings for the llama.cpp backend".into())
+        }
     }
 }
 
@@ -81,7 +83,8 @@ fn base() -> String {
 /// Shared HTTP client so the many Ollama calls (status, per-repo summaries and
 /// embeddings) reuse one connection pool. reqwest::Client is Arc-backed.
 fn client() -> reqwest::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(reqwest::Client::new);
+    static CLIENT: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(reqwest::Client::new);
     CLIENT.clone()
 }
 
@@ -211,11 +214,18 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
 /// Pull a model via Ollama (`/api/pull`), streaming NDJSON progress. `on_progress`
 /// is called with (status, completed_bytes, total_bytes) for each update — kept
 /// as a callback so this module stays free of Tauri's event machinery.
-async fn ollama_pull(model: &str, mut on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
+async fn ollama_pull(
+    model: &str,
+    mut on_progress: impl FnMut(&str, u64, u64),
+) -> Result<(), String> {
     use futures_util::StreamExt;
 
     // Ollama's /api/pull needs an explicit tag; default to :latest when none.
-    let model = if model.contains(':') { model.to_string() } else { format!("{model}:latest") };
+    let model = if model.contains(':') {
+        model.to_string()
+    } else {
+        format!("{model}:latest")
+    };
     let model = model.as_str();
 
     #[derive(Deserialize)]
@@ -384,7 +394,12 @@ mod tests {
             path: "~/dev/Orrery".into(),
             description: Some("repo dashboard".into()),
             language: Some("Rust".into()),
-            git: GitStatus { branch: "main".into(), ahead: 2, behind: 0, dirty: 7 },
+            git: GitStatus {
+                branch: "main".into(),
+                ahead: 2,
+                behind: 0,
+                dirty: 7,
+            },
             last_commit_unix: 0,
             activity: Activity::Active,
             root: "~/dev".into(),
@@ -402,7 +417,10 @@ mod tests {
 
     #[test]
     fn pick_model_prefers_configured_then_smallest() {
-        let avail = vec![("big:70b".to_string(), 40_000), ("small:1b".to_string(), 1_000)];
+        let avail = vec![
+            ("big:70b".to_string(), 40_000),
+            ("small:1b".to_string(), 1_000),
+        ];
         assert_eq!(pick_model("big:70b", &avail).as_deref(), Some("big:70b"));
         // preferred absent → smallest
         assert_eq!(pick_model("missing", &avail).as_deref(), Some("small:1b"));
@@ -420,7 +438,10 @@ mod tests {
         ];
         assert_eq!(pick_model("missing", &avail).as_deref(), Some("gemma:2b"));
         // A preferred embedding model is still honoured if explicitly chosen.
-        assert_eq!(pick_model("nomic-embed-text", &avail).as_deref(), Some("nomic-embed-text"));
+        assert_eq!(
+            pick_model("nomic-embed-text", &avail).as_deref(),
+            Some("nomic-embed-text")
+        );
         // Only embedding models installed → no chat model.
         assert_eq!(pick_model("x", &[("all-minilm".to_string(), 50)]), None);
         assert!(is_embedding_model("nomic-embed-text"));

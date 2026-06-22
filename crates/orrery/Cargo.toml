@@ -6,6 +6,9 @@ name = "orrery"
 version = "0.2.0"
 edition = "2024"
 publish = false
+description = "every repo in orbit — a Linux-native command center for your git repos"
+license = "MIT"
+repository = "https://github.com/Hankanman/Orrery"
 
 [[bin]]
 name = "orrery"
@@ -52,3 +55,42 @@ unsafe_code = "warn"
 
 [lints.clippy]
 all = "warn"
+
+# ── Linux packaging ──────────────────────────────────────────────────────────
+# `.deb` via cargo-deb. Asset source paths are relative to this manifest dir;
+# `target/release/` is special-cased to the workspace target dir.
+[package.metadata.deb]
+maintainer = "Seb Burrell <sebburrell@outlook.com>"
+copyright = "2026, Seb Burrell"
+license-file = ["../../LICENSE", "0"]
+extended-description = "Orrery is a Linux-native command center for your git repos: a fast GPU-rendered desktop dashboard that scans your workspace, surfaces status/PRs/CI at a glance, and launches your IDE or agent."
+section = "devel"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/orrery", "usr/bin/", "755"],
+    ["../../packaging/orrery.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/icons/32x32.png", "usr/share/icons/hicolor/32x32/apps/orrery.png", "644"],
+    ["../../packaging/icons/64x64.png", "usr/share/icons/hicolor/64x64/apps/orrery.png", "644"],
+    ["../../packaging/icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/orrery.png", "644"],
+    ["../../packaging/icons/icon.png", "usr/share/icons/hicolor/512x512/apps/orrery.png", "644"],
+    ["../../LICENSE", "usr/share/licenses/orrery/LICENSE", "644"],
+]
+
+# `.rpm` via cargo-generate-rpm. Run from the workspace root, so source paths are
+# relative to it.
+[package.metadata.generate-rpm]
+summary = "every repo in orbit — a Linux-native command center for your git repos"
+license = "MIT"
+assets = [
+    { source = "target/release/orrery", dest = "/usr/bin/orrery", mode = "755" },
+    { source = "packaging/orrery.desktop", dest = "/usr/share/applications/orrery.desktop", mode = "644" },
+    { source = "packaging/icons/32x32.png", dest = "/usr/share/icons/hicolor/32x32/apps/orrery.png", mode = "644" },
+    { source = "packaging/icons/64x64.png", dest = "/usr/share/icons/hicolor/64x64/apps/orrery.png", mode = "644" },
+    { source = "packaging/icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/orrery.png", mode = "644" },
+    { source = "packaging/icons/icon.png", dest = "/usr/share/icons/hicolor/512x512/apps/orrery.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/orrery/LICENSE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+fontconfig = "*"

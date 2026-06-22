@@ -15,8 +15,12 @@ const GH: &str = "https://api.github.com";
 fn client() -> reqwest::Client {
     // Shared client (Arc-backed) so the inbox's several GitHub calls reuse one
     // connection pool instead of handshaking anew each time.
-    static CLIENT: std::sync::LazyLock<reqwest::Client> =
-        std::sync::LazyLock::new(|| reqwest::Client::builder().user_agent(UA).build().unwrap_or_default());
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .user_agent(UA)
+            .build()
+            .unwrap_or_default()
+    });
     CLIENT.clone()
 }
 
@@ -69,9 +73,9 @@ pub struct FeedItem {
     pub kind: String,
     /// The followed user who did it (activity events); None for starred releases.
     pub actor: Option<String>,
-    pub repo: String, // owner/name
-    pub title: String, // release title, or empty for plain actions
-    pub tag: String,   // release tag, or empty
+    pub repo: String,   // owner/name
+    pub title: String,  // release title, or empty for plain actions
+    pub tag: String,    // release tag, or empty
     pub detail: String, // release notes, truncated
     pub url: String,
     pub timestamp: i64, // unix seconds
@@ -197,7 +201,9 @@ async fn release_items(token: &str) -> Result<Vec<FeedItem>, String> {
         let Some(data) = parsed.data else { break };
         let starred = data.viewer.starred;
         for node in starred.nodes {
-            let Some(rel) = node.releases.nodes.into_iter().next() else { continue };
+            let Some(rel) = node.releases.nodes.into_iter().next() else {
+                continue;
+            };
             if rel.draft {
                 continue;
             }
@@ -213,7 +219,11 @@ async fn release_items(token: &str) -> Result<Vec<FeedItem>, String> {
                 tag: rel.tag_name,
                 detail: truncate(rel.description.unwrap_or_default(), 320),
                 url: rel.url,
-                timestamp: rel.published_at.as_deref().and_then(parse_iso8601).unwrap_or(0),
+                timestamp: rel
+                    .published_at
+                    .as_deref()
+                    .and_then(parse_iso8601)
+                    .unwrap_or(0),
                 prerelease: rel.prerelease,
                 host: Host::Github,
             });
@@ -283,20 +293,25 @@ async fn following_items(token: &str) -> Result<Vec<FeedItem>, String> {
     for e in events {
         let ts = e.created_at.as_deref().and_then(parse_iso8601).unwrap_or(0);
         let actor = e.actor.map(|a| a.login);
-        let Some(repo) = e.repo.map(|r| r.name) else { continue };
-        let repo_url = format!("https://github.com/{repo}");
-        let item = |kind: &str, title: String, tag: String, detail: String, url: String, pre: bool| FeedItem {
-            kind: kind.into(),
-            actor: actor.clone(),
-            repo: repo.clone(),
-            title,
-            tag,
-            detail,
-            url,
-            timestamp: ts,
-            prerelease: pre,
-            host: Host::Github,
+        let Some(repo) = e.repo.map(|r| r.name) else {
+            continue;
         };
+        let repo_url = format!("https://github.com/{repo}");
+        let item =
+            |kind: &str, title: String, tag: String, detail: String, url: String, pre: bool| {
+                FeedItem {
+                    kind: kind.into(),
+                    actor: actor.clone(),
+                    repo: repo.clone(),
+                    title,
+                    tag,
+                    detail,
+                    url,
+                    timestamp: ts,
+                    prerelease: pre,
+                    host: Host::Github,
+                }
+            };
         match e.kind.as_deref() {
             Some("ReleaseEvent") => {
                 if let Some(rel) = e.payload.and_then(|p| p.release) {
@@ -315,14 +330,42 @@ async fn following_items(token: &str) -> Result<Vec<FeedItem>, String> {
                     ));
                 }
             }
-            Some("WatchEvent") => out.push(item("starred", String::new(), String::new(), String::new(), repo_url, false)),
+            Some("WatchEvent") => out.push(item(
+                "starred",
+                String::new(),
+                String::new(),
+                String::new(),
+                repo_url,
+                false,
+            )),
             Some("CreateEvent")
                 if e.payload.as_ref().and_then(|p| p.ref_type.as_deref()) == Some("repository") =>
             {
-                out.push(item("created", String::new(), String::new(), String::new(), repo_url, false));
+                out.push(item(
+                    "created",
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    repo_url,
+                    false,
+                ));
             }
-            Some("ForkEvent") => out.push(item("forked", String::new(), String::new(), String::new(), repo_url, false)),
-            Some("PublicEvent") => out.push(item("public", String::new(), String::new(), String::new(), repo_url, false)),
+            Some("ForkEvent") => out.push(item(
+                "forked",
+                String::new(),
+                String::new(),
+                String::new(),
+                repo_url,
+                false,
+            )),
+            Some("PublicEvent") => out.push(item(
+                "public",
+                String::new(),
+                String::new(),
+                String::new(),
+                repo_url,
+                false,
+            )),
             _ => {}
         }
     }
@@ -370,7 +413,10 @@ async fn github_user(token: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("GitHub auth failed ({}) — check the token scopes", resp.status()));
+        return Err(format!(
+            "GitHub auth failed ({}) — check the token scopes",
+            resp.status()
+        ));
     }
     let user: User = resp.json().await.map_err(|e| e.to_string())?;
     Ok(user.login)
@@ -393,7 +439,11 @@ struct SearchItem {
 }
 
 fn repo_from_url(repository_url: &str) -> String {
-    repository_url.rsplit("/repos/").next().unwrap_or("").to_string()
+    repository_url
+        .rsplit("/repos/")
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -402,7 +452,10 @@ mod tests {
 
     #[test]
     fn repo_from_url_extracts_owner_repo() {
-        assert_eq!(repo_from_url("https://api.github.com/repos/Hankanman/Orrery"), "Hankanman/Orrery");
+        assert_eq!(
+            repo_from_url("https://api.github.com/repos/Hankanman/Orrery"),
+            "Hankanman/Orrery"
+        );
         assert_eq!(repo_from_url("https://api.github.com/repos/a/b"), "a/b");
     }
 
@@ -415,10 +468,22 @@ mod tests {
     #[test]
     fn check_run_state_maps_status_and_conclusion() {
         assert_eq!(check_run_state(Some("IN_PROGRESS"), None), "pending");
-        assert_eq!(check_run_state(Some("COMPLETED"), Some("SUCCESS")), "success");
-        assert_eq!(check_run_state(Some("COMPLETED"), Some("FAILURE")), "failure");
-        assert_eq!(check_run_state(Some("COMPLETED"), Some("CANCELLED")), "failure");
-        assert_eq!(check_run_state(Some("COMPLETED"), Some("SKIPPED")), "neutral");
+        assert_eq!(
+            check_run_state(Some("COMPLETED"), Some("SUCCESS")),
+            "success"
+        );
+        assert_eq!(
+            check_run_state(Some("COMPLETED"), Some("FAILURE")),
+            "failure"
+        );
+        assert_eq!(
+            check_run_state(Some("COMPLETED"), Some("CANCELLED")),
+            "failure"
+        );
+        assert_eq!(
+            check_run_state(Some("COMPLETED"), Some("SKIPPED")),
+            "neutral"
+        );
     }
 
     #[test]
@@ -433,7 +498,10 @@ mod tests {
 }
 
 async fn gh_search(token: &str, query: &str, kind: &str) -> Result<Vec<InboxItem>, String> {
-    let url = format!("{GH}/search/issues?per_page=50&q={}", urlencoding::encode(query));
+    let url = format!(
+        "{GH}/search/issues?per_page=50&q={}",
+        urlencoding::encode(query)
+    );
     let resp = client()
         .get(url)
         .bearer_auth(token)
@@ -468,8 +536,22 @@ pub async fn github_inbox() -> Result<Vec<InboxItem>, String> {
 
     let mut items = Vec::new();
     items.extend(gh_search(&token, &format!("is:open is:pr author:{login}"), "pr").await?);
-    items.extend(gh_search(&token, &format!("is:open is:pr review-requested:{login}"), "review").await?);
-    items.extend(gh_search(&token, &format!("is:open is:issue assignee:{login}"), "issue").await?);
+    items.extend(
+        gh_search(
+            &token,
+            &format!("is:open is:pr review-requested:{login}"),
+            "review",
+        )
+        .await?,
+    );
+    items.extend(
+        gh_search(
+            &token,
+            &format!("is:open is:issue assignee:{login}"),
+            "issue",
+        )
+        .await?,
+    );
     Ok(items)
 }
 
@@ -599,7 +681,8 @@ pub struct PrPanel {
 }
 
 fn split_slug(slug: &str) -> Result<(&str, &str), String> {
-    slug.split_once('/').ok_or_else(|| format!("not an owner/name slug: {slug}"))
+    slug.split_once('/')
+        .ok_or_else(|| format!("not an owner/name slug: {slug}"))
 }
 
 /// Open PRs for a repo with checks, reviews, and mergeable state — one GraphQL
@@ -764,7 +847,12 @@ pub async fn github_prs(slug: &str) -> Result<PrPanel, String> {
         .nodes
         .into_iter()
         .map(|p| {
-            let rollup = p.commits.nodes.into_iter().next().and_then(|c| c.commit.status_check_rollup);
+            let rollup = p
+                .commits
+                .nodes
+                .into_iter()
+                .next()
+                .and_then(|c| c.commit.status_check_rollup);
             let checks_state = rollup
                 .as_ref()
                 .and_then(|r| r.state.as_deref())
@@ -780,7 +868,11 @@ pub async fn github_prs(slug: &str) -> Result<PrPanel, String> {
                             if c.typename == "CheckRun" {
                                 CheckRun {
                                     name: c.name.unwrap_or_default(),
-                                    state: check_run_state(c.status.as_deref(), c.conclusion.as_deref()).to_string(),
+                                    state: check_run_state(
+                                        c.status.as_deref(),
+                                        c.conclusion.as_deref(),
+                                    )
+                                    .to_string(),
                                     url: c.details_url,
                                 }
                             } else {
@@ -800,7 +892,12 @@ pub async fn github_prs(slug: &str) -> Result<PrPanel, String> {
                 .into_iter()
                 .map(|r| PrReview {
                     author: r.author.map(|a| a.login).unwrap_or_default(),
-                    state: if r.state == "APPROVED" { "approved" } else { "changes_requested" }.to_string(),
+                    state: if r.state == "APPROVED" {
+                        "approved"
+                    } else {
+                        "changes_requested"
+                    }
+                    .to_string(),
                 })
                 .collect();
             PrDetail {
@@ -851,9 +948,11 @@ fn check_run_state(status: Option<&str>, conclusion: Option<&str>) -> &'static s
     }
     match conclusion {
         Some("SUCCESS") => "success",
-        Some("FAILURE") | Some("TIMED_OUT") | Some("STARTUP_FAILURE") | Some("CANCELLED") | Some("ACTION_REQUIRED") => {
-            "failure"
-        }
+        Some("FAILURE")
+        | Some("TIMED_OUT")
+        | Some("STARTUP_FAILURE")
+        | Some("CANCELLED")
+        | Some("ACTION_REQUIRED") => "failure",
         Some("NEUTRAL") | Some("SKIPPED") => "neutral",
         _ => "pending",
     }
@@ -894,7 +993,11 @@ pub async fn github_merge_pr(slug: &str, number: u64, method: &str) -> Result<()
         .json::<serde_json::Value>()
         .await
         .ok()
-        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| format!("GitHub merge {status}"));
     Err(msg)
 }
@@ -917,7 +1020,11 @@ pub async fn github_approve_pr(slug: &str, number: u64) -> Result<(), String> {
         .json::<serde_json::Value>()
         .await
         .ok()
-        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| format!("GitHub approve {status}"));
     Err(msg)
 }
@@ -935,7 +1042,9 @@ pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
         conclusion: Option<String>,
     }
     let Some(token) = oauth::github_token() else {
-        return Ok(CiStatus { state: "none".into() });
+        return Ok(CiStatus {
+            state: "none".into(),
+        });
     };
     let resp = client()
         .get(format!("{GH}/repos/{slug}/actions/runs?per_page=1"))
@@ -944,7 +1053,9 @@ pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Ok(CiStatus { state: "none".into() });
+        return Ok(CiStatus {
+            state: "none".into(),
+        });
     }
     let runs: Runs = resp.json().await.map_err(|e| e.to_string())?;
     let state = match runs.workflow_runs.first() {
@@ -956,5 +1067,7 @@ pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
         },
         None => "none",
     };
-    Ok(CiStatus { state: state.to_string() })
+    Ok(CiStatus {
+        state: state.to_string(),
+    })
 }
