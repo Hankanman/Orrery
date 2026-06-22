@@ -7,8 +7,8 @@
 //! device-flow login and live AI status/model-pull (network) come next.
 
 use gpui::{
-    div, px, rgb, AppContext, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled,
+    AppContext, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, rgb,
 };
 use orrery_core::model::AppConfig;
 
@@ -103,10 +103,10 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
     let mut col = section(t, "Workspace roots");
     for (i, root) in s.draft.roots.iter().enumerate() {
         let remove = icon_btn("x", t, app, move |a| {
-            if let Some(s) = &mut a.settings {
-                if i < s.draft.roots.len() {
-                    s.draft.roots.remove(i);
-                }
+            if let Some(s) = &mut a.settings
+                && i < s.draft.roots.len()
+            {
+                s.draft.roots.remove(i);
             }
         });
         col = col.child(

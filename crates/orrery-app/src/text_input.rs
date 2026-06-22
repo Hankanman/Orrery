@@ -10,11 +10,11 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, point, px, rgb, rgba, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, InteractiveElement, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement, Pixels, Point,
-    ShapedLine, SharedString, Style, Styled, TextRun, UTF16Selection, UnderlineStyle, Window,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InteractiveElement,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    ParentElement, Pixels, Point, ShapedLine, SharedString, Style, Styled, TextRun, UTF16Selection,
+    UnderlineStyle, Window, actions, div, fill, point, px, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -664,10 +664,10 @@ impl Element for InputElement {
             cx,
         )
         .unwrap();
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
-            }
+        if focus_handle.is_focused(window)
+            && let Some(cursor) = prepaint.cursor.take()
+        {
+            window.paint_quad(cursor);
         }
         self.input.update(cx, |input, _| {
             input.last_layout = Some(line);

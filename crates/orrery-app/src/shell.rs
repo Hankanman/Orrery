@@ -9,8 +9,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, px, rgb, AppContext, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    AppContext, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
 use orrery_core::model::AppConfig;
@@ -139,7 +139,7 @@ impl OrreryApp {
             query,
             selected: 0,
             code: Vec::new(),
-            gen: 0,
+            generation: 0,
             _sub: sub,
         }));
         window.focus(&fh, cx);
@@ -159,11 +159,11 @@ impl OrreryApp {
     /// Move the palette selection by `delta` (wrapping), if it's open.
     fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
         let len = self.palette_items(cx).len();
-        if let Some(Overlay::Palette(d)) = &mut self.overlay {
-            if len > 0 {
-                let i = d.selected as isize + delta;
-                d.selected = i.rem_euclid(len as isize) as usize;
-            }
+        if let Some(Overlay::Palette(d)) = &mut self.overlay
+            && len > 0
+        {
+            let i = d.selected as isize + delta;
+            d.selected = i.rem_euclid(len as isize) as usize;
         }
         cx.notify();
     }
@@ -186,10 +186,10 @@ impl OrreryApp {
 
     /// Debounced cross-repo code search for the current query.
     fn trigger_code_search(&mut self, cx: &mut Context<Self>) {
-        let (query, gen) = match &mut self.overlay {
+        let (query, generation) = match &mut self.overlay {
             Some(Overlay::Palette(d)) => {
-                d.gen += 1;
-                (d.query.read(cx).content().to_string(), d.gen)
+                d.generation += 1;
+                (d.query.read(cx).content().to_string(), d.generation)
             }
             _ => return,
         };
@@ -203,7 +203,7 @@ impl OrreryApp {
             let current = this
                 .update(
                     cx,
-                    |this, _| matches!(&this.overlay, Some(Overlay::Palette(d)) if d.gen == gen),
+                    |this, _| matches!(&this.overlay, Some(Overlay::Palette(d)) if d.generation == generation),
                 )
                 .unwrap_or(false);
             if !current {
@@ -219,12 +219,11 @@ impl OrreryApp {
                 Vec::new()
             };
             let _ = this.update(cx, |this, cx| {
-                if let Some(Overlay::Palette(d)) = &mut this.overlay {
-                    if d.gen == gen {
+                if let Some(Overlay::Palette(d)) = &mut this.overlay
+                    && d.generation == generation {
                         d.code = results.into_iter().map(crate::palette::code_hit).collect();
                         cx.notify();
                     }
-                }
             });
         })
         .detach();
@@ -260,7 +259,7 @@ impl OrreryApp {
 
     /// Load the inbox (PRs / reviews / issues / notifications) over the network.
     pub fn load_inbox(&mut self, cx: &mut Context<Self>) {
-        use crate::views::inbox::{inbox_row, notice_row, InboxData, InboxState};
+        use crate::views::inbox::{InboxData, InboxState, inbox_row, notice_row};
         self.inbox = InboxState::Loading;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -362,7 +361,7 @@ impl OrreryApp {
 
     /// Load the activity/release feed over the network.
     pub fn load_feed(&mut self, cx: &mut Context<Self>) {
-        use crate::views::feed::{feed_row, FeedState};
+        use crate::views::feed::{FeedState, feed_row};
         self.feed = FeedState::Loading;
         cx.notify();
         let now = crate::data::now_unix();
@@ -383,7 +382,7 @@ impl OrreryApp {
 
     /// Load the starred-repo browser over the network.
     pub fn load_starred(&mut self, cx: &mut Context<Self>) {
-        use crate::views::explore::{star_row, ExploreState};
+        use crate::views::explore::{ExploreState, star_row};
         self.explore = ExploreState::Loading;
         cx.notify();
         cx.spawn(async move |this, cx| {

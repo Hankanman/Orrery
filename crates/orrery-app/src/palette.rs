@@ -8,8 +8,8 @@
 //! rendering.
 
 use gpui::{
-    div, px, rgb, rgba, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Subscription,
+    Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, div, px, rgb, rgba,
 };
 
 use crate::data::Row;
@@ -37,7 +37,7 @@ pub struct PaletteData {
     /// Cross-repo ripgrep results for the current query (debounced).
     pub code: Vec<CodeHit>,
     /// Query generation, for debouncing/dropping stale code searches.
-    pub gen: u64,
+    pub generation: u64,
     /// Keeps the query-observation alive (re-renders the app on each keystroke).
     pub _sub: Subscription,
 }

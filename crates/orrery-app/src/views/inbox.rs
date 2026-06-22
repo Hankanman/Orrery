@@ -3,8 +3,8 @@
 //! Loaded lazily (network, via the `task` bridge) when the nav item is selected.
 
 use gpui::{
-    div, px, rgb, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled,
+    Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, rgb,
 };
 use orrery_core::{inbox, launch};
 

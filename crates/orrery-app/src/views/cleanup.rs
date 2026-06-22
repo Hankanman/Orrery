@@ -4,8 +4,8 @@
 //! branch (the core `prunable` already excludes those).
 
 use gpui::{
-    div, px, rgb, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled,
+    Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, rgb,
 };
 use orrery_core::git_ops;
 
