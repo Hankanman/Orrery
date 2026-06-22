@@ -51,7 +51,7 @@ pub fn inbox_row(i: inbox::InboxItem) -> InboxRow {
     InboxRow {
         tag: format!("{} #{}", short_repo(&i.repo), i.number).into(),
         kind: i.kind.into(),
-        title: i.title.into(),
+        title: crate::data::oneline(i.title).into(),
         url: i.url.into(),
         draft: i.draft,
     }
@@ -59,7 +59,7 @@ pub fn inbox_row(i: inbox::InboxItem) -> InboxRow {
 
 pub fn notice_row(n: inbox::Notification) -> NoticeRow {
     NoticeRow {
-        title: n.title.into(),
+        title: crate::data::oneline(n.title).into(),
         repo: short_repo(&n.repo).to_string().into(),
         reason: n.reason.into(),
     }

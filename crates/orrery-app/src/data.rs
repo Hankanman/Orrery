@@ -60,6 +60,30 @@ fn fmt_stars(stars: u32) -> String {
     }
 }
 
+/// Flatten any newlines/tabs to single spaces. GPUI's single-line text elements
+/// panic on embedded newlines, and our card/drawer render these as one line.
+pub(crate) fn oneline(s: String) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        let c = if ch == '\n' || ch == '\r' || ch == '\t' {
+            ' '
+        } else {
+            ch
+        };
+        if c == ' ' {
+            if !prev_space {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
 pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
     repos
         .into_iter()
@@ -70,19 +94,20 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
                 _ => String::new(),
             }
             .into(),
-            name: r.display_name.into(),
+            name: oneline(r.display_name).into(),
             slug: r.slug.unwrap_or_else(|| "no remote".into()).into(),
             path: r.path.into(),
-            description: r
-                .description
-                .filter(|d| !d.trim().is_empty())
-                .unwrap_or_else(|| "No README description.".into())
-                .into(),
+            description: oneline(
+                r.description
+                    .filter(|d| !d.trim().is_empty())
+                    .unwrap_or_else(|| "No README description.".into()),
+            )
+            .into(),
             language: r.language.unwrap_or_default().into(),
             branch: r.git.branch.into(),
             age: rel_age(r.last_commit_unix, now).into(),
-            release: r.latest_release.unwrap_or_default().into(),
-            ai_summary: r.ai_summary.unwrap_or_default().into(),
+            release: oneline(r.latest_release.unwrap_or_default()).into(),
+            ai_summary: oneline(r.ai_summary.unwrap_or_default()).into(),
             ahead: r.git.ahead,
             behind: r.git.behind,
             dirty: r.git.dirty,
