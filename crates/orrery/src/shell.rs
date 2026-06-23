@@ -235,14 +235,8 @@ pub struct OrreryApp {
     pub settings: Option<crate::views::settings::SettingsState>,
     /// Dev Tools fields (created on first open).
     pub devtools: Option<crate::views::devtools::DevToolsState>,
-    /// Whether a GitHub token is currently resolvable (Settings account panel).
-    pub github_authed: bool,
-    /// An in-progress GitHub device-flow login, if any.
-    pub github_device: Option<crate::views::settings::GithubDevice>,
-    /// Live AI-backend reachability (Settings AI panel).
-    pub ai_status: crate::views::settings::AiStatus,
-    /// AI is enabled and reachable — gates semantic search + AI affordances.
-    pub ai_ready: bool,
+    /// External-service status: GitHub auth + AI backend reachability.
+    pub services: Services,
     /// Whether the system tray came up — gates close-to-tray.
     pub tray_active: bool,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
@@ -276,6 +270,21 @@ pub struct GridState {
     pub activity: Option<orrery_core::activity::Activity>,
     /// Whether the contribution graph is shown (dismissible).
     pub activity_open: bool,
+}
+
+/// Status of the external integrations Orrery talks to — GitHub (auth) and the
+/// local AI backend — grouped out of [`OrreryApp`]. Surfaced in Settings;
+/// `ai_ready`/`github_authed` also gate affordances app-wide.
+#[derive(Default)]
+pub struct Services {
+    /// Whether a GitHub token is currently resolvable (Settings account panel).
+    pub github_authed: bool,
+    /// An in-progress GitHub device-flow login, if any.
+    pub github_device: Option<crate::views::settings::GithubDevice>,
+    /// Live AI-backend reachability + model list (Settings AI panel).
+    pub ai_status: crate::views::settings::AiStatus,
+    /// AI is enabled and reachable — gates semantic search + AI affordances.
+    pub ai_ready: bool,
 }
 
 impl Default for GridState {
@@ -553,7 +562,7 @@ impl OrreryApp {
     /// Debounced semantic (embedding) repo search for the current query. Gated
     /// on AI being ready; reuses the code-search generation for stale-drop.
     fn trigger_semantic_search(&mut self, cx: &mut Context<Self>) {
-        if !self.ai_ready {
+        if !self.services.ai_ready {
             return;
         }
         let (query, generation) = match &self.overlay {
@@ -727,7 +736,7 @@ impl OrreryApp {
                 .spawn(async { orrery_core::oauth::github_authed() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.github_authed = authed;
+                this.services.github_authed = authed;
                 cx.notify();
             });
         })
@@ -738,10 +747,10 @@ impl OrreryApp {
     /// until the user authorizes (or it fails / expires).
     pub fn github_connect(&mut self, cx: &mut Context<Self>) {
         use crate::views::settings::GithubDevice;
-        if self.github_device.is_some() {
+        if self.services.github_device.is_some() {
             return;
         }
-        self.github_device = Some(GithubDevice {
+        self.services.github_device = Some(GithubDevice {
             user_code: "…".into(),
             verification_uri: "https://github.com/login/device".into(),
             status: "Requesting a device code…".into(),
@@ -757,7 +766,7 @@ impl OrreryApp {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(d) = &mut this.github_device {
+                        if let Some(d) = &mut this.services.github_device {
                             d.status = format!("Failed: {e}").into();
                         }
                         cx.notify();
@@ -769,7 +778,7 @@ impl OrreryApp {
             let interval = start.interval.max(1);
             if this
                 .update(cx, |this, cx| {
-                    this.github_device = Some(GithubDevice {
+                    this.services.github_device = Some(GithubDevice {
                         user_code: start.user_code.into(),
                         verification_uri: start.verification_uri.into(),
                         status: "Waiting for authorization…".into(),
@@ -787,7 +796,7 @@ impl OrreryApp {
                     .await;
                 // Stop if the user dismissed the flow (e.g. navigated / signed out).
                 if this
-                    .update(cx, |this, _| this.github_device.is_none())
+                    .update(cx, |this, _| this.services.github_device.is_none())
                     .unwrap_or(true)
                 {
                     return;
@@ -806,8 +815,8 @@ impl OrreryApp {
                 match status.as_str() {
                     "authorized" => {
                         let _ = this.update(cx, |this, cx| {
-                            this.github_device = None;
-                            this.github_authed = true;
+                            this.services.github_device = None;
+                            this.services.github_authed = true;
                             cx.notify();
                         });
                         return;
@@ -820,7 +829,7 @@ impl OrreryApp {
                             e => format!("Login failed: {e}"),
                         };
                         let _ = this.update(cx, |this, cx| {
-                            if let Some(d) = &mut this.github_device {
+                            if let Some(d) = &mut this.services.github_device {
                                 d.status = msg.into();
                             }
                             cx.notify();
@@ -836,18 +845,18 @@ impl OrreryApp {
     /// Forget the stored GitHub token.
     pub fn github_sign_out(&mut self, cx: &mut Context<Self>) {
         orrery_core::oauth::sign_out();
-        self.github_device = None;
-        self.github_authed = orrery_core::oauth::github_authed();
+        self.services.github_device = None;
+        self.services.github_authed = orrery_core::oauth::github_authed();
         cx.notify();
     }
 
     /// Re-check AI-backend reachability and list installed models.
     pub fn ai_refresh(&mut self, cx: &mut Context<Self>) {
         use crate::views::settings::AiStatus;
-        if matches!(self.ai_status, AiStatus::Pulling(_)) {
+        if matches!(self.services.ai_status, AiStatus::Pulling(_)) {
             return;
         }
-        self.ai_status = AiStatus::Checking;
+        self.services.ai_status = AiStatus::Checking;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let up = crate::task::run(orrery_core::ai::available()).await;
@@ -864,8 +873,8 @@ impl OrreryApp {
             };
             let _ = this.update(cx, |this, cx| {
                 let ready = up && this.config.ai_enabled;
-                this.ai_status = status;
-                this.ai_ready = ready;
+                this.services.ai_status = status;
+                this.services.ai_ready = ready;
                 // Reachable now → (re)build the semantic index so the palette can
                 // search by meaning.
                 if ready {
@@ -886,7 +895,7 @@ impl OrreryApp {
         cx.spawn(async move |this, cx| {
             let up = crate::task::run(orrery_core::ai::available()).await;
             let _ = this.update(cx, |this, _cx| {
-                this.ai_ready = up;
+                this.services.ai_ready = up;
                 if up {
                     this.index_semantic();
                 }
@@ -898,7 +907,7 @@ impl OrreryApp {
     /// (Re)build the semantic embedding index from the current rows, off the UI
     /// thread. Cheap when nothing changed (core skips unchanged repos).
     pub fn index_semantic(&self) {
-        if !self.ai_ready {
+        if !self.services.ai_ready {
             return;
         }
         let items: Vec<(String, String)> = self
@@ -919,10 +928,10 @@ impl OrreryApp {
     /// Pull (download) a model on the AI backend, then refresh the status.
     pub fn ai_pull(&mut self, model: String, cx: &mut Context<Self>) {
         use crate::views::settings::AiStatus;
-        if model.trim().is_empty() || matches!(self.ai_status, AiStatus::Pulling(_)) {
+        if model.trim().is_empty() || matches!(self.services.ai_status, AiStatus::Pulling(_)) {
             return;
         }
-        self.ai_status = AiStatus::Pulling(format!("{model} · starting…").into());
+        self.services.ai_status = AiStatus::Pulling(format!("{model} · starting…").into());
         cx.notify();
 
         // The pull runs on the tokio runtime and streams (status, done, total)
@@ -955,7 +964,7 @@ impl OrreryApp {
                 };
                 if this
                     .update(cx, |this, cx| {
-                        this.ai_status = AiStatus::Pulling(label.into());
+                        this.services.ai_status = AiStatus::Pulling(label.into());
                         cx.notify();
                     })
                     .is_err()
@@ -966,7 +975,7 @@ impl OrreryApp {
             // Channel closed → pull finished. Drop Pulling so the refresh isn't
             // short-circuited, then re-list models.
             let _ = this.update(cx, |this, cx| {
-                this.ai_status = AiStatus::Unknown;
+                this.services.ai_status = AiStatus::Unknown;
                 this.ai_refresh(cx);
             });
         })
@@ -1391,7 +1400,7 @@ impl OrreryApp {
     /// repeats are cheap), then reload the grid so the cards show them. Gated on
     /// `ai_ready` — a no-op when AI is unavailable.
     pub fn summarize_all(&mut self, cx: &mut Context<Self>) {
-        if !self.ai_ready {
+        if !self.services.ai_ready {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -2166,9 +2175,9 @@ impl OrreryApp {
                 Some(s) => crate::views::settings::render(
                     s,
                     self.view_filter.as_deref(),
-                    self.github_authed,
-                    &self.github_device,
-                    &self.ai_status,
+                    self.services.github_authed,
+                    &self.services.github_device,
+                    &self.services.ai_status,
                     t,
                     &cx.entity(),
                 )
@@ -2256,7 +2265,7 @@ impl OrreryApp {
                 cx.listener(|this, _ev, _w, cx| this.fetch_all_hosts(cx)),
             ))
             // Summarize (local AI) — hidden unless a backend is ready.
-            .children(self.ai_ready.then(|| {
+            .children(self.services.ai_ready.then(|| {
                 tool_btn(
                     "tb-summarize",
                     "sparkles",
