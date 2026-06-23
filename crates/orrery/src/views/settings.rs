@@ -50,6 +50,8 @@ pub struct SettingsState {
     pub client_id: Entity<InputState>,
     pub ignore: Entity<InputState>,
     pub add_root: Entity<InputState>,
+    /// Scan depth as a NumberInput (integer 1–8).
+    pub scan_depth: Entity<InputState>,
     /// Flash a "Saved" confirmation after a successful save.
     pub saved: bool,
 }
@@ -74,6 +76,14 @@ impl SettingsState {
             client_id: field(window, cx, "GitHub OAuth client id", &cfg.github_client_id),
             ignore: field(window, cx, "node_modules, .cache", &cfg.ignore.join(", ")),
             add_root: field(window, cx, "~/dev", ""),
+            scan_depth: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(cfg.scan_depth.to_string())
+                    .validate(|s, _| s.chars().all(|c| c.is_ascii_digit()))
+                    .min(1.)
+                    .max(8.)
+                    .step(1.)
+            }),
             draft: cfg.clone(),
             saved: false,
         }
@@ -254,7 +264,7 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
     );
 
     // Scan depth stepper + ignore field.
-    col = col.child(stepper("Scan depth", s.draft.scan_depth, t, app));
+    col = col.child(number_row("Scan depth", &s.scan_depth, t));
     col.child(labeled("Ignore (comma-separated)", s.ignore.clone(), t))
 }
 
@@ -530,7 +540,8 @@ fn muted_mono(text: SharedString, t: &Theme) -> impl IntoElement {
         .child(text)
 }
 
-/// A label + on/off switch row.
+/// A label + gpui-component on/off [`Switch`] row. `flip` toggles the bound
+/// draft field; the switch reflects `on`.
 fn toggle(
     label: &str,
     on: bool,
@@ -538,60 +549,8 @@ fn toggle(
     app: &Entity<OrreryApp>,
     flip: impl Fn(&mut OrreryApp) + 'static,
 ) -> impl IntoElement {
+    use gpui_component::switch::Switch;
     let app = app.clone();
-    let knob_x = if on { px(16.) } else { px(2.) };
-    div()
-        .id(SharedString::from(format!("tg-{label}")))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.))
-        .cursor_pointer()
-        .on_click(move |_ev, _win, cx| {
-            app.update(cx, |this, cx| {
-                flip(this);
-                cx.notify();
-            });
-        })
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(t.text_small))
-                .text_color(rgb(t.fg1))
-                .child(SharedString::from(label.to_string())),
-        )
-        .child(
-            div()
-                .w(px(34.))
-                .h(px(18.))
-                .rounded(px(9.))
-                .bg(rgb(if on { t.primary } else { t.button_bg }))
-                .border_1()
-                .border_color(rgb(t.border))
-                .child(
-                    div()
-                        .mt(px(1.))
-                        .ml(knob_x)
-                        .w(px(14.))
-                        .h(px(14.))
-                        .rounded(px(7.))
-                        .bg(rgb(t.fg0)),
-                ),
-        )
-}
-
-/// A label + −/value/+ stepper for scan depth.
-fn stepper(label: &str, value: usize, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let dec = step_btn("−", t, app, |a| {
-        if let Some(s) = &mut a.settings {
-            s.draft.scan_depth = s.draft.scan_depth.saturating_sub(1).max(1);
-        }
-    });
-    let inc = step_btn("+", t, app, |a| {
-        if let Some(s) = &mut a.settings {
-            s.draft.scan_depth = (s.draft.scan_depth + 1).min(8);
-        }
-    });
     div()
         .flex()
         .flex_row()
@@ -604,48 +563,36 @@ fn stepper(label: &str, value: usize, t: &Theme, app: &Entity<OrreryApp>) -> imp
                 .text_color(rgb(t.fg1))
                 .child(SharedString::from(label.to_string())),
         )
-        .child(dec)
         .child(
-            div()
-                .w(px(24.))
-                .text_center()
-                .font_family("monospace")
-                .text_size(px(t.text_data_sm))
-                .text_color(rgb(t.fg0))
-                .child(SharedString::from(value.to_string())),
+            Switch::new(SharedString::from(format!("tg-{label}")))
+                .checked(on)
+                .color(rgb(t.primary))
+                .on_click(move |_checked, _window, cx| {
+                    app.update(cx, |this, cx| {
+                        flip(this);
+                        cx.notify();
+                    });
+                }),
         )
-        .child(inc)
 }
 
-fn step_btn(
-    label: &str,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-    on: impl Fn(&mut OrreryApp) + 'static,
-) -> impl IntoElement {
-    let app = app.clone();
+/// A label + gpui-component [`NumberInput`] row (used for scan depth). Stepping +
+/// validation live in the bound `InputState`; the value is read back on save.
+fn number_row(label: &str, input: &Entity<InputState>, t: &Theme) -> impl IntoElement {
+    use gpui_component::input::NumberInput;
     div()
-        .id(SharedString::from(format!("step-{label}")))
         .flex()
+        .flex_row()
         .items_center()
-        .justify_center()
-        .w(px(24.))
-        .h(px(24.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family("monospace")
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(|s| s.border_color(rgb(t.border_strong)))
-        .child(SharedString::from(label.to_string()))
-        .on_click(move |_ev, _win, cx| {
-            app.update(cx, |this, cx| {
-                on(this);
-                cx.notify();
-            });
-        })
+        .gap(px(10.))
+        .child(
+            div()
+                .flex_1()
+                .text_size(px(t.text_small))
+                .text_color(rgb(t.fg1))
+                .child(SharedString::from(label.to_string())),
+        )
+        .child(div().w(px(120.)).child(NumberInput::new(input)))
 }
 
 fn icon_btn(
