@@ -56,18 +56,37 @@ pub fn scan(rows: &[Row]) -> Vec<CleanupRepo> {
         .collect()
 }
 
-pub fn render(state: &CleanupState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+/// Does a branch's prune reason pass the sidebar filter (None = all)?
+fn passes(why: &str, filter: Option<&str>) -> bool {
+    filter.is_none() || filter == Some(why)
+}
+
+pub fn render(
+    state: &CleanupState,
+    filter: Option<&str>,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     let body = match state {
         CleanupState::Idle | CleanupState::Loading => super::note("Loading…", t).into_any_element(),
         CleanupState::Ready(repos) if repos.is_empty() => {
             super::note("Nothing to clean up — no prunable branches.", t).into_any_element()
         }
         CleanupState::Ready(repos) => {
-            let mut col = div().flex().flex_col().gap(px(12.));
-            for r in repos {
-                col = col.child(repo_card(r, t, app));
+            // Only repos with at least one branch matching the filter.
+            let shown: Vec<&CleanupRepo> = repos
+                .iter()
+                .filter(|r| r.branches.iter().any(|b| passes(b.why, filter)))
+                .collect();
+            if shown.is_empty() {
+                super::note("Nothing in this filter.", t).into_any_element()
+            } else {
+                let mut col = div().flex().flex_col().gap(px(12.));
+                for r in shown {
+                    col = col.child(repo_card(r, filter, t, app));
+                }
+                col.into_any_element()
             }
-            col.into_any_element()
         }
     };
     super::frame(
@@ -80,7 +99,12 @@ pub fn render(state: &CleanupState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
     )
 }
 
-fn repo_card(r: &CleanupRepo, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+fn repo_card(
+    r: &CleanupRepo,
+    filter: Option<&str>,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     let n = r.branches.len();
     let head = div()
         .flex()
@@ -108,7 +132,7 @@ fn repo_card(r: &CleanupRepo, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoEl
         .border_1()
         .border_color(rgb(t.border))
         .child(head);
-    for b in &r.branches {
+    for b in r.branches.iter().filter(|b| passes(b.why, filter)) {
         card = card.child(
             div()
                 .flex()

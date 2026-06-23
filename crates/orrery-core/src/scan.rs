@@ -347,47 +347,105 @@ fn detect_language(path: &Path) -> Option<String> {
     extension_language(path)
 }
 
+/// Source extension → language. Code languages only (config/markup like JSON or
+/// CSS rarely indicate a repo's *primary* language and would drown out code).
+/// Names mirror `devicon_stem` in the UI so the language mark resolves.
+const EXT_LANG: &[(&str, &str)] = &[
+    ("rs", "Rust"),
+    ("ts", "TypeScript"),
+    ("tsx", "TypeScript"),
+    ("mts", "TypeScript"),
+    ("cts", "TypeScript"),
+    ("js", "JavaScript"),
+    ("jsx", "JavaScript"),
+    ("mjs", "JavaScript"),
+    ("cjs", "JavaScript"),
+    ("py", "Python"),
+    ("pyi", "Python"),
+    ("go", "Go"),
+    ("rb", "Ruby"),
+    ("java", "Java"),
+    ("kt", "Kotlin"),
+    ("kts", "Kotlin"),
+    ("swift", "Swift"),
+    ("c", "C"),
+    ("h", "C"),
+    ("cpp", "C++"),
+    ("cc", "C++"),
+    ("cxx", "C++"),
+    ("hpp", "C++"),
+    ("hh", "C++"),
+    ("cs", "C#"),
+    ("php", "PHP"),
+    ("sh", "Shell"),
+    ("bash", "Shell"),
+    ("zsh", "Shell"),
+    ("lua", "Lua"),
+    ("zig", "Zig"),
+    ("vue", "Vue"),
+    ("svelte", "Svelte"),
+    ("dart", "Dart"),
+    ("ex", "Elixir"),
+    ("exs", "Elixir"),
+    ("hs", "Haskell"),
+    ("scala", "Scala"),
+    ("sc", "Scala"),
+    ("nix", "Nix"),
+    ("nim", "Nim"),
+    ("clj", "Clojure"),
+    ("cljs", "Clojure"),
+    ("erl", "Erlang"),
+    ("ml", "OCaml"),
+];
+
+/// Directory names pruned from the language scan — VCS, dependency/build output,
+/// and virtualenvs — so vendored code doesn't dominate the count.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "vendor",
+    "venv",
+    ".venv",
+    "__pycache__",
+    ".next",
+    ".svelte-kit",
+    "Pods",
+];
+
 fn extension_language(path: &Path) -> Option<String> {
-    const EXT: &[(&str, &str)] = &[
-        ("rs", "Rust"),
-        ("ts", "TypeScript"),
-        ("tsx", "TypeScript"),
-        ("js", "JavaScript"),
-        ("jsx", "JavaScript"),
-        ("py", "Python"),
-        ("go", "Go"),
-        ("rb", "Ruby"),
-        ("java", "Java"),
-        ("kt", "Kotlin"),
-        ("swift", "Swift"),
-        ("c", "C"),
-        ("h", "C"),
-        ("cpp", "C++"),
-        ("cc", "C++"),
-        ("hpp", "C++"),
-        ("cs", "C#"),
-        ("php", "PHP"),
-        ("sh", "Shell"),
-        ("lua", "Lua"),
-        ("zig", "Zig"),
-    ];
-    let map: HashMap<&str, &str> = EXT.iter().copied().collect();
+    let map: HashMap<&str, &str> = EXT_LANG.iter().copied().collect();
     let mut counts: HashMap<&str, u32> = HashMap::new();
+    // Walk a few levels deep (covers src/main/java/… layouts) but prune vendored
+    // and hidden directories so the count reflects the project's own code.
     for entry in WalkDir::new(path)
-        .max_depth(2)
+        .max_depth(4)
         .into_iter()
-        .filter_entry(|e| e.file_name() != ".git" && e.file_name() != "node_modules")
+        .filter_entry(|e| {
+            let name = e.file_name().to_str().unwrap_or_default();
+            let pruned = SKIP_DIRS.contains(&name)
+                // hidden dirs (.github, .cargo, …) below the root
+                || (e.depth() > 0 && e.file_type().is_dir() && name.starts_with('.'));
+            !pruned
+        })
         .flatten()
     {
-        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-            if let Some(lang) = map.get(ext) {
-                *counts.entry(lang).or_default() += 1;
-            }
+        if let Some(lang) = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|ext| map.get(ext.to_ascii_lowercase().as_str()).copied())
+        {
+            *counts.entry(lang).or_default() += 1;
         }
     }
+    // Most files wins; break ties by name for a deterministic result.
     counts
         .into_iter()
-        .max_by_key(|(_, n)| *n)
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
         .map(|(lang, _)| lang.to_string())
 }
 
@@ -547,6 +605,30 @@ mod tests {
         fs::write(dir.path().join("b.py"), "").unwrap();
         fs::write(dir.path().join("c.js"), "").unwrap();
         assert_eq!(detect_language(dir.path()), Some("Python".into()));
+    }
+
+    #[test]
+    fn detect_language_prunes_vendored_and_reads_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // The project's own code lives a few levels deep…
+        fs::create_dir_all(root.join("src/app/core")).unwrap();
+        fs::write(root.join("src/app/core/main.rs"), "").unwrap();
+        fs::write(root.join("src/app/core/util.rs"), "").unwrap();
+        // …while a vendored dir is stuffed with another language that must NOT
+        // win (it's pruned).
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        for i in 0..20 {
+            fs::write(root.join(format!("node_modules/pkg/{i}.js")), "").unwrap();
+        }
+        assert_eq!(detect_language(root), Some("Rust".into()));
+    }
+
+    #[test]
+    fn detect_language_covers_added_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("App.vue"), "").unwrap();
+        assert_eq!(detect_language(dir.path()), Some("Vue".into()));
     }
 
     #[test]

@@ -1,0 +1,43 @@
+# bacon — background Rust dev loop for Orrery.
+#
+#   bacon          # starts the default job below (rebuild + relaunch the app)
+#   bacon run      # same, explicitly
+#   bacon clippy   # or any other job; press the listed key to switch live
+#
+# Why a project config: bacon's built-in `run` job waits for the command to
+# finish before restarting, but the GUI never exits — so it never reloads on a
+# save. `background = true` + `on_change_strategy = "kill_then_restart"` makes
+# bacon kill the running window and relaunch it on every change instead.
+
+default_job = "run"
+
+[jobs.run]
+command = ["cargo", "run", "-p", "orrery", "--color", "always"]
+need_stdout = true
+allow_warnings = true
+# Keep watching while the app runs; kill + relaunch it on each source change.
+background = true
+on_change_strategy = "kill_then_restart"
+kill = ["kill", "-s", "TERM"]
+
+# Fast feedback loops that don't launch the app.
+[jobs.check]
+command = ["cargo", "check", "--workspace", "--color", "always"]
+need_stdout = false
+
+[jobs.clippy]
+command = [
+    "cargo", "clippy", "--workspace", "--all-targets",
+    "--color", "always", "--", "-D", "warnings",
+]
+need_stdout = false
+
+[jobs.test]
+command = ["cargo", "test", "--workspace", "--color", "always"]
+need_stdout = true
+
+# `bacon` reads these to label the keybindings in its footer.
+[keybindings]
+r = "job:run"
+c = "job:clippy"
+t = "job:test"

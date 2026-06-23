@@ -14,6 +14,7 @@ pub struct Row {
     pub url: SharedString, // host web URL, or "" (open-on-host button)
     pub name: SharedString,
     pub slug: SharedString, // "owner/repo" or "no remote"
+    pub root: SharedString, // the scanned root this repo was found under
     pub path: SharedString,
     pub description: SharedString,
     pub language: SharedString, // "" when unknown
@@ -28,6 +29,10 @@ pub struct Row {
     pub host: SharedString,  // "github" / "gitlab" / "" (brand-icon name)
     pub private: bool,
     pub favorite: bool,
+    /// Activity bucket (active/idle/stale) — drives the "Stale" filter.
+    pub activity: model::Activity,
+    /// Last-commit time (Unix secs) — sort key for the "Activity" sort.
+    pub last_commit_unix: i64,
 }
 
 pub(crate) fn rel_age(last_commit_unix: i64, now: i64) -> String {
@@ -244,6 +249,7 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
             .into(),
             name: oneline(r.display_name).into(),
             slug: r.slug.unwrap_or_else(|| "no remote".into()).into(),
+            root: r.root.into(),
             path: r.path.into(),
             description: oneline(
                 r.description
@@ -268,6 +274,8 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
             .into(),
             private: r.private,
             favorite: r.favorite,
+            activity: r.activity,
+            last_commit_unix: r.last_commit_unix,
         })
         .collect()
 }

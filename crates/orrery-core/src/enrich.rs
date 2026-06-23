@@ -30,11 +30,17 @@ const CONCURRENCY: usize = 8;
 /// entry is missing or older than the TTL, and persist the results. Returns the
 /// number of slugs whose enrichment was (re)written — `0` means nothing changed
 /// (all fresh, or offline), so the caller can skip rebuilding the grid.
-pub async fn refresh(repos: &[Repo], now: i64) -> usize {
+///
+/// `force` ignores the TTL and re-fetches every repo (the manual "Fetch all").
+pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> usize {
     let cfg = config::load();
     let github = oauth::github_token();
     let gitlab = oauth::gitlab_token();
-    let fresh = cache::fresh_host_slugs(TTL_SECS, now);
+    let fresh = if force {
+        std::collections::HashSet::new()
+    } else {
+        cache::fresh_host_slugs(TTL_SECS, now)
+    };
 
     // Build the work list: repos with a host + slug whose cache is stale/missing.
     // Dedupe by slug so forks/mirrors of the same remote aren't fetched twice.
@@ -86,9 +92,16 @@ pub async fn refresh(repos: &[Repo], now: i64) -> usize {
     updated
 }
 
-/// Refresh enrichment for the current cached repo snapshot. Convenience for the
-/// app, which holds render rows rather than `Repo`s.
+/// Refresh enrichment for the current cached repo snapshot, honoring the TTL.
+/// Convenience for the app, which holds render rows rather than `Repo`s.
 pub async fn refresh_cached(now: i64) -> usize {
     let repos = cache::load_repos();
-    refresh(&repos, now).await
+    refresh(&repos, now, false).await
+}
+
+/// Force-refresh enrichment for every cached repo, ignoring the TTL (the manual
+/// "Fetch all" action).
+pub async fn refresh_cached_all(now: i64) -> usize {
+    let repos = cache::load_repos();
+    refresh(&repos, now, true).await
 }

@@ -126,7 +126,12 @@ fn uptime(started_unix: i64, now: i64) -> String {
     }
 }
 
-pub fn render(state: &AgentsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+pub fn render(
+    state: &AgentsState,
+    filter: Option<&str>,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     let now = crate::data::now_unix();
     let body = match state {
         AgentsState::Idle | AgentsState::Loading => {
@@ -138,11 +143,19 @@ pub fn render(state: &AgentsState, t: &Theme, app: &Entity<OrreryApp>) -> impl I
         )
         .into_any_element(),
         AgentsState::Ready(agents) => {
-            let mut col = div().flex().flex_col().gap(px(12.));
-            for a in agents {
-                col = col.child(agent_card(a, now, t, app));
+            let shown: Vec<&AgentRow> = agents
+                .iter()
+                .filter(|a| filter.is_none_or(|repo| a.name.as_ref() == repo))
+                .collect();
+            if shown.is_empty() {
+                super::note("Nothing in this filter.", t).into_any_element()
+            } else {
+                let mut col = div().flex().flex_col().gap(px(12.));
+                for a in shown {
+                    col = col.child(agent_card(a, now, t, app));
+                }
+                col.into_any_element()
             }
-            col.into_any_element()
         }
     };
     super::frame(

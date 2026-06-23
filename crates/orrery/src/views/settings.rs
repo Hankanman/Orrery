@@ -92,12 +92,32 @@ impl SettingsState {
 
 pub fn render(
     s: &SettingsState,
+    filter: Option<&str>,
     authed: bool,
     device: &Option<GithubDevice>,
     ai: &AiStatus,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
+    // The sidebar SECTIONS panel gates which section shows (None = all).
+    let show = |section: &str| filter.is_none() || filter == Some(section);
+    let mut sections: Vec<gpui::AnyElement> = Vec::new();
+    if show("account") {
+        sections.push(account_section(authed, device, t, app).into_any_element());
+    }
+    if show("roots") {
+        sections.push(roots_section(s, t, app).into_any_element());
+    }
+    if show("launchers") {
+        sections.push(launchers_section(s, t).into_any_element());
+    }
+    if show("ai") {
+        sections.push(ai_section(s, ai, t, app).into_any_element());
+    }
+    if show("notifications") {
+        sections.push(notifications_section(s, t, app).into_any_element());
+    }
+
     div()
         .flex()
         .flex_col()
@@ -131,11 +151,7 @@ pub fn render(
                 .overflow_y_scroll()
                 .p(px(20.))
                 .gap(px(16.))
-                .child(account_section(authed, device, t, app))
-                .child(roots_section(s, t, app))
-                .child(launchers_section(s, t))
-                .child(ai_section(s, ai, t, app))
-                .child(notifications_section(s, t, app)),
+                .children(sections),
         )
         // Save footer
         .child(save_footer(s, t, app))

@@ -36,6 +36,128 @@ pub enum View {
     Settings,
 }
 
+/// A Mission Control quick filter. Single-select (radio): one is active at a
+/// time, `All` meaning no filtering.
+#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RepoFilter {
+    #[default]
+    All,
+    Public,
+    Private,
+    Dirty,
+    Ahead,
+    Starred,
+    Stale,
+}
+
+impl RepoFilter {
+    /// The chip order shown in the toolbar.
+    pub const ORDER: [RepoFilter; 7] = [
+        RepoFilter::All,
+        RepoFilter::Public,
+        RepoFilter::Private,
+        RepoFilter::Dirty,
+        RepoFilter::Ahead,
+        RepoFilter::Starred,
+        RepoFilter::Stale,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            RepoFilter::All => "All",
+            RepoFilter::Public => "Public",
+            RepoFilter::Private => "Private",
+            RepoFilter::Dirty => "Dirty",
+            RepoFilter::Ahead => "Ahead",
+            RepoFilter::Starred => "Starred",
+            RepoFilter::Stale => "Stale",
+        }
+    }
+
+    /// Lucide icon for the chip, if any (the visibility chips carry one).
+    fn icon(self) -> Option<&'static str> {
+        match self {
+            RepoFilter::Public => Some("globe"),
+            RepoFilter::Private => Some("lock"),
+            RepoFilter::Dirty => Some("circle-dot"),
+            RepoFilter::Ahead => Some("arrow-up"),
+            RepoFilter::Starred => Some("star"),
+            RepoFilter::Stale => Some("clock"),
+            RepoFilter::All => None,
+        }
+    }
+
+    /// Does `row` pass this filter?
+    fn matches(self, r: &Row) -> bool {
+        use orrery_core::model::Activity;
+        match self {
+            RepoFilter::All => true,
+            RepoFilter::Public => !r.private,
+            RepoFilter::Private => r.private,
+            RepoFilter::Dirty => r.dirty > 0,
+            RepoFilter::Ahead => r.ahead > 0,
+            RepoFilter::Starred => r.favorite,
+            RepoFilter::Stale => r.activity == Activity::Stale,
+        }
+    }
+}
+
+/// Card ordering for Mission Control.
+#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum SortMode {
+    /// Most recently committed first.
+    #[default]
+    Activity,
+    /// Alphabetical by name.
+    Name,
+}
+
+impl SortMode {
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::Activity => "Activity",
+            SortMode::Name => "Name",
+        }
+    }
+
+    fn next(self) -> SortMode {
+        match self {
+            SortMode::Activity => SortMode::Name,
+            SortMode::Name => SortMode::Activity,
+        }
+    }
+}
+
+/// A persisted Mission Control "quick view": a named snapshot of the active
+/// filter combo, restorable from the sidebar's VIEWS section.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SavedView {
+    pub name: String,
+    pub filter: RepoFilter,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub sort: SortMode,
+}
+
+/// SQLite meta key holding the saved-views JSON array.
+const SAVED_VIEWS_KEY: &str = "saved_views";
+
+/// Load persisted saved views from the cache (empty if none / unparseable).
+pub fn load_saved_views() -> Vec<SavedView> {
+    orrery_core::cache::get_meta(SAVED_VIEWS_KEY)
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+fn persist_saved_views(views: &[SavedView]) {
+    if let Ok(json) = serde_json::to_string(views) {
+        orrery_core::cache::set_meta(SAVED_VIEWS_KEY, &json);
+    }
+}
+
 /// A modal layered over the shell (drawer / palette / dialog). Rendered last in
 /// `render`, above the active view; `Esc`/backdrop dismisses it.
 pub enum Overlay {
@@ -108,6 +230,25 @@ pub struct OrreryApp {
     pub ai_ready: bool,
     /// Whether the system tray came up — gates close-to-tray.
     pub tray_active: bool,
+    /// Contribution-graph data (commits/day across repos), computed in the
+    /// background; `None` until the first pass lands.
+    pub activity: Option<orrery_core::activity::Activity>,
+    /// Whether the Mission Control activity graph is shown (dismissible).
+    pub activity_open: bool,
+    /// Active Mission Control quick filter (All = no filtering).
+    pub filter: RepoFilter,
+    /// Active scanned-root filter (sidebar ROOTS); `None` = all roots.
+    pub root: Option<SharedString>,
+    /// Active language filter (sidebar LANGUAGES); `None` = all languages.
+    pub language: Option<SharedString>,
+    /// Persisted quick views (sidebar VIEWS), loaded from the cache at launch.
+    pub saved_views: Vec<SavedView>,
+    /// The active contextual sub-filter for the current non-Grid view (e.g. the
+    /// Feed/Inbox category panels). Ephemeral: reset when the view changes so
+    /// filters don't bleed across views.
+    pub view_filter: Option<SharedString>,
+    /// Mission Control card ordering.
+    pub sort: SortMode,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
@@ -1018,10 +1159,200 @@ impl OrreryApp {
                 this.rows = rows;
                 this.roots = roots;
                 this.enrich_hosts(cx);
+                this.load_activity(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Recompute the contribution graph (commits/day across all repos) on the
+    /// background pool — git history walking is slow — then store it. Cheap to
+    /// call on rescan; the revwalk stops past the one-year window.
+    pub fn load_activity(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<String> = self.rows.iter().map(|r| r.id.to_string()).collect();
+        cx.spawn(async move |this, cx| {
+            let activity = cx
+                .background_executor()
+                .spawn(async move { orrery_core::activity::compute(&paths) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.activity = Some(activity);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Set the active Mission Control quick filter.
+    pub fn set_filter(&mut self, f: RepoFilter, cx: &mut Context<Self>) {
+        self.filter = f;
+        cx.notify();
+    }
+
+    /// Cycle the Mission Control sort order.
+    pub fn cycle_sort(&mut self, cx: &mut Context<Self>) {
+        self.sort = self.sort.next();
+        cx.notify();
+    }
+
+    /// Show/hide the contribution graph.
+    pub fn toggle_activity(&mut self, cx: &mut Context<Self>) {
+        self.activity_open = !self.activity_open;
+        cx.notify();
+    }
+
+    /// Force-refresh host enrichment for every repo (ignores the TTL), then
+    /// reload the grid. The toolbar's "Fetch all".
+    pub fn fetch_all_hosts(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let now = crate::data::now_unix();
+            let updated =
+                crate::task::run(async move { orrery_core::enrich::refresh_cached_all(now).await })
+                    .await;
+            if updated == 0 {
+                return;
+            }
+            let (rows, roots) = cx
+                .background_executor()
+                .spawn(async { crate::data::load(crate::data::now_unix()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.rows = rows;
+                this.roots = roots;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Set/toggle the current view's contextual sub-filter (Feed/Inbox panels).
+    /// Passing the already-active key clears it; `None` clears unconditionally.
+    pub fn set_view_filter(&mut self, key: Option<SharedString>, cx: &mut Context<Self>) {
+        self.view_filter = if key.is_some() && key == self.view_filter {
+            None
+        } else {
+            key
+        };
+        cx.notify();
+    }
+
+    /// Select the scanned root to filter by (sidebar ROOTS); `None` = all.
+    pub fn set_root(&mut self, root: Option<SharedString>, cx: &mut Context<Self>) {
+        self.root = root;
+        cx.notify();
+    }
+
+    /// Toggle the language filter (sidebar LANGUAGES) — clicking the active one
+    /// clears it.
+    pub fn toggle_language(&mut self, lang: SharedString, cx: &mut Context<Self>) {
+        self.language = if self.language.as_ref() == Some(&lang) {
+            None
+        } else {
+            Some(lang)
+        };
+        cx.notify();
+    }
+
+    /// The current filter combo as a `SavedView` (with a generated name).
+    fn current_view(&self) -> SavedView {
+        let root = self.root.as_ref().map(|r| r.to_string());
+        let language = self.language.as_ref().map(|l| l.to_string());
+        // Name from the active facets, e.g. "Dirty · Rust · Orrery"; "All repos"
+        // when nothing is narrowed.
+        let mut parts: Vec<String> = Vec::new();
+        if self.filter != RepoFilter::All {
+            parts.push(self.filter.label().to_string());
+        }
+        if let Some(l) = &language {
+            parts.push(l.clone());
+        }
+        if let Some(r) = &root {
+            parts.push(r.rsplit('/').next().unwrap_or(r).to_string());
+        }
+        let name = if parts.is_empty() {
+            "All repos".to_string()
+        } else {
+            parts.join(" · ")
+        };
+        SavedView {
+            name,
+            filter: self.filter,
+            root,
+            language,
+            sort: self.sort,
+        }
+    }
+
+    /// Whether `v` matches the live filter combo (drives the active highlight).
+    fn view_is_active(&self, v: &SavedView) -> bool {
+        v.filter == self.filter
+            && v.sort == self.sort
+            && v.root.as_deref() == self.root.as_deref()
+            && v.language.as_deref() == self.language.as_deref()
+    }
+
+    /// Save the current filter combo as a quick view (deduped by combo), persist,
+    /// and refresh.
+    pub fn save_current_view(&mut self, cx: &mut Context<Self>) {
+        let view = self.current_view();
+        if !self.saved_views.iter().any(|v| self.view_is_active(v)) {
+            self.saved_views.push(view);
+            persist_saved_views(&self.saved_views);
+            cx.notify();
+        }
+    }
+
+    /// Apply a saved quick view's filter combo.
+    pub fn apply_view(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(v) = self.saved_views.get(idx) {
+            self.filter = v.filter;
+            self.sort = v.sort;
+            self.root = v.root.clone().map(SharedString::from);
+            self.language = v.language.clone().map(SharedString::from);
+            cx.notify();
+        }
+    }
+
+    /// Delete a saved quick view.
+    pub fn delete_view(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.saved_views.len() {
+            self.saved_views.remove(idx);
+            persist_saved_views(&self.saved_views);
+            cx.notify();
+        }
+    }
+
+    /// Absolute row indices passing every active filter (chip AND root AND
+    /// language), in the active sort order.
+    fn visible_rows(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| self.filter.matches(r))
+            .filter(|(_, r)| self.root.as_ref().is_none_or(|root| &r.root == root))
+            .filter(|(_, r)| {
+                self.language
+                    .as_ref()
+                    .is_none_or(|lang| &r.language == lang)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match self.sort {
+            SortMode::Activity => v.sort_by(|&a, &b| {
+                self.rows[b]
+                    .last_commit_unix
+                    .cmp(&self.rows[a].last_commit_unix)
+            }),
+            SortMode::Name => v.sort_by(|&a, &b| {
+                self.rows[a]
+                    .name
+                    .to_lowercase()
+                    .cmp(&self.rows[b].name.to_lowercase())
+            }),
+        }
+        v
     }
 
     /// Refresh host enrichment (stars/topics/issues/release/visibility) from
@@ -1188,6 +1519,7 @@ impl OrreryApp {
                 .hover(|s| s.bg(rgb(t.surface_hover)))
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     this.view = view;
+                    this.view_filter = None; // contextual filters are per-view
                     this.maybe_load_view(view, window, cx);
                     cx.notify();
                 }))
@@ -1216,15 +1548,28 @@ impl OrreryApp {
             .border_r_1()
             .border_color(rgb(t.border))
             .bg(rgb(t.page))
+            // Primary nav stays put at the top…
             .child(nav)
-            // footer pushed to bottom
+            // …while the area below it is contextual: it swaps with the active
+            // view (Mission Control shows the ROOTS / LANGUAGES filters). Scrolls
+            // independently so the footer stays pinned.
+            .child(
+                div()
+                    .id("sidebar-context")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .children(self.contextual_sidebar(t, cx)),
+            )
+            // footer pinned to the bottom
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(8.))
-                    .mt_auto()
                     .pt(px(10.))
                     .border_t_1()
                     .border_color(rgb(t.border))
@@ -1236,14 +1581,457 @@ impl OrreryApp {
             )
     }
 
+    /// The view-specific sidebar content shown below the fixed nav. `None` for
+    /// views that have no contextual panel yet (just the nav above).
+    fn contextual_sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        match self.view {
+            // Mission Control: the ROOTS / LANGUAGES quick-filters.
+            View::Grid => Some(self.filter_sections(t, cx).into_any_element()),
+            View::Feed => Some(self.feed_panel(t, cx)),
+            View::Inbox => Some(self.inbox_panel(t, cx)),
+            View::Tools => Some(self.devtools_panel(t, cx)),
+            View::Settings => Some(self.settings_panel(t, cx)),
+            View::Janitor => Some(self.cleanup_panel(t, cx)),
+            View::Explore => Some(self.explore_panel(t, cx)),
+            View::Agents => Some(self.agents_panel(t, cx)),
+        }
+    }
+
+    /// A contextual filter list: a titled section of single-select category rows
+    /// that drive `view_filter`. `cats` is `(key, icon, label, count)`; a `None`
+    /// key is the "All" row.
+    fn category_panel(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        title: &'static str,
+        cats: Vec<(
+            Option<SharedString>,
+            &'static str,
+            SharedString,
+            Option<usize>,
+        )>,
+    ) -> gpui::AnyElement {
+        let mut sec = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(section_header(title, t));
+        for (key, icon, label, count) in cats {
+            let active = key == self.view_filter;
+            let icon_fg = if active { t.accent_bright } else { t.fg2 };
+            let pick = key.clone();
+            sec = sec.child(sidebar_filter_item(
+                SharedString::from(format!("cat-{title}-{label}")),
+                lucide(icon, 14., icon_fg).into_any_element(),
+                label,
+                count,
+                active,
+                t,
+                cx.listener(move |this, _e, _w, cx| this.set_view_filter(pick.clone(), cx)),
+            ));
+        }
+        div().flex().flex_col().child(sec).into_any_element()
+    }
+
+    /// Feed: filter by activity type.
+    fn feed_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::views::feed::FeedState;
+        let (total, releases) = match &self.feed {
+            FeedState::Ready(rows) => (
+                rows.len(),
+                rows.iter().filter(|r| r.kind.as_ref() == "release").count(),
+            ),
+            _ => (0, 0),
+        };
+        self.category_panel(
+            t,
+            cx,
+            "FILTER",
+            vec![
+                (None, "rss", "All".into(), Some(total)),
+                (
+                    Some("release".into()),
+                    "tag",
+                    "Releases".into(),
+                    Some(releases),
+                ),
+                (
+                    Some("activity".into()),
+                    "star",
+                    "Activity".into(),
+                    Some(total - releases),
+                ),
+            ],
+        )
+    }
+
+    /// Inbox: filter by item category.
+    fn inbox_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::views::inbox::InboxState;
+        let count = |kind: &str| match &self.inbox {
+            InboxState::Ready(d) => d.items.iter().filter(|i| i.kind.as_ref() == kind).count(),
+            _ => 0,
+        };
+        let total = match &self.inbox {
+            InboxState::Ready(d) => d.items.len(),
+            _ => 0,
+        };
+        self.category_panel(
+            t,
+            cx,
+            "FILTER",
+            vec![
+                (None, "inbox", "All".into(), Some(total)),
+                (
+                    Some("pr".into()),
+                    "git-pull-request",
+                    "Pull requests".into(),
+                    Some(count("pr")),
+                ),
+                (
+                    Some("review".into()),
+                    "eye",
+                    "Reviews".into(),
+                    Some(count("review")),
+                ),
+                (
+                    Some("issue".into()),
+                    "circle-dot",
+                    "Issues".into(),
+                    Some(count("issue")),
+                ),
+            ],
+        )
+    }
+
+    /// Dev Tools: filter the utility belt by category (composes with the search
+    /// box). Counts are the number of tools in each category.
+    fn devtools_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.category_panel(
+            t,
+            cx,
+            "CATEGORY",
+            vec![
+                (None, "wrench", "All tools".into(), Some(7)),
+                (
+                    Some("generators".into()),
+                    "box",
+                    "Generators".into(),
+                    Some(1),
+                ),
+                (
+                    Some("encoding".into()),
+                    "binary",
+                    "Encoding".into(),
+                    Some(2),
+                ),
+                (Some("hashing".into()), "hash", "Hashing".into(), Some(1)),
+                (Some("data".into()), "braces", "Data".into(), Some(2)),
+                (Some("text".into()), "type", "Text".into(), Some(1)),
+            ],
+        )
+    }
+
+    /// Settings: jump to a section (gates which section the view renders). No
+    /// counts — these are section selectors, not filters.
+    fn settings_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.category_panel(
+            t,
+            cx,
+            "SECTIONS",
+            vec![
+                (None, "settings", "All".into(), None),
+                (
+                    Some("account".into()),
+                    "user",
+                    "GitHub account".into(),
+                    None,
+                ),
+                (
+                    Some("roots".into()),
+                    "folder",
+                    "Workspace roots".into(),
+                    None,
+                ),
+                (Some("launchers".into()), "rocket", "Launchers".into(), None),
+                (Some("ai".into()), "sparkles", "AI".into(), None),
+                (
+                    Some("notifications".into()),
+                    "bell",
+                    "Notifications".into(),
+                    None,
+                ),
+            ],
+        )
+    }
+
+    /// Cleanup: filter prunable branches by why they're prunable.
+    fn cleanup_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::views::cleanup::CleanupState;
+        let (mut merged, mut gone) = (0usize, 0usize);
+        if let CleanupState::Ready(repos) = &self.cleanup {
+            for repo in repos {
+                for b in &repo.branches {
+                    if b.why == "merged" {
+                        merged += 1;
+                    } else {
+                        gone += 1;
+                    }
+                }
+            }
+        }
+        self.category_panel(
+            t,
+            cx,
+            "FILTER",
+            vec![
+                (None, "scissors", "All".into(), Some(merged + gone)),
+                (
+                    Some("merged".into()),
+                    "git-merge",
+                    "Merged".into(),
+                    Some(merged),
+                ),
+                (
+                    Some("gone".into()),
+                    "circle-alert",
+                    "Gone".into(),
+                    Some(gone),
+                ),
+            ],
+        )
+    }
+
+    /// Explore: filter starred results by language.
+    fn explore_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::views::explore::ExploreState;
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let total = if let ExploreState::Ready(rows) = &self.explore {
+            for r in rows {
+                let l: &str = r.language.as_ref();
+                if !l.is_empty() {
+                    *counts.entry(l).or_default() += 1;
+                }
+            }
+            rows.len()
+        } else {
+            0
+        };
+        let mut langs: Vec<(SharedString, usize)> = counts
+            .into_iter()
+            .map(|(k, n)| (SharedString::from(k.to_string()), n))
+            .collect();
+        langs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut cats: Vec<(
+            Option<SharedString>,
+            &'static str,
+            SharedString,
+            Option<usize>,
+        )> = vec![(None, "compass", "All".into(), Some(total))];
+        for (lang, n) in langs {
+            cats.push((Some(lang.clone()), "box", lang, Some(n)));
+        }
+        self.category_panel(t, cx, "LANGUAGE", cats)
+    }
+
+    /// Agents: filter running sessions by repo.
+    fn agents_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::views::agents::AgentsState;
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let total = if let AgentsState::Ready(rows) = &self.agents {
+            for r in rows {
+                *counts.entry(r.name.as_ref()).or_default() += 1;
+            }
+            rows.len()
+        } else {
+            0
+        };
+        let mut repos: Vec<(SharedString, usize)> = counts
+            .into_iter()
+            .map(|(k, n)| (SharedString::from(k.to_string()), n))
+            .collect();
+        repos.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut cats: Vec<(
+            Option<SharedString>,
+            &'static str,
+            SharedString,
+            Option<usize>,
+        )> = vec![(None, "square-terminal", "All".into(), Some(total))];
+        for (name, n) in repos {
+            cats.push((Some(name.clone()), "folder", name, Some(n)));
+        }
+        self.category_panel(t, cx, "REPO", cats)
+    }
+
+    /// The ROOTS and LANGUAGES filter lists, derived from the current rows.
+    fn filter_sections(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        use std::collections::HashMap;
+
+        // Aggregate counts per root and per language.
+        let mut root_counts: HashMap<&str, usize> = HashMap::new();
+        let mut lang_counts: HashMap<&str, usize> = HashMap::new();
+        for r in &self.rows {
+            *root_counts.entry(r.root.as_ref()).or_default() += 1;
+            let lang: &str = r.language.as_ref();
+            if !lang.is_empty() {
+                *lang_counts.entry(lang).or_default() += 1;
+            }
+        }
+        // Sort by descending count, then name, for a stable order.
+        let sorted = |m: HashMap<&str, usize>| {
+            let mut v: Vec<(SharedString, usize)> = m
+                .into_iter()
+                .map(|(k, n)| (SharedString::from(k.to_string()), n))
+                .collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            v
+        };
+        let roots = sorted(root_counts);
+        let langs = sorted(lang_counts);
+
+        // ── VIEWS (saved quick filters) ────────────────────────────────────
+        let mut views_sec = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(section_header_action(
+                "VIEWS",
+                "plus",
+                t,
+                cx.listener(|this, _e, _w, cx| this.save_current_view(cx)),
+            ));
+        if self.saved_views.is_empty() {
+            views_sec = views_sec.child(
+                div()
+                    .px(px(9.))
+                    .py(px(4.))
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg3))
+                    .child("Save the current filters as a quick view."),
+            );
+        } else {
+            let hov = t.surface_hover;
+            for (i, v) in self.saved_views.iter().enumerate() {
+                let active = self.view_is_active(v);
+                let fg = if active { t.accent_bright } else { t.fg1 };
+                let mut row = div()
+                    .id(SharedString::from(format!("view-{i}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(9.))
+                    .py(px(6.))
+                    .rounded(px(t.r_sm))
+                    .text_size(px(t.text_small))
+                    .text_color(rgb(fg))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgb(hov)))
+                    .on_click(cx.listener(move |this, _e, _w, cx| this.apply_view(i, cx)))
+                    .child(lucide("bookmark", 14., fg))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(SharedString::from(v.name.clone())),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("view-del-{i}")))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(18.))
+                            .h(px(18.))
+                            .rounded(px(t.r_xs))
+                            .hover(move |s| s.bg(rgb(hov)))
+                            .child(lucide("trash-2", 13., t.fg3))
+                            .on_click(cx.listener(move |this, _e, _w, cx| {
+                                // Don't let delete also apply the view.
+                                cx.stop_propagation();
+                                this.delete_view(i, cx);
+                            })),
+                    );
+                if active {
+                    row = row.bg(rgb(t.accent_wash));
+                }
+                views_sec = views_sec.child(row);
+            }
+        }
+
+        // ── ROOTS ──────────────────────────────────────────────────────────
+        let mut roots_sec = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(section_header("ROOTS", t));
+        roots_sec = roots_sec.child(sidebar_filter_item(
+            "root-all".into(),
+            lucide("folder", 14., t.fg2).into_any_element(),
+            "All repos".into(),
+            Some(self.rows.len()),
+            self.root.is_none(),
+            t,
+            cx.listener(|this, _e, _w, cx| this.set_root(None, cx)),
+        ));
+        for (root, n) in roots {
+            let active = self.root.as_ref() == Some(&root);
+            let pick = root.clone();
+            roots_sec = roots_sec.child(sidebar_filter_item(
+                SharedString::from(format!("root-{root}")),
+                lucide("folder", 14., t.fg2).into_any_element(),
+                root,
+                Some(n),
+                active,
+                t,
+                cx.listener(move |this, _e, _w, cx| this.set_root(Some(pick.clone()), cx)),
+            ));
+        }
+
+        // ── LANGUAGES ──────────────────────────────────────────────────────
+        let mut langs_sec = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(section_header("LANGUAGES", t));
+        for (lang, n) in langs {
+            let active = self.language.as_ref() == Some(&lang);
+            let pick = lang.clone();
+            langs_sec = langs_sec.child(sidebar_filter_item(
+                SharedString::from(format!("lang-{lang}")),
+                crate::card::lang_mark(&lang, t),
+                lang,
+                Some(n),
+                active,
+                t,
+                cx.listener(move |this, _e, _w, cx| this.toggle_language(pick.clone(), cx)),
+            ));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(views_sec)
+            .child(roots_sec)
+            .child(langs_sec)
+    }
+
     fn main_view(&self, t: &Theme, cx: &mut Context<Self>, cols: usize) -> gpui::AnyElement {
         match self.view {
             View::Grid => self.grid(t, cx, cols).into_any_element(),
-            View::Inbox => {
-                crate::views::inbox::render(&self.inbox, t, &cx.entity()).into_any_element()
-            }
+            View::Inbox => crate::views::inbox::render(
+                &self.inbox,
+                self.view_filter.as_deref(),
+                t,
+                &cx.entity(),
+            )
+            .into_any_element(),
             View::Feed => {
-                crate::views::feed::render(&self.feed, t, &cx.entity()).into_any_element()
+                crate::views::feed::render(&self.feed, self.view_filter.as_deref(), t, &cx.entity())
+                    .into_any_element()
             }
             View::Explore => {
                 let cloned: std::collections::HashSet<SharedString> =
@@ -1252,26 +2040,41 @@ impl OrreryApp {
                     &self.explore,
                     &cloned,
                     &self.explore_cloning,
+                    self.view_filter.as_deref(),
                     t,
                     &cx.entity(),
                 )
                 .into_any_element()
             }
-            View::Janitor => {
-                crate::views::cleanup::render(&self.cleanup, t, &cx.entity()).into_any_element()
-            }
-            View::Agents => {
-                crate::views::agents::render(&self.agents, t, &cx.entity()).into_any_element()
-            }
+            View::Janitor => crate::views::cleanup::render(
+                &self.cleanup,
+                self.view_filter.as_deref(),
+                t,
+                &cx.entity(),
+            )
+            .into_any_element(),
+            View::Agents => crate::views::agents::render(
+                &self.agents,
+                self.view_filter.as_deref(),
+                t,
+                &cx.entity(),
+            )
+            .into_any_element(),
             View::Tools => match &self.devtools {
-                Some(d) => {
-                    crate::views::devtools::render(d, t, &cx.entity(), cx).into_any_element()
-                }
+                Some(d) => crate::views::devtools::render(
+                    d,
+                    self.view_filter.as_deref(),
+                    t,
+                    &cx.entity(),
+                    cx,
+                )
+                .into_any_element(),
                 None => placeholder(View::Tools, t).into_any_element(),
             },
             View::Settings => match &self.settings {
                 Some(s) => crate::views::settings::render(
                     s,
+                    self.view_filter.as_deref(),
                     self.github_authed,
                     &self.github_device,
                     &self.ai_status,
@@ -1285,16 +2088,143 @@ impl OrreryApp {
     }
 
     fn grid(&self, t: &Theme, cx: &mut Context<Self>, cols: usize) -> impl IntoElement {
+        // The contribution graph sits pinned above the toolbar + scrolling cards.
+        let band = match (self.activity_open, &self.activity) {
+            (true, Some(activity)) => {
+                Some(crate::heatmap::render(activity, t, &cx.entity()).into_any_element())
+            }
+            _ => None,
+        };
+        let visible = self.visible_rows();
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(t.page))
+            .children(band)
+            .child(self.toolbar(t, cx, visible.len()))
+            .child(self.filter_chips(t, cx))
+            .child(self.card_list(t, cx, cols, visible))
+    }
+
+    /// The "All repos · N repos" heading + right-aligned action buttons.
+    fn toolbar(&self, t: &Theme, cx: &mut Context<Self>, count: usize) -> impl IntoElement {
+        let title = if self.filter == RepoFilter::All {
+            "All repos".to_string()
+        } else {
+            format!("{} repos", self.filter.label())
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.))
+            .px(px(16.))
+            .pt(px(14.))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(t.text_h3))
+                    .text_color(rgb(t.fg0))
+                    .child(SharedString::from(title)),
+            )
+            .child(
+                div()
+                    .font_family("monospace")
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg2))
+                    .child(SharedString::from(format!("{count} repos"))),
+            )
+            .child(div().flex_1())
+            // Contribution-graph toggle (active when shown).
+            .child(tool_btn(
+                "tb-activity",
+                "activity",
+                None,
+                self.activity_open,
+                t,
+                cx.listener(|this, _ev, _w, cx| this.toggle_activity(cx)),
+            ))
+            // Force-refresh host enrichment.
+            .child(tool_btn(
+                "tb-fetch",
+                "cloud-download",
+                Some("Fetch all"),
+                false,
+                t,
+                cx.listener(|this, _ev, _w, cx| this.fetch_all_hosts(cx)),
+            ))
+            // Sort order (cycles Activity ↔ Name).
+            .child(tool_btn(
+                "tb-sort",
+                "arrow-up-down",
+                Some(self.sort.label()),
+                false,
+                t,
+                cx.listener(|this, _ev, _w, cx| this.cycle_sort(cx)),
+            ))
+    }
+
+    /// The single-select quick-filter chips (All / Public / … / Stale).
+    fn filter_chips(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(7.))
+            .px(px(16.))
+            .py(px(12.));
+        let hov = t.border_strong;
+        for f in RepoFilter::ORDER {
+            let active = self.filter == f;
+            let (bg, border, fg) = if active {
+                (t.accent_wash, t.border_accent, t.accent_bright)
+            } else {
+                (t.button_bg, t.border, t.fg1)
+            };
+            let mut chip = div()
+                .id(SharedString::from(format!("chip-{}", f.label())))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.))
+                .px(px(11.))
+                .py(px(5.))
+                .rounded_full()
+                .bg(rgb(bg))
+                .border_1()
+                .border_color(rgb(border))
+                .text_size(px(t.text_small))
+                .text_color(rgb(fg))
+                .cursor_pointer()
+                .hover(move |s| s.border_color(rgb(hov)))
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.set_filter(f, cx)));
+            if let Some(icon) = f.icon() {
+                chip = chip.child(lucide(icon, 13., fg));
+            }
+            row = row.child(chip.child(SharedString::from(f.label())));
+        }
+        row
+    }
+
+    fn card_list(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+        cols: usize,
+        visible: Vec<usize>,
+    ) -> impl IntoElement {
         let entity = cx.entity();
         let theme = self.theme.clone();
         let ide = self.config.ide_command.clone();
         let agent = self.config.agent_command.clone();
-        let grid_rows = self.rows.len().div_ceil(cols);
+        let grid_rows = visible.len().div_ceil(cols);
         // uniform_list needs one row height, so size it to the tallest card. The
         // AI-summary line is all-or-nothing per user (gated on aiReady), so pick
         // the taller height only when summaries are present — keeping cards snug
         // either way rather than clipping the launcher row at the bottom.
-        let has_ai = self.rows.iter().any(|r| !r.ai_summary.is_empty());
+        let has_ai = visible.iter().any(|&i| !self.rows[i].ai_summary.is_empty());
         let row_h = if has_ai { ROW_H_AI } else { ROW_H };
 
         gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
@@ -1302,9 +2232,12 @@ impl OrreryApp {
             range
                 .map(|gi| {
                     let start = gi * cols;
-                    let end = (start + cols).min(app.rows.len());
-                    let mut cells: Vec<gpui::AnyElement> = (start..end)
-                        .map(|i| {
+                    let end = (start + cols).min(visible.len());
+                    // Map each grid slot to its absolute row index (so the card's
+                    // favorite toggle keeps editing the right `rows[idx]`).
+                    let mut cells: Vec<gpui::AnyElement> = visible[start..end]
+                        .iter()
+                        .map(|&i| {
                             card(&app.rows[i], i, &theme, &entity, &ide, &agent).into_any_element()
                         })
                         .collect();
@@ -1332,6 +2265,46 @@ impl OrreryApp {
         .size_full()
         .bg(rgb(t.page))
     }
+}
+
+/// A toolbar action button: a lucide icon with an optional label, highlighted
+/// when `active`. `on` fires on click.
+fn tool_btn(
+    id: &'static str,
+    icon: &'static str,
+    label: Option<&str>,
+    active: bool,
+    t: &Theme,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let (bg, border, fg) = if active {
+        (t.accent_wash, t.border_accent, t.accent_bright)
+    } else {
+        (t.button_bg, t.border, t.fg1)
+    };
+    let hov = t.border_strong;
+    let mut b = div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .px(px(10.))
+        .py(px(6.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(bg))
+        .border_1()
+        .border_color(rgb(border))
+        .text_size(px(t.text_small))
+        .text_color(rgb(fg))
+        .cursor_pointer()
+        .hover(move |s| s.border_color(rgb(hov)))
+        .on_click(on)
+        .child(lucide(icon, 15., fg));
+    if let Some(label) = label {
+        b = b.child(SharedString::from(label.to_string()));
+    }
+    b
 }
 
 /// Responsive column count from the window width: aim for ~340px-wide cards
@@ -1442,6 +2415,98 @@ impl OrreryApp {
             None => None,
         }
     }
+}
+
+/// An uppercase sidebar section header (ROOTS / LANGUAGES).
+fn section_header(label: &'static str, t: &Theme) -> impl IntoElement {
+    div()
+        .px(px(9.))
+        .pb(px(2.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg3))
+        .child(label)
+}
+
+/// A section header with a trailing icon action (e.g. VIEWS + to save a view).
+fn section_header_action(
+    label: &'static str,
+    icon: &'static str,
+    t: &Theme,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let hov = t.surface_hover;
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .pl(px(9.))
+        .pb(px(2.))
+        .child(
+            div()
+                .flex_1()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg3))
+                .child(label),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("hdr-{label}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(18.))
+                .h(px(18.))
+                .rounded(px(t.r_xs))
+                .cursor_pointer()
+                .hover(move |s| s.bg(rgb(hov)))
+                .child(lucide(icon, 13., t.fg3))
+                .on_click(on),
+        )
+}
+
+/// One clickable sidebar filter row: leading mark, label, and a right-aligned
+/// count. Highlighted when `active`. `on` fires on click.
+fn sidebar_filter_item(
+    id: SharedString,
+    leading: gpui::AnyElement,
+    label: SharedString,
+    count: Option<usize>,
+    active: bool,
+    t: &Theme,
+    on: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let fg = if active { t.accent_bright } else { t.fg1 };
+    let hov = t.surface_hover;
+    let mut item = div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(9.))
+        .px(px(9.))
+        .py(px(6.))
+        .rounded(px(t.r_sm))
+        .text_size(px(t.text_small))
+        .text_color(rgb(fg))
+        .cursor_pointer()
+        .hover(move |s| s.bg(rgb(hov)))
+        .on_click(on)
+        .child(leading)
+        .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+        // Count is right-aligned and optional (section selectors omit it).
+        .children(count.map(|n| {
+            div()
+                .font_family("monospace")
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg3))
+                .child(SharedString::from(n.to_string()))
+        }));
+    if active {
+        item = item.bg(rgb(t.accent_wash));
+    }
+    item
 }
 
 /// A small count pill for the sidebar (e.g. Inbox attention items).

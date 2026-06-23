@@ -117,6 +117,7 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> bool {
                         // enrichment (skips repos still within the cache TTL).
                         app.index_semantic();
                         app.enrich_hosts(cx);
+                        app.load_activity(cx);
                         cx.notify();
                     });
                     if applied.is_err() {

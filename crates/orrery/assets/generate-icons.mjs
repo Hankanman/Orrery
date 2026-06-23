@@ -31,6 +31,12 @@ const LUCIDE_ICONS = [
   "box", "file-search",
   // settings (status rows)
   "circle-alert",
+  // mission control toolbar + filter chips
+  "activity", "cloud-download", "arrow-up-down", "globe",
+  // saved views
+  "bookmark", "trash-2",
+  // contextual panels: dev-tools categories + settings sections
+  "binary", "hash", "braces", "type", "user", "rocket", "bell",
 ];
 
 // Language marks: multicolor devicon "-original" SVGs, rendered in full color

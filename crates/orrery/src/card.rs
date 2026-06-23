@@ -18,8 +18,9 @@ use crate::theme::{Theme, devicon_stem, lang_color};
 const MONO: &str = "monospace";
 
 /// The language mark: the multicolor devicon when one is bundled, else the
-/// brand-color dot (no devicon for this language).
-fn lang_mark(language: &str, t: &Theme) -> gpui::AnyElement {
+/// brand-color dot (no devicon for this language). Shared with the sidebar's
+/// LANGUAGES list.
+pub(crate) fn lang_mark(language: &str, t: &Theme) -> gpui::AnyElement {
     if let Some(stem) = devicon_stem(language)
         && crate::assets::has_icon(&format!("devicon/{stem}.svg"))
     {

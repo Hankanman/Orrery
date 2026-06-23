@@ -66,42 +66,45 @@ pub fn notice_row(n: inbox::Notification) -> NoticeRow {
 }
 
 /// Render the Inbox view.
-pub fn render(state: &InboxState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+pub fn render(
+    state: &InboxState,
+    filter: Option<&str>,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     let body = match state {
         InboxState::Idle | InboxState::Loading => note("Loading…", t).into_any_element(),
         InboxState::Error(e) => note(e.clone(), t).into_any_element(),
         InboxState::Ready(d) if d.items.is_empty() && d.notifications.is_empty() => {
             note("Inbox zero — nothing awaiting you.", t).into_any_element()
         }
-        InboxState::Ready(d) => ready(d, t).into_any_element(),
+        InboxState::Ready(d) => ready(d, filter, t).into_any_element(),
     };
     super::frame("Inbox", t, app, OrreryApp::load_inbox, "inbox-scroll", body)
 }
 
-fn ready(d: &InboxData, t: &Theme) -> impl IntoElement {
-    let prs: Vec<&InboxRow> = d.items.iter().filter(|i| i.kind.as_ref() == "pr").collect();
-    let reviews: Vec<&InboxRow> = d
-        .items
-        .iter()
-        .filter(|i| i.kind.as_ref() == "review")
-        .collect();
-    let issues: Vec<&InboxRow> = d
-        .items
-        .iter()
-        .filter(|i| i.kind.as_ref() == "issue")
-        .collect();
+fn ready(d: &InboxData, filter: Option<&str>, t: &Theme) -> impl IntoElement {
+    // The sidebar category filter gates which groups show (None = all).
+    let show = |kind: &str| filter.is_none() || filter == Some(kind);
+    let of_kind = |kind: &str| -> Vec<&InboxRow> {
+        d.items.iter().filter(|i| i.kind.as_ref() == kind).collect()
+    };
+    let prs = of_kind("pr");
+    let reviews = of_kind("review");
+    let issues = of_kind("issue");
 
     let mut col = div().flex().flex_col().gap(px(22.));
-    if !prs.is_empty() {
+    if show("pr") && !prs.is_empty() {
         col = col.child(group("git-pull-request", "My pull requests", &prs, t));
     }
-    if !reviews.is_empty() {
+    if show("review") && !reviews.is_empty() {
         col = col.child(group("eye", "Awaiting your review", &reviews, t));
     }
-    if !issues.is_empty() {
+    if show("issue") && !issues.is_empty() {
         col = col.child(group("circle-dot", "Assigned issues", &issues, t));
     }
-    if !d.notifications.is_empty() {
+    // Notifications only appear in the unfiltered (All) view.
+    if filter.is_none() && !d.notifications.is_empty() {
         col = col.child(notifications(&d.notifications, t));
     }
     col

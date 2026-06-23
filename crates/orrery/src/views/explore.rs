@@ -50,6 +50,7 @@ pub fn render(
     state: &ExploreState,
     cloned: &HashSet<SharedString>,
     cloning: &HashSet<SharedString>,
+    filter: Option<&str>,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -60,17 +61,25 @@ pub fn render(
             super::note("No starred repos — star some on GitHub.", t).into_any_element()
         }
         ExploreState::Ready(rows) => {
-            let mut col = div().flex().flex_col().gap(px(10.));
-            for r in rows {
-                col = col.child(star_card(
-                    r,
-                    cloned.contains(&r.slug),
-                    cloning.contains(&r.slug),
-                    t,
-                    app,
-                ));
+            let shown: Vec<&StarRow> = rows
+                .iter()
+                .filter(|r| filter.is_none_or(|lang| r.language.as_ref() == lang))
+                .collect();
+            if shown.is_empty() {
+                super::note("Nothing in this filter.", t).into_any_element()
+            } else {
+                let mut col = div().flex().flex_col().gap(px(10.));
+                for r in shown {
+                    col = col.child(star_card(
+                        r,
+                        cloned.contains(&r.slug),
+                        cloning.contains(&r.slug),
+                        t,
+                        app,
+                    ));
+                }
+                col.into_any_element()
             }
-            col.into_any_element()
         }
     };
     super::frame(
