@@ -32,7 +32,7 @@ for arg in "$@"; do
     --skip-system) SYSTEM=0 ;;
     -y|--yes)      ASSUME_YES=1 ;;
     -h|--help)
-      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
