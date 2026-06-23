@@ -3,7 +3,7 @@
     Symbolic tray glyph: the orbit mark only, single colour, transparent
     background. Monochrome so it reads like the other symbolic panel icons.
     Rendered in two tints (light for dark panels, dark for light panels) and
-    swapped at runtime from the desktop colour-scheme — see src-tauri/src/tray.rs.
+    swapped at runtime from the desktop colour-scheme — see orrery-platform/src/tray.rs.
     This source is white; the build recolours it for the dark-panel variant.
   -->
   <g transform="translate(12,12) scale(4.3333)" stroke="#FFFFFF" stroke-width="2.4"

@@ -35,8 +35,8 @@ Beyond the [Mission Control](./mission-control) grid, Orrery has grown a full co
 
 | Layer | Choice |
 |---|---|
-| Shell | [Tauri 2](https://tauri.app) — Rust core ↔ webview |
-| Frontend | Vite + React + TypeScript + Tailwind + [shadcn/ui](https://ui.shadcn.com) |
+| UI | Native Rust on [GPUI](https://www.gpui.rs) (Zed's GPU framework) — no webview |
+| Rendering | GPU via `blade` (Vulkan); Wayland/X11 direct; [gpui-component](https://github.com/longbridge/gpui-component) widgets |
 | Git | `git2` (libgit2, vendored) |
 | Persistence | SQLite + TOML config (XDG dirs) |
 | Hosts | GitHub + GitLab REST/GraphQL (incl. self-hosted) |
@@ -44,6 +44,6 @@ Beyond the [Mission Control](./mission-control) grid, Orrery has grown a full co
 
 ## How it fits together
 
-Orrery is a Tauri 2 app: a Rust core does the heavy lifting (scanning, git, host APIs, caching, AI calls) and exposes it to a React webview over IPC. A SQLite cache persists the repo snapshot and host enrichment so the grid **paints instantly on launch** and keeps working offline. Configuration lives in a plain TOML file under `~/.config/orrery/`.
+Orrery is a native Rust app on GPUI — no webview, no IPC. A three-crate workspace: `orrery-core` does the heavy lifting (scanning, git, host APIs, caching, AI calls), `orrery-platform` handles Linux desktop integration (tray, notifications, appearance), and the `orrery` app crate is the GPUI UI calling the core directly. A SQLite cache persists the repo snapshot and host enrichment so the grid **paints instantly on launch** and keeps working offline. Configuration lives in a plain TOML file under `~/.config/orrery/`.
 
 Read on for [building from source](./getting-started), or jump into the [feature tour](./mission-control).

@@ -1,7 +1,5 @@
-//! Faithful GPUI port of `RepoCard` (grid view) from
-//! `src/components/RepoCard.tsx` + the `.orr-card*` rules in `src/index.css`.
-//! Layout, spacing, token colors and real lucide/devicon/host icons match, and
-//! the launchers + favorite toggle are live.
+//! The grid-view repo card: layout, spacing, token colors and real
+//! lucide/devicon/host icons, with live launchers + favorite toggle.
 //!
 //! Cards render inside `uniform_list` (a `'static` closure), so every stored
 //! handler/hover closure captures owned values — never a borrow of `&Theme`.

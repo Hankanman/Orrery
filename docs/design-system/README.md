@@ -4,9 +4,19 @@
 > the Linux desktop it runs on.
 
 This is the living spec for Orrery's UI. It describes what is actually
-implemented in [`src/index.css`](../../src/index.css),
-[`src/lib/appearance.ts`](../../src/lib/appearance.ts) and the React components —
-not an aspirational mock. When you change the design, change it here too.
+implemented in the native GPUI app — the design tokens in
+[`crates/orrery/src/theme.rs`](../../crates/orrery/src/theme.rs), the desktop
+integration in
+[`crates/orrery-platform/src/appearance.rs`](../../crates/orrery-platform/src/appearance.rs),
+and the GPUI views — not an aspirational mock. When you change the design, change
+it here too.
+
+> Orrery was originally a Tauri 2 + React/TypeScript app whose design system
+> lived in a CSS file (`src/index.css`) consumed by shadcn/React components. It's
+> now a **native Rust app on GPUI** — the tokens carry over as Rust values and
+> are applied to GPUI elements directly (there are no CSS classes). If you find
+> references to `.orr-*` CSS classes, `src/index.css`, or `src/lib/appearance.ts`
+> anywhere, they're stale.
 
 The brand mark lives at [`assets/orbit-mark.svg`](assets/orbit-mark.svg).
 
@@ -16,25 +26,21 @@ The brand mark lives at [`assets/orbit-mark.svg`](assets/orbit-mark.svg).
 
 Orrery looks like a piece of instrumentation: deep flat surfaces, hairline
 borders, tight radii, a single bright accent, and meaning-bearing colour for
-git/host/AI state. It is **adaptive, not dark-only** — the app mirrors the
-desktop it runs on.
+git/host/AI state.
 
 Four principles, in priority order:
 
-1. **Native first.** Light or dark, accent colour, and (on KDE) the actual window
-   surface colours come from the OS. The app should never look out of place next
-   to Dolphin or Discover.
-2. **Flat by design — performance is a feature.** No `backdrop-filter` blur, no
-   gradient washes, no glows. Surfaces are solid (or a flat translucent fill) and
-   separated by borders + a subtle elevation shadow. This isn't only an
-   aesthetic: the app ships in **WebKitGTK**, which composites blur/gradients on
-   the **CPU** (badly, especially on NVIDIA — see
-   [docs/rendering-performance.md](../rendering-performance.md)). A flat UI is
-   *much* smoother in the webview, and looks identical in a browser. **Do not
-   reintroduce glassmorphism.**
-3. **Structure is branded, colour adapts.** The layout, elevation, radii, motion
+1. **Native first.** The app borrows the desktop's **accent colour** (KDE/portal)
+   at runtime, so it harmonises with the rest of the session. It shouldn't look
+   out of place next to Dolphin or Discover.
+2. **Flat by design.** No blur, no gradient washes, no glows. Surfaces are solid
+   and separated by borders + a subtle elevation shadow. The native app
+   GPU-composites (blade/Vulkan), so this is no longer the hard CPU constraint it
+   was under WebKitGTK — but it stays the look, and keeping overdraw low keeps the
+   GPU path cheap. **Don't reintroduce glassmorphism.**
+3. **Structure is branded, accent adapts.** The layout, elevation, radii, motion
    and the *semantic* hues (git status, host star, AI) are Orrery's identity and
-   stay constant. The neutral palette and the primary accent follow the system.
+   stay constant. Only the primary accent follows the system.
 4. **Dense but legible.** 4–5 cards per row, a fixed-width type scale, mono for
    data. Information per pixel is high; nothing is cramped.
 
@@ -42,164 +48,135 @@ Four principles, in priority order:
 
 ## 2. Theming architecture (OS integration)
 
-This is the part that makes Orrery feel native. It is a three-layer cascade.
+The app ships a single **dark** "mission control" theme and overrides its accent
+with the desktop's at runtime.
 
 ```
-  CSS defaults                Rust reads the desktop              React applies
- (src/index.css)              (src-tauri/appearance.rs)        (lib/appearance.ts)
- ──────────────               ─────────────────────────        ───────────────────
- :root  → light               XDG portal:                      applyAppearance():
- .dark  → dark      ──▶         org.freedesktop.appearance ──▶   • toggle .dark
- (sensible brand               • color-scheme                    • root.style.colorScheme
-  defaults if the              • accent-color                    • set --primary etc.
-  OS exposes nothing)        kdeglobals (KDE/Qt):                  from accent (+ contrast fg)
-                               • AccentColor                      • set surfaces from
-                               • Colors:Window/View                 window/view colours
-                               SettingChanged → live re-emit     listens "appearance-changed"
+  Token defaults                Platform reads the desktop          App applies
+ (theme.rs Theme::dark)         (orrery-platform::appearance)       (live.rs / main.rs)
+ ────────────────────           ───────────────────────────        ──────────────────
+ the dark --orr-* palette       XDG portal + kdeglobals (zbus):     Theme::dark()
+ as u32 0xRRGGBB        ──▶        • accent-color / AccentColor ──▶   .with_system_accent(a)
+                                  SettingChanged → live re-emit      → recompute primary +
+                                                                       derived accent tokens;
+                                                                     rebuilt live on the
+                                                                     appearance signal
 ```
 
-### Layer 1 — CSS defaults
-`:root` defines a clean light palette; `.dark` defines the deep blue-black
-"mission control" palette. These render correctly with **zero** OS data (e.g. in
-the browser dev preview, or on a desktop that exposes no appearance settings).
+### Layer 1 — token defaults (`theme.rs`)
+`Theme::dark()` defines the deep blue-black palette as `u32` `0xRRGGBB` values,
+one per `--orr-*`/accent token the UI touches. The handful of CSS surfaces that
+were `color-mix`/translucent are **pre-blended to opaque sRGB** here (the
+flat-design contract means nothing layers translucency anyway). Call sites read
+them as `rgb(theme.fg0)` etc.
 
-### Layer 2 — Rust reads the desktop (`src-tauri/src/appearance.rs`)
-- **XDG Desktop Portal** `org.freedesktop.appearance` over D-Bus (`zbus`) gives
-  `color-scheme` (dark/light/no-preference) and `accent-color` (3 doubles 0–1).
-- **`~/.config/kdeglobals`** is parsed when present: `AccentColor`,
-  `Colors:Window/BackgroundNormal+ForegroundNormal`, `Colors:View/BackgroundNormal`.
-  This is what Qt apps actually paint, so borrowing it makes us match KDE exactly.
-  KDE's `AccentColor` is preferred over the portal's (often tinted) one.
-- A background task subscribes to `SettingChanged` and re-emits the
-  `appearance-changed` Tauri event, so theme/accent flips apply **live**.
-- Everything degrades gracefully: no bus, no portal, or no kdeglobals → we fall
-  back to the CSS defaults.
+### Layer 2 — platform reads the desktop (`orrery-platform/src/appearance.rs`)
+- The **XDG Desktop Portal** `org.freedesktop.appearance` over D-Bus (`zbus`)
+  provides `accent-color`; KDE's `~/.config/kdeglobals` `AccentColor` is preferred
+  when present (it's what Qt apps paint, so borrowing it matches KDE).
+- A background task subscribes to `SettingChanged` and re-emits, so accent flips
+  apply **live**. Everything degrades gracefully — no bus/portal → the built-in
+  orbit-cyan accent stays.
 
-### Layer 3 — React applies it (`src/lib/appearance.ts`, `useSystemAppearance` hook)
-`applyAppearance(appearance)` is idempotent and does three things:
+### Layer 3 — the app applies it (`main.rs` at startup, `live.rs` live)
+`Theme::with_system_accent(Some((r,g,b)))` overrides `primary` and recomputes the
+derived accent tokens (`accent_bright` = +22% white, `accent_wash` = 12% over
+page, `accent_badge` = 20%, `border_accent` = 40%). At startup `main.rs` reads the
+accent once; `live.rs` then rebuilds the `Theme` on every appearance signal so a
+system accent change repaints immediately.
 
-1. **Color scheme** — toggles `.dark` and sets `root.style.colorScheme` (so
-   native form controls and scrollbars follow too). Falls back to
-   `prefers-color-scheme` when the OS says "no preference".
-2. **Accent** — writes the system accent into `--primary`, `--ring`,
-   `--sidebar-primary`, `--sidebar-ring`. The accent foreground is chosen by WCAG
-   relative luminance (dark text on a light accent, light text on a dark accent),
-   so the accent is always legible.
-3. **Surfaces (hybrid, KDE)** — when window/view colours are available, anchors
-   `--background`/`--card`/`--sidebar`/etc. on the desktop's window colour and
-   derives the elevation ramp by mixing **toward the foreground** (a small mix
-   lightens in dark, darkens in light — correct in both). When unavailable, these
-   vars are cleared and the branded `.dark`/`:root` palette takes over.
+`theme::apply_gpui_component_theme(&theme, cx)` maps these tokens onto
+[gpui-component](https://github.com/longbridge/gpui-component)'s shadcn-style
+`Theme` (its `Hsla` fields) so its widgets (inputs, switch, markdown, popovers)
+match the rest of the UI.
 
-> **The seam to respect:** `--primary` (and the surface vars) are runtime-owned.
-> Never hard-code a brand cyan into a component — read `--primary` / `--orr-accent`
-> so the system accent flows through. The orbit-cyan `#38dbf0` in `.dark` is only
-> the *default* for when the OS exposes no accent.
+> **The seam to respect:** `primary` and the derived accent tokens are
+> runtime-owned. Never hard-code a brand cyan — read `theme.primary` /
+> `theme.accent_*` so the system accent flows through. The orbit-cyan `#38dbf0`
+> is only the *default* for when the OS exposes no accent.
+>
+> Not (yet) ported from the webview version: light mode, and borrowing KDE's
+> window/view *surface* colours. The native theme is dark-only with accent-only
+> adaptation.
 
 ---
 
 ## 3. Color
 
-Two token families coexist:
+The token set lives on the `Theme` struct. Values below are the dark defaults
+(`Theme::dark()`); `primary` + the four derived accent tokens are replaced by the
+system accent at runtime.
 
-- **shadcn/Tailwind tokens** (`--background`, `--primary`, `--ok` …) — the
-  adaptive neutrals + accent. Light in `:root`, dark in `.dark`, overridden at
-  runtime by the OS. Exposed to Tailwind via `@theme inline`.
-- **`--orr-*` tokens** — Orrery's own structure (glass, elevation, fixed semantic
-  hues). Namespaced so they never collide with shadcn.
+### 3.1 Surfaces & neutrals
 
-### 3.1 Surfaces & neutrals (adaptive)
-
-| Role | Light (`:root`) | Dark (`.dark`) default |
+| Token | Value | Role |
 |---|---|---|
-| `--background` | near-white slate | `#0a0e16` (the void) |
-| `--card` / `--popover` | white | `#121826` (raised) |
-| `--foreground` | near-black slate | `#eef2f8` |
-| `--primary` | steel blue (OS accent) | `#38dbf0` orbit cyan (OS accent) |
-| `--border` / `--input` | light slate | mid slate |
+| `page` | `#0a0e16` | the void (window background) |
+| `surface` | `#13161e` | card / panel background |
+| `surface_hover` | `#191c24` | hovered surface |
+| `button_bg` | `#1f222a` | button / input fill |
+| `border` | `#1c2028` | hairline border |
+| `border_strong` | `#2c3037` | emphasised border |
+| `border_accent` | `#1b4b56` | accent-tinted edge (accent @40% over page) |
 
-> These are the *defaults*. On a themed desktop they are replaced by the OS
-> accent and (on KDE) borrowed window/view colours.
+### 3.2 Foreground tiers (`fg0…3`)
+A four-step text ramp.
 
-### 3.2 Foreground tiers (`--orr-fg-0…3`)
-A four-step text ramp, used for primary text → captions → disabled.
-
-| Token | Dark | Use |
+| Token | Value | Use |
 |---|---|---|
-| `--orr-fg-0` | `#eef2f8` | primary text, repo names |
-| `--orr-fg-1` | `#afb9cb` | secondary text, descriptions |
-| `--orr-fg-2` | `#6c778c` | captions, metadata |
-| `--orr-fg-3` | `#434e63` | disabled, faint icons |
+| `fg0` | `#eef2f8` | primary text, repo names |
+| `fg1` | `#afb9cb` | secondary text, descriptions |
+| `fg2` | `#6c778c` | captions, metadata |
+| `fg3` | `#434e63` | disabled, faint icons |
 
-### 3.3 Surfaces & elevation (`--orr-*`)
-Flat panels separated by hairline borders and a subtle elevation shadow — **no
-blur**. The `--orr-glass*` fills are now just flat (slightly translucent) tints
-over a solid background, not backdrop-blurred glass.
+### 3.3 Identity & accent (runtime-overridden)
 
-- `--orr-glass` / `--orr-glass-hover` / `--orr-glass-2` — panel fills (dark: low
-  white alphas `0.035 / 0.06 / 0.085`).
-- `--orr-border` / `--orr-border-strong` — hairlines (white alphas `0.075 / 0.14`).
-- `--orr-shadow-2/3/-pop` — elevation ramp (card → drawer → popover). This is the
-  *only* form of depth we use.
-- `--orr-inset-top` — 1px top highlight that gives panels a "lit edge".
-- `--orr-scrim` — modal/drawer backdrop (a flat dark wash, no blur).
-
-> Header and sidebar use **solid** `--background`. `--orr-blur` and the `*-glow`
-> tokens still exist but are **unused** — kept only so the values are documented;
-> don't wire them back into `backdrop-filter`, gradients, or shadows.
+| Token | Default | Notes |
+|---|---|---|
+| `primary` | `#38dbf0` orbit cyan | replaced by the system accent |
+| `accent_bright` | `#64e3f3` | accent + 22% white |
+| `accent_wash` | `#102730` | accent 12% over page — active nav bg |
+| `accent_badge` | `#133742` | accent 20% over page — nav count badge |
 
 ### 3.4 Semantic hues — **fixed, meaning-bearing**
-These do **not** follow the OS; their meaning is the point. Values are tuned per
-mode (richer in light, neon in dark).
+These do **not** follow the OS; their meaning is the point.
 
-| Token | Meaning | Dark | Light |
-|---|---|---|---|
-| `--orr-clean` / `--ok` | clean / synced | `#3dd68c` | `#22a96b` |
-| `--orr-dirty` / `--warn` | uncommitted / ahead | `#ff9e45` | `#e08a2b` |
-| `--orr-behind` / `--danger` | behind / conflict | `#ff6b6b` | `#e05656` |
-| `--orr-star` | host stars / favourites | `#ffc24b` | `#f5a623` |
-| `--orr-ai` | AI features | `#a78bfa` | `#8b5cf6` |
+| Token | Meaning | Value |
+|---|---|---|
+| `clean` | clean / synced | `#3dd68c` |
+| `dirty` | uncommitted / ahead | `#ff9e45` |
+| `behind` | behind / conflict | `#ff6b6b` |
+| `star` | host stars / favourites | `#ffc24b` |
+| `ai` | AI features | `#a78bfa` |
 
-The matching `*-glow` tokens are retained but no longer painted as halos (flat
-design). Use the solid hue for icons/text; the only remaining use of a `*-glow`
-value is a flat low-alpha hover *tint* on a couple of buttons.
+### 3.5 Launch-action colours (`act_*`)
+Each repo card action has its own identity colour (icon + hover tint).
 
-### 3.5 Launch-action colours (`--orr-act-*`)
-Each repo action has its own identity colour (icon + hover tint), on a shared
-flat/muted button base (`.orr-cbtn`). The colour is set per-variant via an
-`--act` custom property.
+| Token | Action | Value |
+|---|---|---|
+| `act_ide` | Open in IDE | `#5b9dff` |
+| `act_agent` | Terminal agent | `#a78bfa` |
+| `act_folder` | Reveal folder | `#f5b94b` |
+| `act_host` | Open on GitHub/GitLab | `#46c8a0` |
 
-| Token | Action | Dark | Light |
-|---|---|---|---|
-| `--orr-act-ide` | Open in IDE | `#5b9dff` | `#2f6fdb` |
-| `--orr-act-agent` | Terminal agent | `#a78bfa` | `#7c4ddb` |
-| `--orr-act-folder` | Reveal folder | `#f5b94b` | `#c9871d` |
-| `--orr-act-host` | Open on GitHub/GitLab | `#46c8a0` | `#1f9e76` |
-
-### 3.6 Language dots (`--lang-*`)
-GitHub-linguist colours for ~17 common languages, plus `--lang-default`. Resolved
-in [`src/lib/format.ts`](../../src/lib/format.ts) via `languageColor()`.
+### 3.6 Language colours
+Devicon brand SVGs (multicolour) render the language mark per card via
+`theme::devicon_stem(language)` + `assets/icons/devicon/`; `theme::lang_color`
+provides a fallback dot colour.
 
 ---
 
 ## 4. Type
 
-Typeface: **Geist Sans** (UI) and **Geist Mono** (data), bundled offline via
-`@fontsource/geist-sans` / `@fontsource/geist-mono` (imported in
-[`src/main.tsx`](../../src/main.tsx); weights 400/500/600 sans, 400/500 mono).
-`--font-sans` / `--font-mono` lead with Geist then fall back to `system-ui` so the
-app still reads natively if fonts fail to load.
+The native app uses the platform fonts GPUI resolves — the system **sans-serif**
+for UI/prose and **monospace** for data (`font_family("monospace")`). It does not
+bundle a typeface. (The old webview build shipped Geist via `@fontsource`; that
+didn't carry over — re-add an embedded face here if a consistent brand font
+matters.)
 
-Scale (CSS shorthand tokens, `weight size/line-height family`):
-
-| Token | Value | Use |
-|---|---|---|
-| `--text-h3` | `500 16px/1.35` sans | section headers |
-| `--text-body` | `400 14px/1.55` sans | body, descriptions |
-| `--text-small` | `400 13px/1.45` sans | secondary |
-| `--text-micro` | `500 11px/1.3` sans, `tracking 0.085em` | labels, tags (UPPERCASE) |
-| `--text-data` | `500 13px/1.3` mono | counts, hashes, paths |
-| `--text-data-sm` | `500 12px/1.3` mono | dense data |
+Sizes the UI uses (logical px, on the `Theme`): `text_h3` 16 (section headers),
+`text_small` 13 (body/secondary), `text_data_sm` 12 (dense mono data). Larger
+one-off sizes (e.g. the card repo name) are set inline.
 
 **Rule:** anything that is data (commit hashes, counts, branch names, paths, repo
 slugs) is **mono**. Prose is sans.
@@ -208,78 +185,47 @@ slugs) is **mono**. Prose is sans.
 
 ## 5. Shape & motion
 
-**Radii** — tight, hardware-console feel:
-`--r-xs 4` · `--r-sm 6` · `--r-md 10` · `--r-lg 14` · `--r-xl 20` (px).
-(shadcn's `--radius` ramp maps onto the same feel for shadcn components.)
+**Radii** (px, on the `Theme`): `r_xs` 4 · `r_sm` 6 · `r_md` 10 · `r_lg` 14 —
+tight, hardware-console feel. gpui-component widgets pick up `r_md` via the bridge.
 
-**Motion** — quick and "instrument"-like:
-- `--dur-fast 120ms`, `--dur-base 200ms`
-- `--ease-out cubic-bezier(.16,1,.3,1)` for entrances/hovers
-- `--ease-spring cubic-bezier(.34,1.56,.64,1)` for lifts/pops
-
-Cards lift slightly on hover (transform only) and brighten their border + fill —
-no glow. Backgrounds are flat: no radial washes, no starfield. Entrance
-animations (the launch "build", card stagger, drawer slide) use transform +
-opacity only, so there's no layout shift and nothing for the CPU compositor to
-choke on. All motion respects `prefers-reduced-motion` and the in-app
-**Settings → Motion → Reduce motion** toggle.
+**Motion** — quick and "instrument"-like, done with GPUI element animations
+(transform + opacity; no layout shift). Backgrounds stay flat: no radial washes,
+no starfield, no glow.
 
 ---
 
 ## 6. Components
 
-Implemented as `.orr-*` classes in the `@layer components` block of
-`src/index.css`. Catalog (class → what it is):
+There are **no CSS classes** — every surface is a GPUI element styled inline from
+the `Theme` tokens. The catalog by source file:
 
-**Layout**
-- `.orr-body` — persistent sidebar + main split (lives in `AppShell`)
-- `.orr-sidebar` — persistent rail: fixed primary nav (`.orr-sb-sec` of
-  `.orr-sb-item`) on top, a per-screen `.orr-sb-slot` below (filled via
-  `useSidebarSlot`, see `src/lib/sidebar-slot.tsx`), `.orr-sb-foot` at the bottom
-- `.orr-main`, `.orr-header`, `.orr-toolbar`, `.orr-brand`, `.orr-mark` — top chrome
-- `.orr-grid` — responsive repo grid
+- **Shell** (`shell.rs`) — the 52px header (brand, roots·repos, search, +/rescan),
+  the left nav rail, the main column + view switch.
+- **Repo card** (`card.rs`) — name/host/slug/description, git status row,
+  language mark, the four launch actions, favourite + AI accents.
+- **Repo drawer** (`drawer.rs`) — the right sheet: Overview / Changes / PR / Notes
+  / Readme tabs.
+- **Command palette** (`palette.rs`) — Ctrl+K overlay: actions + repos + code +
+  semantic results.
+- **Views** (`views/`) — inbox, feed, explore, cleanup, agents, devtools,
+  settings, newproject.
 
-**Repo card** (`src/components/RepoCard.tsx`)
-- `.orr-card` (+ `.orr-card-head/-host/-name/-slug/-desc/-status/-badge/-acts/-fav/-ai`)
-
-**Controls**
-- `.orr-cbtn` — primary action button (`.ide` = filled accent variant)
-- `.orr-iconbtn` — square icon button
-- `.orr-chip` / `.orr-chiprow` — filter chips
-- `.orr-seg` / `.orr-sortpill` — segmented toggle / sort pill
-- `.orr-search` — command/search field
-- `.orr-tag` — micro UPPERCASE label
-- `.orr-st` — status dot/pill
-
-**Surfaces & views**
-- `.orr-inbox` (+ `-head/-list/-row`) — Inbox/Feed
-- `.orr-settings` (+ `-head/-body`), `.orr-roots`
-- `.orr-star-grid` / `.orr-star-card` — starred browser
-- `.orr-briefing` — AI daily briefing banner
-- `.orr-md` — rendered markdown (READMEs, AI output)
-- `.orr-empty`, `.orr-skel` / `.orr-skel-line` — empty & loading states
-- `.orr-spinner` — brand loading spinner (flat orbit mark)
-- `.orr-progress` / `.orr-activity` — scan/activity indicator (header)
-- `.orr-card-ai`, `.orr-mark` — AI/brand accents
-
-shadcn/ui primitives (new-york) are used for dialogs, drawers, command palette
-(`cmdk`), inputs, etc.; they inherit the adaptive tokens automatically.
+Widgets come from **gpui-component**: text inputs (`Input`/`InputState`), the
+notifications/Settings `Switch`, the scan-depth `NumberInput`, markdown rendering
+(`text::markdown`), and popover/modal layers (via `Root`). They inherit the
+adaptive tokens through `apply_gpui_component_theme`.
 
 ---
 
 ## 7. Rules of thumb
 
-- **Read tokens, don't hard-code colour.** Use `--primary` / `--orr-accent` for the
-  accent so the OS accent flows through. Use the semantic hues for state.
-- **Both themes, always.** Every new surface must look right in light *and* dark —
-  test by toggling the OS theme (the app follows live).
+- **Read tokens, don't hard-code colour.** Use `theme.primary` / `theme.accent_*`
+  for the accent so the OS accent flows through; use the semantic hues for state.
+- **Flat, always.** No blur, no gradient backgrounds, no glow shadows. Define
+  surfaces with borders + a subtle elevation shadow — see Philosophy #2.
 - **Mono for data, sans for prose.**
-- **Flat, always.** No `backdrop-filter`, no `radial`/`linear-gradient`
-  backgrounds, no glow `box-shadow`/`drop-shadow`. Define surfaces with borders +
-  a subtle elevation shadow. This is both the look and a hard performance
-  constraint (CPU-bound WebKitGTK) — see Philosophy #2.
 - **Density over decoration.** Prefer a tighter radius and a hairline border to a
-  heavy fill. Lift with a transform on hover, not with bright backgrounds.
+  heavy fill; lift with a transform on hover, not bright backgrounds.
 - **Semantics are sacred.** Green = clean, amber = dirty/ahead, red = behind,
   gold = stars, violet = AI. Don't repurpose them.
 
@@ -289,8 +235,9 @@ shadcn/ui primitives (new-york) are used for dialogs, drawers, command palette
 
 | Concern | File |
 |---|---|
-| All tokens + `.orr-*` components | `src/index.css` |
-| OS theme/accent/surface application | `src/lib/appearance.ts` + `src/hooks/useSystemAppearance.ts` |
-| Desktop reads (portal + kdeglobals) | `src-tauri/src/appearance.rs` |
-| Language colour resolution | `src/lib/format.ts` |
+| All design tokens (`Theme`) | `crates/orrery/src/theme.rs` |
+| gpui-component theme bridge | `crates/orrery/src/theme.rs` (`apply_gpui_component_theme`) |
+| OS accent read (portal + kdeglobals) | `crates/orrery-platform/src/appearance.rs` |
+| Live re-theming on accent change | `crates/orrery/src/live.rs` |
+| Icons (lucide + brand + devicon) | `crates/orrery/assets/icons/`, `src/icon.rs` |
 | Brand mark | `docs/design-system/assets/orbit-mark.svg` |

@@ -1,4 +1,4 @@
-//! RepoDrawer — the right-anchored detail panel (port of `RepoDrawer.tsx`). Opens
+//! RepoDrawer — the right-anchored detail panel. Opens
 //! over the shell when a card is clicked; a scrim backdrop or the close button
 //! dismisses it. Tabs: Overview / Changes / PR / Notes / Readme.
 //!

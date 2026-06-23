@@ -1,10 +1,9 @@
-//! Orrery's `--orr-*` design tokens (dark theme) ported to GPUI. Values come
-//! straight from `src/index.css`: hex tokens verbatim, and the handful of
-//! oklch/`color-mix` surfaces pre-blended to opaque sRGB (the flat-design
-//! contract means we don't layer translucency anyway).
+//! Orrery's `--orr-*` design tokens (dark theme). The handful of surfaces that
+//! were `color-mix`/translucent are pre-blended to opaque sRGB here — the
+//! flat-design contract means we don't layer translucency anyway.
 //!
 //! Colors are `u32` 0xRRGGBB so call sites use `rgb(theme.fg0)`. Sizes are
-//! logical px matching the CSS.
+//! logical px. See `docs/design-system/` for the full spec.
 
 #![allow(dead_code)]
 

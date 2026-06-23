@@ -21,8 +21,8 @@ Not on Arch? Build it in a container (this is how it's validated in CI):
 
 ```sh
 podman run --rm -v "$PWD:/pkg:ro" archlinux:latest bash -c '
-  pacman -Syu --noconfirm --needed base-devel git webkit2gtk-4.1 gtk3 \
-    libayatana-appindicator hicolor-icon-theme rust pnpm nodejs cmake pkgconf
+  pacman -Syu --noconfirm --needed base-devel git rust cmake pkgconf \
+    vulkan-headers vulkan-icd-loader fontconfig libxkbcommon hicolor-icon-theme
   useradd -m b && cp /pkg/PKGBUILD /home/b/ && chown -R b /home/b
   su b -c "cd ~ && makepkg -f --noconfirm --skipinteg --nodeps"
 '
