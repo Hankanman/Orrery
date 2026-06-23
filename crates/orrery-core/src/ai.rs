@@ -82,9 +82,17 @@ fn base() -> String {
 
 /// Shared HTTP client so the many Ollama calls (status, per-repo summaries and
 /// embeddings) reuse one connection pool. reqwest::Client is Arc-backed.
+///
+/// Only a `connect_timeout` is set — a dead/unreachable host fails fast — but no
+/// overall request timeout, because generation and model pulls legitimately
+/// stream for minutes and must not be cut off.
 fn client() -> reqwest::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::Client> =
-        std::sync::LazyLock::new(reqwest::Client::new);
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(8))
+            .build()
+            .unwrap_or_default()
+    });
     CLIENT.clone()
 }
 

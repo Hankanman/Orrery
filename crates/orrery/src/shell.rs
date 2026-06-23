@@ -1006,12 +1006,42 @@ impl OrreryApp {
         .detach();
     }
 
-    /// Re-scan the roots from disk (off the UI thread) and reload the grid.
+    /// Re-scan the roots from disk (off the UI thread) and reload the grid, then
+    /// refresh host enrichment.
     fn rescan(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let (rows, roots) = cx
                 .background_executor()
                 .spawn(async { crate::data::rescan() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.rows = rows;
+                this.roots = roots;
+                this.enrich_hosts(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Refresh host enrichment (stars/topics/issues/release/visibility) from
+    /// GitHub/GitLab on the tokio runtime, then reload the grid from the freshly
+    /// written cache. A no-op when every repo's cache is still within the TTL
+    /// (so repeated rescans cost nothing) or when offline. Network failures are
+    /// silent by design — stale enrichment simply persists.
+    pub fn enrich_hosts(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let now = crate::data::now_unix();
+            let updated =
+                crate::task::run(async move { orrery_core::enrich::refresh_cached(now).await })
+                    .await;
+            if updated == 0 {
+                return;
+            }
+            // Rebuild rows from the enriched cache, off the UI thread.
+            let (rows, roots) = cx
+                .background_executor()
+                .spawn(async { crate::data::load(crate::data::now_unix()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.rows = rows;

@@ -26,6 +26,7 @@ A three-crate Cargo workspace under `crates/`:
 crates/orrery-core/src/     Logic (no UI). Reused unchanged from the Tauri era.
   scan.rs git_ops.rs        Repo discovery + libgit2 status/branches/worktrees
   forge.rs inbox.rs         GitHub/GitLab REST/GraphQL (reqwest)
+  enrich.rs                 host-enrichment pass (forge → host cache), token-egress gated
   ai.rs llama.rs            Ollama / llama.cpp (summaries, commit msgs, embeddings)
   cache.rs                  SQLite (rusqlite, bundled) — snapshot, enrichment, favorites
   config.rs model.rs        TOML config + shared serde types

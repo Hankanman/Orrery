@@ -5,11 +5,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use git2::{Branch, Repository, StatusOptions};
+use git2::Repository;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use walkdir::WalkDir;
 
-use crate::model::{Activity, GitStatus, Host, Repo};
+use crate::model::{Activity, Host, Repo};
 
 const SEVEN_DAYS: i64 = 7 * 24 * 3600;
 const THIRTY_DAYS: i64 = 30 * 24 * 3600;
@@ -122,7 +122,7 @@ fn find_repos(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
 fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo> {
     let repo = Repository::open(path).ok()?;
 
-    let git = git_status(&repo);
+    let git = crate::git_ops::status_of(&repo);
     let last_commit_unix = repo
         .head()
         .ok()
@@ -185,46 +185,6 @@ fn classify_activity(last_commit_unix: i64, now: i64) -> Activity {
         d if d < THIRTY_DAYS => Activity::Idle,
         _ => Activity::Stale,
     }
-}
-
-fn git_status(repo: &Repository) -> GitStatus {
-    let branch = repo
-        .head()
-        .ok()
-        .and_then(|h| h.shorthand().map(String::from))
-        .unwrap_or_else(|| "HEAD".to_string());
-
-    let (ahead, behind) = ahead_behind(repo).unwrap_or((0, 0));
-
-    let mut opts = StatusOptions::new();
-    // Count an untracked directory as one entry (like `git status -s`) rather
-    // than recursing into it — otherwise a large untracked dir inflates "dirty".
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(false)
-        .include_ignored(false);
-    let dirty = repo
-        .statuses(Some(&mut opts))
-        .map(|s| s.iter().filter(|e| !e.status().is_ignored()).count() as u32)
-        .unwrap_or(0);
-
-    GitStatus {
-        branch,
-        ahead,
-        behind,
-        dirty,
-    }
-}
-
-fn ahead_behind(repo: &Repository) -> Option<(u32, u32)> {
-    let head = repo.head().ok()?;
-    if !head.is_branch() {
-        return None;
-    }
-    let local = head.target()?;
-    let upstream = Branch::wrap(head).upstream().ok()?;
-    let upstream_oid = upstream.get().target()?;
-    let (a, b) = repo.graph_ahead_behind(local, upstream_oid).ok()?;
-    Some((a as u32, b as u32))
 }
 
 /// Parse an origin remote URL into (host, "owner/repo", domain).

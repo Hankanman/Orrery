@@ -138,8 +138,12 @@ fn main() {
                         });
                     }
                     // Probe AI reachability and build the semantic index in the
-                    // background, so Ctrl+K can search by meaning.
-                    view.update(cx, |this, cx| this.ai_startup(cx));
+                    // background, so Ctrl+K can search by meaning. Also kick off a
+                    // host-enrichment pass so cards fill in stars/visibility.
+                    view.update(cx, |this, cx| {
+                        this.ai_startup(cx);
+                        this.enrich_hosts(cx);
+                    });
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();
                     window.focus(&focus, cx);
