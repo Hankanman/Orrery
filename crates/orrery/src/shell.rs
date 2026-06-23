@@ -825,6 +825,14 @@ impl OrreryApp {
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
             .collect();
+        draft.scan_depth = s
+            .scan_depth
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(draft.scan_depth)
+            .clamp(1, 8);
 
         let _ = orrery_core::config::save(&draft);
         self.config = draft.clone();
