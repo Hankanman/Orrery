@@ -120,7 +120,7 @@ pub fn render(activity: &Activity, t: &Theme, app: &Entity<OrreryApp>) -> impl I
             .child(lucide("x", 15., t.fg3))
             .on_click(move |_ev, _win, cx| {
                 app.update(cx, |this, cx| {
-                    this.activity_open = false;
+                    this.grid.activity_open = false;
                     cx.notify();
                 });
             })

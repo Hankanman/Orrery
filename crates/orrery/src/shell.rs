@@ -245,29 +245,52 @@ pub struct OrreryApp {
     pub ai_ready: bool,
     /// Whether the system tray came up — gates close-to-tray.
     pub tray_active: bool,
-    /// Contribution-graph data (commits/day across repos), computed in the
-    /// background; `None` until the first pass lands.
-    pub activity: Option<orrery_core::activity::Activity>,
-    /// Whether the Mission Control activity graph is shown (dismissible).
-    pub activity_open: bool,
-    /// Active Mission Control quick filter (All = no filtering).
+    /// Mission Control's UI state (filters, sort, layout, saved views, graph).
+    pub grid: GridState,
+    /// The active contextual sub-filter for the current non-Grid view (e.g. the
+    /// Feed/Inbox category panels). Ephemeral: reset when the view changes so
+    /// filters don't bleed across views.
+    pub view_filter: Option<SharedString>,
+    /// App-root focus handle, so global key bindings (Esc) dispatch here.
+    pub focus: FocusHandle,
+}
+
+/// Mission Control's UI state, grouped out of [`OrreryApp`]: the quick filter,
+/// root/language facets, sort + layout, persisted saved views, and the
+/// contribution graph.
+pub struct GridState {
+    /// Active quick filter (All = no filtering).
     pub filter: RepoFilter,
     /// Active scanned-root filter (sidebar ROOTS); `None` = all roots.
     pub root: Option<SharedString>,
     /// Active language filter (sidebar LANGUAGES); `None` = all languages.
     pub language: Option<SharedString>,
+    /// Card ordering.
+    pub sort: SortMode,
+    /// Card layout (grid vs. compact list).
+    pub layout: Layout,
     /// Persisted quick views (sidebar VIEWS), loaded from the cache at launch.
     pub saved_views: Vec<SavedView>,
-    /// The active contextual sub-filter for the current non-Grid view (e.g. the
-    /// Feed/Inbox category panels). Ephemeral: reset when the view changes so
-    /// filters don't bleed across views.
-    pub view_filter: Option<SharedString>,
-    /// Mission Control card ordering.
-    pub sort: SortMode,
-    /// Mission Control card layout (grid vs. compact list).
-    pub layout: Layout,
-    /// App-root focus handle, so global key bindings (Esc) dispatch here.
-    pub focus: FocusHandle,
+    /// Contribution-graph data (commits/day across repos), computed in the
+    /// background; `None` until the first pass lands.
+    pub activity: Option<orrery_core::activity::Activity>,
+    /// Whether the contribution graph is shown (dismissible).
+    pub activity_open: bool,
+}
+
+impl Default for GridState {
+    fn default() -> Self {
+        GridState {
+            filter: RepoFilter::default(),
+            root: None,
+            language: None,
+            sort: SortMode::default(),
+            layout: Layout::default(),
+            saved_views: load_saved_views(),
+            activity: None,
+            activity_open: true,
+        }
+    }
 }
 
 impl OrreryApp {
@@ -1194,7 +1217,7 @@ impl OrreryApp {
                 .spawn(async move { orrery_core::activity::compute(&paths) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.activity = Some(activity);
+                this.grid.activity = Some(activity);
                 cx.notify();
             });
         })
@@ -1203,25 +1226,25 @@ impl OrreryApp {
 
     /// Set the active Mission Control quick filter.
     pub fn set_filter(&mut self, f: RepoFilter, cx: &mut Context<Self>) {
-        self.filter = f;
+        self.grid.filter = f;
         cx.notify();
     }
 
     /// Cycle the Mission Control sort order.
     pub fn cycle_sort(&mut self, cx: &mut Context<Self>) {
-        self.sort = self.sort.next();
+        self.grid.sort = self.grid.sort.next();
         cx.notify();
     }
 
     /// Switch the Mission Control card layout (grid ↔ list).
     pub fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
-        self.layout = layout;
+        self.grid.layout = layout;
         cx.notify();
     }
 
     /// Toggle the "Attention" filter (repos that are dirty / ahead / behind).
     pub fn toggle_attention(&mut self, cx: &mut Context<Self>) {
-        self.filter = if self.filter == RepoFilter::Attention {
+        self.grid.filter = if self.grid.filter == RepoFilter::Attention {
             RepoFilter::All
         } else {
             RepoFilter::Attention
@@ -1239,7 +1262,7 @@ impl OrreryApp {
 
     /// Show/hide the contribution graph.
     pub fn toggle_activity(&mut self, cx: &mut Context<Self>) {
-        self.activity_open = !self.activity_open;
+        self.grid.activity_open = !self.grid.activity_open;
         cx.notify();
     }
 
@@ -1280,14 +1303,14 @@ impl OrreryApp {
 
     /// Select the scanned root to filter by (sidebar ROOTS); `None` = all.
     pub fn set_root(&mut self, root: Option<SharedString>, cx: &mut Context<Self>) {
-        self.root = root;
+        self.grid.root = root;
         cx.notify();
     }
 
     /// Toggle the language filter (sidebar LANGUAGES) — clicking the active one
     /// clears it.
     pub fn toggle_language(&mut self, lang: SharedString, cx: &mut Context<Self>) {
-        self.language = if self.language.as_ref() == Some(&lang) {
+        self.grid.language = if self.grid.language.as_ref() == Some(&lang) {
             None
         } else {
             Some(lang)
@@ -1297,13 +1320,13 @@ impl OrreryApp {
 
     /// The current filter combo as a `SavedView` (with a generated name).
     fn current_view(&self) -> SavedView {
-        let root = self.root.as_ref().map(|r| r.to_string());
-        let language = self.language.as_ref().map(|l| l.to_string());
+        let root = self.grid.root.as_ref().map(|r| r.to_string());
+        let language = self.grid.language.as_ref().map(|l| l.to_string());
         // Name from the active facets, e.g. "Dirty · Rust · Orrery"; "All repos"
         // when nothing is narrowed.
         let mut parts: Vec<String> = Vec::new();
-        if self.filter != RepoFilter::All {
-            parts.push(self.filter.label().to_string());
+        if self.grid.filter != RepoFilter::All {
+            parts.push(self.grid.filter.label().to_string());
         }
         if let Some(l) = &language {
             parts.push(l.clone());
@@ -1318,48 +1341,48 @@ impl OrreryApp {
         };
         SavedView {
             name,
-            filter: self.filter,
+            filter: self.grid.filter,
             root,
             language,
-            sort: self.sort,
+            sort: self.grid.sort,
         }
     }
 
     /// Whether `v` matches the live filter combo (drives the active highlight).
     fn view_is_active(&self, v: &SavedView) -> bool {
-        v.filter == self.filter
-            && v.sort == self.sort
-            && v.root.as_deref() == self.root.as_deref()
-            && v.language.as_deref() == self.language.as_deref()
+        v.filter == self.grid.filter
+            && v.sort == self.grid.sort
+            && v.root.as_deref() == self.grid.root.as_deref()
+            && v.language.as_deref() == self.grid.language.as_deref()
     }
 
     /// Save the current filter combo as a quick view (deduped by combo), persist,
     /// and refresh.
     pub fn save_current_view(&mut self, cx: &mut Context<Self>) {
         let view = self.current_view();
-        if !self.saved_views.iter().any(|v| self.view_is_active(v)) {
-            self.saved_views.push(view);
-            persist_saved_views(&self.saved_views);
+        if !self.grid.saved_views.iter().any(|v| self.view_is_active(v)) {
+            self.grid.saved_views.push(view);
+            persist_saved_views(&self.grid.saved_views);
             cx.notify();
         }
     }
 
     /// Apply a saved quick view's filter combo.
     pub fn apply_view(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if let Some(v) = self.saved_views.get(idx) {
-            self.filter = v.filter;
-            self.sort = v.sort;
-            self.root = v.root.clone().map(SharedString::from);
-            self.language = v.language.clone().map(SharedString::from);
+        if let Some(v) = self.grid.saved_views.get(idx) {
+            self.grid.filter = v.filter;
+            self.grid.sort = v.sort;
+            self.grid.root = v.root.clone().map(SharedString::from);
+            self.grid.language = v.language.clone().map(SharedString::from);
             cx.notify();
         }
     }
 
     /// Delete a saved quick view.
     pub fn delete_view(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx < self.saved_views.len() {
-            self.saved_views.remove(idx);
-            persist_saved_views(&self.saved_views);
+        if idx < self.grid.saved_views.len() {
+            self.grid.saved_views.remove(idx);
+            persist_saved_views(&self.grid.saved_views);
             cx.notify();
         }
     }
@@ -1397,16 +1420,17 @@ impl OrreryApp {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| self.filter.matches(r))
-            .filter(|(_, r)| self.root.as_ref().is_none_or(|root| &r.root == root))
+            .filter(|(_, r)| self.grid.filter.matches(r))
+            .filter(|(_, r)| self.grid.root.as_ref().is_none_or(|root| &r.root == root))
             .filter(|(_, r)| {
-                self.language
+                self.grid
+                    .language
                     .as_ref()
                     .is_none_or(|lang| &r.language == lang)
             })
             .map(|(i, _)| i)
             .collect();
-        match self.sort {
+        match self.grid.sort {
             SortMode::Activity => v.sort_by(|&a, &b| {
                 self.rows[b]
                     .last_commit_unix
@@ -1968,7 +1992,7 @@ impl OrreryApp {
                 t,
                 cx.listener(|this, _e, _w, cx| this.save_current_view(cx)),
             ));
-        if self.saved_views.is_empty() {
+        if self.grid.saved_views.is_empty() {
             views_sec = views_sec.child(
                 div()
                     .px(px(9.))
@@ -1979,7 +2003,7 @@ impl OrreryApp {
             );
         } else {
             let hov = t.surface_hover;
-            for (i, v) in self.saved_views.iter().enumerate() {
+            for (i, v) in self.grid.saved_views.iter().enumerate() {
                 let active = self.view_is_active(v);
                 let fg = if active { t.accent_bright } else { t.fg1 };
                 let mut row = div()
@@ -2039,12 +2063,12 @@ impl OrreryApp {
             lucide("folder", 14., t.fg2).into_any_element(),
             "All repos".into(),
             Some(self.rows.len()),
-            self.root.is_none(),
+            self.grid.root.is_none(),
             t,
             cx.listener(|this, _e, _w, cx| this.set_root(None, cx)),
         ));
         for (root, n) in roots {
-            let active = self.root.as_ref() == Some(&root);
+            let active = self.grid.root.as_ref() == Some(&root);
             let pick = root.clone();
             roots_sec = roots_sec.child(sidebar_filter_item(
                 SharedString::from(format!("root-{root}")),
@@ -2064,7 +2088,7 @@ impl OrreryApp {
             .gap(px(2.))
             .child(section_header("LANGUAGES", t));
         for (lang, n) in langs {
-            let active = self.language.as_ref() == Some(&lang);
+            let active = self.grid.language.as_ref() == Some(&lang);
             let pick = lang.clone();
             langs_sec = langs_sec.child(sidebar_filter_item(
                 SharedString::from(format!("lang-{lang}")),
@@ -2156,7 +2180,7 @@ impl OrreryApp {
 
     fn grid(&self, t: &Theme, cx: &mut Context<Self>, cols: usize) -> impl IntoElement {
         // The contribution graph sits pinned above the toolbar + scrolling cards.
-        let band = match (self.activity_open, &self.activity) {
+        let band = match (self.grid.activity_open, &self.grid.activity) {
             (true, Some(activity)) => {
                 Some(crate::heatmap::render(activity, t, &cx.entity()).into_any_element())
             }
@@ -2176,10 +2200,10 @@ impl OrreryApp {
 
     /// The "All repos · N repos" heading + right-aligned action buttons.
     fn toolbar(&self, t: &Theme, cx: &mut Context<Self>, count: usize) -> impl IntoElement {
-        let title = if self.filter == RepoFilter::All {
+        let title = if self.grid.filter == RepoFilter::All {
             "All repos".to_string()
         } else {
-            format!("{} repos", self.filter.label())
+            format!("{} repos", self.grid.filter.label())
         };
         let attention_label = format!("Attention {}", self.attention_count());
         div()
@@ -2209,7 +2233,7 @@ impl OrreryApp {
                 "tb-activity",
                 "activity",
                 None,
-                self.activity_open,
+                self.grid.activity_open,
                 t,
                 cx.listener(|this, _ev, _w, cx| this.toggle_activity(cx)),
             ))
@@ -2218,7 +2242,7 @@ impl OrreryApp {
                 "tb-attention",
                 "circle-alert",
                 Some(attention_label.as_str()),
-                self.filter == RepoFilter::Attention,
+                self.grid.filter == RepoFilter::Attention,
                 t,
                 cx.listener(|this, _ev, _w, cx| this.toggle_attention(cx)),
             ))
@@ -2247,7 +2271,7 @@ impl OrreryApp {
             .child(tool_btn(
                 "tb-sort",
                 "arrow-up-down",
-                Some(self.sort.label()),
+                Some(self.grid.sort.label()),
                 false,
                 t,
                 cx.listener(|this, _ev, _w, cx| this.cycle_sort(cx)),
@@ -2257,7 +2281,7 @@ impl OrreryApp {
                 "tb-grid",
                 "layout-grid",
                 None,
-                self.layout == Layout::Grid,
+                self.grid.layout == Layout::Grid,
                 t,
                 cx.listener(|this, _ev, _w, cx| this.set_layout(Layout::Grid, cx)),
             ))
@@ -2265,7 +2289,7 @@ impl OrreryApp {
                 "tb-list",
                 "list",
                 None,
-                self.layout == Layout::List,
+                self.grid.layout == Layout::List,
                 t,
                 cx.listener(|this, _ev, _w, cx| this.set_layout(Layout::List, cx)),
             ))
@@ -2283,7 +2307,7 @@ impl OrreryApp {
             .py(px(12.));
         let hov = t.border_strong;
         for f in RepoFilter::ORDER {
-            let active = self.filter == f;
+            let active = self.grid.filter == f;
             let (bg, border, fg) = if active {
                 (t.accent_wash, t.border_accent, t.accent_bright)
             } else {
@@ -2326,7 +2350,7 @@ impl OrreryApp {
         let ide = self.config.ide_command.clone();
         let agent = self.config.agent_command.clone();
 
-        let list = match self.layout {
+        let list = match self.grid.layout {
             // Compact single-column list: one repo per row.
             Layout::List => {
                 gpui::uniform_list("repo-list", visible.len(), move |range, _win, cx| {
