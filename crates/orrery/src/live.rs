@@ -1,11 +1,13 @@
 //! Live wiring — marshal background desktop signals onto the GPUI foreground so
-//! the running app reacts without a manual refresh. Three sources, each owning
+//! the running app reacts without a manual refresh. Several sources, each owning
 //! its own thread + runtime in `orrery-platform`:
 //!
 //! - **filesystem watch** → rescan the roots and reload the grid;
 //! - **appearance change** → recompute the theme with the new system accent;
 //! - **attention poll** → update the Inbox nav badge (notifications fire inside
-//!   the platform poller).
+//!   the platform poller);
+//! - **global shortcut** (Ctrl+Alt+O) → raise the window;
+//! - **system tray** → show / rescan / quit / open-a-repo.
 //!
 //! GPUI is single-threaded: entity mutation needs `&mut App`, which only exists
 //! on the foreground. So each background callback just pushes a [`Signal`] onto

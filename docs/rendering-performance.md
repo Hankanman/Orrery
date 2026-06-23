@@ -1,9 +1,14 @@
 # Rendering performance: WebKitGTK on NVIDIA
 
-A record of why the desktop app can feel less smooth than the same UI in a
+> **Historical.** This documents the *original Tauri + WebKitGTK* build and the
+> investigation that motivated the rewrite. Orrery is now a **native GPUI app**
+> (GPU/Vulkan rendering, no webview), so none of these env vars / CSS overrides
+> apply anymore — the CPU-bound repaint tax described here is exactly what going
+> native removed. Kept as the record of *why* the rewrite happened.
+
+A record of why the old webview build felt less smooth than the same UI in a
 Chromium browser, everything we tried to close the gap, what actually shipped,
-and what that depends on. Read this before touching the rendering env vars,
-`configure_linux_env`, or the `.tauri` CSS overrides.
+and what that depended on.
 
 ## TL;DR
 
