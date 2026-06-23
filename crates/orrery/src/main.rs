@@ -134,6 +134,7 @@ fn main() {
                             saved_views: shell::load_saved_views(),
                             view_filter: None,
                             sort: Default::default(),
+                            layout: Default::default(),
                             focus: cx.focus_handle(),
                         }
                     });

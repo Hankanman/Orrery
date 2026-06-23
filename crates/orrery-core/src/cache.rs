@@ -262,6 +262,45 @@ pub fn store_host_info(slug: &str, info: &HostInfo, now: i64) {
     }
 }
 
+fn apply_summaries_on(conn: &Connection, repos: &mut [Repo]) {
+    let Ok(mut stmt) = conn.prepare("SELECT id, summary, last_commit FROM ai_cache") else {
+        return;
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    });
+    let Ok(rows) = rows else {
+        return;
+    };
+    let map: HashMap<String, (String, i64)> = rows
+        .flatten()
+        .map(|(id, summary, last)| (id, (summary, last)))
+        .collect();
+    if map.is_empty() {
+        return;
+    }
+    for r in repos.iter_mut() {
+        // Only apply a summary that matches the repo's current commit — a stale
+        // one (repo committed since) is dropped so it regenerates.
+        if let Some((summary, last)) = map.get(&r.id) {
+            if *last == r.last_commit_unix {
+                r.ai_summary = Some(summary.clone());
+            }
+        }
+    }
+}
+
+/// Overlay cached AI summaries onto a repo snapshot (by id, current commit only).
+pub fn apply_summaries(repos: &mut [Repo]) {
+    if let Ok(conn) = open() {
+        apply_summaries_on(&conn, repos);
+    }
+}
+
 /// Cached AI summary for a repo, valid only while the last commit is unchanged
 /// (so it regenerates after new work lands).
 pub fn cached_summary(id: &str, last_commit: i64) -> Option<String> {
@@ -533,6 +572,35 @@ mod tests {
         apply_host_info_on(&conn, &mut other);
         assert!(!other[0].private);
         assert_eq!(other[0].stars, 0);
+    }
+
+    #[test]
+    fn apply_summaries_only_for_current_commit() {
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO ai_cache (id, summary, last_commit) VALUES ('/a', 'fresh summary', 5)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_cache (id, summary, last_commit) VALUES ('/b', 'stale summary', 1)",
+            [],
+        )
+        .unwrap();
+
+        let mut repos = vec![
+            Repo {
+                last_commit_unix: 5,
+                ..sample("/a")
+            },
+            Repo {
+                last_commit_unix: 9, // repo committed since the summary → stale
+                ..sample("/b")
+            },
+        ];
+        apply_summaries_on(&conn, &mut repos);
+        assert_eq!(repos[0].ai_summary.as_deref(), Some("fresh summary"));
+        assert_eq!(repos[1].ai_summary, None, "stale summary must not apply");
     }
 
     #[test]

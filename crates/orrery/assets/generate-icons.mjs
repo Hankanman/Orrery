@@ -37,6 +37,8 @@ const LUCIDE_ICONS = [
   "bookmark", "trash-2",
   // contextual panels: dev-tools categories + settings sections
   "binary", "hash", "braces", "type", "user", "rocket", "bell",
+  // layout toggle + compact list launcher
+  "list", "code",
 ];
 
 // Language marks: multicolor devicon "-original" SVGs, rendered in full color

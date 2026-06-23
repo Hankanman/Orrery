@@ -301,9 +301,11 @@ fn count_roots(repos: &[model::Repo]) -> usize {
 /// number of distinct scanned roots (for the header's "N roots · M repos").
 pub fn load(now: i64) -> (Vec<Row>, usize) {
     let mut repos = cache::load_repos();
-    // Overlay persisted host enrichment (stars/visibility/release) so the launch
-    // paint — and the reload after an enrich pass — show it without a rescan.
+    // Overlay persisted host enrichment (stars/visibility/release) + AI summaries
+    // so the launch paint — and reloads after an enrich/summarize pass — show
+    // them without a rescan.
     cache::apply_host_info(&mut repos);
+    cache::apply_summaries(&mut repos);
     let n_roots = count_roots(&repos);
     (to_rows(repos, now), n_roots)
 }
@@ -317,9 +319,11 @@ pub fn rescan() -> (Vec<Row>, usize) {
     let cfg = config::load();
     let favorites = cache::favorites();
     let mut repos = scan::scan(&cfg.roots, cfg.scan_depth, &cfg.ignore, &favorites, now);
-    // Carry over persisted host enrichment (stars/visibility) until a fresh
-    // enrich pass re-confirms it, then snapshot for instant next-launch paint.
+    // Carry over persisted host enrichment (stars/visibility) + AI summaries
+    // until a fresh pass re-confirms them, then snapshot for instant next-launch
+    // paint.
     cache::apply_host_info(&mut repos);
+    cache::apply_summaries(&mut repos);
     let _ = cache::store_repos(&repos);
     let n_roots = count_roots(&repos);
     (to_rows(repos, now), n_roots)

@@ -20,3 +20,4 @@ pub mod oauth;
 pub mod scan;
 pub mod search;
 pub mod semantic;
+pub mod summarize;

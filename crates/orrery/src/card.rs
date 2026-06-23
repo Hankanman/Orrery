@@ -339,3 +339,193 @@ pub fn card(
         .child(body)
         .child(acts)
 }
+
+/// A compact single-row repo entry for the list layout — the same data and
+/// launchers as the grid card, laid out horizontally in one fixed-height row.
+pub(crate) fn list_item(
+    row: &Row,
+    idx: usize,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+    ide_cmd: &str,
+    agent_cmd: &str,
+) -> impl IntoElement {
+    let fav_star = {
+        let app = app.clone();
+        let id = row.id.clone();
+        let fav = row.favorite;
+        div()
+            .id(SharedString::from(format!("lfav-{idx}")))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .child(lucide("star", 15., if fav { t.star } else { t.fg3 }))
+            .on_click(move |_ev, _win, cx| {
+                cx.stop_propagation();
+                let next = !fav;
+                let _ = cache::set_favorite(&id, next);
+                app.update(cx, |this, cx| {
+                    if let Some(r) = this.rows.get_mut(idx) {
+                        r.favorite = next;
+                    }
+                    cx.notify();
+                });
+            })
+    };
+
+    // Name + slug·path; clicking opens the drawer.
+    let open = {
+        let app = app.clone();
+        let id = row.id.clone();
+        div()
+            .id(SharedString::from(format!("lopen-{idx}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.))
+            .flex_1()
+            .min_w(px(0.))
+            .cursor_pointer()
+            .on_click(move |_ev, window, cx| {
+                let id = id.clone();
+                app.update(cx, |this, cx| this.open_drawer(id, window, cx));
+            })
+            .child(lang_mark(&row.language, t))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(t.text_small))
+                            .text_color(rgb(t.fg0))
+                            .child(row.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(px(t.text_data_sm))
+                            .text_color(rgb(t.fg2))
+                            .child(SharedString::from(format!("{} · {}", row.slug, row.path))),
+                    ),
+            )
+    };
+
+    // Status segments (branch / ahead-behind / dirty / stars / age).
+    let mut status = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.))
+        .flex_none()
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .child(seg("git-branch", row.branch.clone(), t.fg2));
+    if row.ahead > 0 || row.behind > 0 {
+        let color = if row.behind > 0 { t.behind } else { t.clean };
+        status = status.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .text_color(rgb(color))
+                .child(lucide("arrow-up", 13., color))
+                .child(SharedString::from(row.ahead.to_string()))
+                .child(lucide("arrow-down", 13., color))
+                .child(SharedString::from(row.behind.to_string())),
+        );
+    }
+    if row.dirty > 0 {
+        status = status.child(seg(
+            "circle-dot",
+            SharedString::from(row.dirty.to_string()),
+            t.dirty,
+        ));
+    }
+    if !row.host.is_empty() {
+        status = status.child(seg("star", row.stars.clone(), t.star));
+    }
+    status = status.child(seg("clock", row.age.clone(), t.fg2));
+
+    // Launchers — narrow icon buttons.
+    let ide_action = {
+        let (path, cmd) = (row.id.clone(), ide_cmd.to_string());
+        move |_cx: &mut App| {
+            let _ = launch::launch(&cmd, &path);
+        }
+    };
+    let agent_action = {
+        let (path, cmd) = (row.id.clone(), agent_cmd.to_string());
+        move |_cx: &mut App| {
+            let _ = launch::spawn(&cmd, &path);
+        }
+    };
+    let folder_action = {
+        let path = row.id.clone();
+        move |_cx: &mut App| {
+            let _ = launch::open(&path);
+        }
+    };
+    let mut acts = div()
+        .flex()
+        .flex_row()
+        .gap(px(6.))
+        .flex_none()
+        .child(button(
+            SharedString::from(format!("lide-{idx}")),
+            lucide("code", 15., t.fg1),
+            false,
+            t,
+            ide_action,
+        ))
+        .child(button(
+            SharedString::from(format!("lagent-{idx}")),
+            lucide("square-terminal", 15., t.fg1),
+            false,
+            t,
+            agent_action,
+        ))
+        .child(button(
+            SharedString::from(format!("lfolder-{idx}")),
+            lucide("folder-open", 15., t.fg1),
+            false,
+            t,
+            folder_action,
+        ));
+    if !row.url.is_empty() {
+        let url = row.url.clone();
+        acts = acts.child(button(
+            SharedString::from(format!("lhost-{idx}")),
+            lucide("external-link", 15., t.fg1),
+            false,
+            t,
+            move |_cx: &mut App| {
+                let _ = launch::open(&url);
+            },
+        ));
+    }
+
+    let hov_bg = t.surface_hover;
+    div()
+        .id(SharedString::from(format!("lrow-{idx}")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(14.))
+        .w_full()
+        .h(px(60.))
+        .px(px(16.))
+        .border_b_1()
+        .border_color(rgb(t.border))
+        .hover(move |s| s.bg(rgb(hov_bg)))
+        .child(fav_star)
+        .child(open)
+        .child(status)
+        .child(acts)
+}
