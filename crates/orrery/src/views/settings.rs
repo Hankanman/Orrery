@@ -380,7 +380,7 @@ fn ai_status_block(
                                 .text_color(rgb(t.fg1))
                                 .child(name.clone()),
                         )
-                        .child(muted_mono(size.clone(), t)),
+                        .child(super::muted_mono(size.clone(), t)),
                 );
             }
         }
@@ -545,14 +545,6 @@ fn note_line(text: SharedString, color: u32, t: &Theme) -> impl IntoElement {
     div()
         .text_size(px(t.text_data_sm))
         .text_color(rgb(color))
-        .child(text)
-}
-
-fn muted_mono(text: SharedString, t: &Theme) -> impl IntoElement {
-    div()
-        .font_family("monospace")
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
         .child(text)
 }
 

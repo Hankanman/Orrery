@@ -126,15 +126,8 @@ fn main() {
                             ai_status: Default::default(),
                             ai_ready: false,
                             tray_active,
-                            activity: None,
-                            activity_open: true,
-                            filter: Default::default(),
-                            root: None,
-                            language: None,
-                            saved_views: shell::load_saved_views(),
+                            grid: Default::default(),
                             view_filter: None,
-                            sort: Default::default(),
-                            layout: Default::default(),
                             focus: cx.focus_handle(),
                         }
                     });
