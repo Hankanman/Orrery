@@ -18,6 +18,10 @@ fn client() -> reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
         reqwest::Client::builder()
             .user_agent(UA)
+            // Small JSON responses → bound both connect and overall time so a
+            // hung host can't stall an inbox refresh indefinitely.
+            .connect_timeout(std::time::Duration::from_secs(8))
+            .timeout(std::time::Duration::from_secs(20))
             .build()
             .unwrap_or_default()
     });

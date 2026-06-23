@@ -75,7 +75,15 @@ fn materialize_bundled() {
 }
 
 fn client() -> reqwest::Client {
-    static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+    // Connect-timeout only: a dead sidecar fails the /health probe fast, but
+    // CPU inference of a completion can legitimately run long, so no overall
+    // request timeout (which would truncate generation).
+    static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .build()
+            .unwrap_or_default()
+    });
     CLIENT.clone()
 }
 

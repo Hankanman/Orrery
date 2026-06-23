@@ -95,8 +95,15 @@ fn store_repos_on(conn: &mut Connection, repos: &[Repo]) -> rusqlite::Result<()>
     {
         let mut stmt = tx.prepare("INSERT INTO repos (id, data) VALUES (?1, ?2)")?;
         for repo in repos {
-            let json = serde_json::to_string(repo).unwrap_or_default();
-            stmt.execute(rusqlite::params![repo.id, json])?;
+            // A Repo is plain serde-derivable data, so this should never fail;
+            // if it ever does, skip that row rather than persisting an empty
+            // string that would silently fail to deserialize on load.
+            match serde_json::to_string(repo) {
+                Ok(json) => {
+                    stmt.execute(rusqlite::params![repo.id, json])?;
+                }
+                Err(e) => eprintln!("[cache] skipping unserializable repo {}: {e}", repo.id),
+            }
         }
     }
     tx.commit()
@@ -163,6 +170,33 @@ pub fn cached_host_info(slug: &str, max_age_secs: i64, now: i64) -> Option<HostI
         return None;
     }
     serde_json::from_str(&json).ok()
+}
+
+fn fresh_host_slugs_on(conn: &Connection, max_age_secs: i64, now: i64) -> HashSet<String> {
+    let Ok(mut stmt) = conn.prepare("SELECT slug, fetched_at FROM host_cache") else {
+        return HashSet::new();
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    });
+    match rows {
+        Ok(iter) => iter
+            .flatten()
+            .filter(|(_, fetched_at)| now.saturating_sub(*fetched_at) <= max_age_secs)
+            .map(|(slug, _)| slug)
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// Slugs whose cached host enrichment is still within `max_age_secs` — the
+/// enrich pass skips these so a rescan within the TTL costs no host-API calls.
+/// One query, unlike calling [`cached_host_info`] per repo.
+pub fn fresh_host_slugs(max_age_secs: i64, now: i64) -> HashSet<String> {
+    match open() {
+        Ok(conn) => fresh_host_slugs_on(&conn, max_age_secs, now),
+        Err(_) => HashSet::new(),
+    }
 }
 
 fn all_host_info_on(conn: &Connection) -> HashMap<String, HostInfo> {
@@ -499,6 +533,17 @@ mod tests {
         apply_host_info_on(&conn, &mut other);
         assert!(!other[0].private);
         assert_eq!(other[0].stars, 0);
+    }
+
+    #[test]
+    fn fresh_host_slugs_filters_by_ttl() {
+        let conn = mem();
+        store_host_info_on(&conn, "o/fresh", &HostInfo::default(), 1_000);
+        store_host_info_on(&conn, "o/stale", &HostInfo::default(), 100);
+        // now=1_500, ttl=600 → "fresh" (age 500) kept, "stale" (age 1_400) dropped.
+        let fresh = fresh_host_slugs_on(&conn, 600, 1_500);
+        assert!(fresh.contains("o/fresh"));
+        assert!(!fresh.contains("o/stale"));
     }
 
     #[test]

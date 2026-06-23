@@ -113,8 +113,10 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> bool {
                         app.rows = rows;
                         app.roots = roots;
                         // New/changed repos → refresh the semantic index (cheap
-                        // when unchanged; a no-op unless AI is ready).
+                        // when unchanged; a no-op unless AI is ready) and host
+                        // enrichment (skips repos still within the cache TTL).
                         app.index_semantic();
+                        app.enrich_hosts(cx);
                         cx.notify();
                     });
                     if applied.is_err() {

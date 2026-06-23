@@ -108,18 +108,22 @@ fn parse_rgb_triplet(s: &str) -> Option<Rgb> {
 
 /// Read window/view/text/accent colours from `~/.config/kdeglobals`.
 fn read_kdeglobals() -> KdeColors {
-    let mut out = KdeColors::default();
-
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
     let Some(path) = base.map(|b| b.join("kdeglobals")) else {
-        return out;
+        return KdeColors::default();
     };
     let Ok(content) = std::fs::read_to_string(path) else {
-        return out;
+        return KdeColors::default();
     };
+    parse_kdeglobals(&content)
+}
 
+/// Parse the relevant colour keys out of a kdeglobals INI body. Pure (no I/O),
+/// so it's unit-testable; `read_kdeglobals` supplies the file contents.
+fn parse_kdeglobals(content: &str) -> KdeColors {
+    let mut out = KdeColors::default();
     let mut section = String::new();
     for line in content.lines() {
         let line = line.trim();
@@ -230,4 +234,43 @@ pub fn watch(on_change: impl Fn(Appearance) + Send + 'static) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_kdeglobals, parse_rgb_triplet};
+
+    #[test]
+    fn parse_rgb_triplet_accepts_well_formed_and_rejects_junk() {
+        let c = parse_rgb_triplet("61, 174, 233").unwrap();
+        assert_eq!((c.r, c.g, c.b), (61, 174, 233));
+        assert!(parse_rgb_triplet("61,174").is_none(), "too few components");
+        assert!(parse_rgb_triplet("300,0,0").is_none(), "out of u8 range");
+        assert!(parse_rgb_triplet("a,b,c").is_none(), "non-numeric");
+        assert!(parse_rgb_triplet("").is_none());
+    }
+
+    #[test]
+    fn parse_kdeglobals_reads_sectioned_colours() {
+        let body = "\
+[General]
+AccentColor=61,174,233
+
+[Colors:Window]
+BackgroundNormal=27,30,32
+ForegroundNormal=239,240,241
+
+[Colors:View]
+BackgroundNormal=35,38,41
+";
+        let k = parse_kdeglobals(body);
+        assert_eq!(k.accent.map(|c| (c.r, c.g, c.b)), Some((61, 174, 233)));
+        assert_eq!(k.window_bg.map(|c| (c.r, c.g, c.b)), Some((27, 30, 32)));
+        assert_eq!(k.window_fg.map(|c| (c.r, c.g, c.b)), Some((239, 240, 241)));
+        assert_eq!(k.base_bg.map(|c| (c.r, c.g, c.b)), Some((35, 38, 41)));
+        // BackgroundNormal outside a known section must not leak into a field.
+        assert!(parse_kdeglobals("BackgroundNormal=1,2,3")
+            .window_bg
+            .is_none());
+    }
 }

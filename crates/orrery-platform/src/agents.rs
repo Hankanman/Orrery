@@ -40,17 +40,23 @@ fn start_time(pid: u32, btime: i64) -> i64 {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return btime;
     };
-    // `comm` (field 2) may contain spaces/parens, so split after the last ')'.
-    let Some(rparen) = stat.rfind(')') else {
-        return btime;
-    };
-    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-    // After comm, starttime (field 22) is index 19.
-    let ticks = fields
-        .get(19)
+    match starttime_ticks(&stat) {
+        Some(ticks) => btime + ticks / HZ,
+        None => btime,
+    }
+}
+
+/// Parse the `starttime` field (clock ticks since boot, field 22) out of a
+/// `/proc/<pid>/stat` line. Pure, so it's unit-testable. Returns `None` if the
+/// line is malformed. `comm` (field 2, parenthesized) can itself contain spaces
+/// and parens, so we anchor on the *last* ')' and count from there: starttime is
+/// the 20th whitespace-separated field after it (index 19).
+fn starttime_ticks(stat: &str) -> Option<i64> {
+    let rparen = stat.rfind(')')?;
+    stat[rparen + 1..]
+        .split_whitespace()
+        .nth(19)
         .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0);
-    btime + ticks / HZ
 }
 
 /// Scan running processes for agent sessions inside `repos`. `programs` is the
@@ -116,4 +122,45 @@ pub fn terminate(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{basename, starttime_ticks};
+
+    #[test]
+    fn basename_takes_trailing_segment() {
+        assert_eq!(basename("/usr/bin/claude"), "claude");
+        assert_eq!(basename("claude"), "claude");
+        assert_eq!(basename(""), "");
+    }
+
+    #[test]
+    fn starttime_ticks_parses_field_22() {
+        // Synthetic /proc/<pid>/stat: `pid (comm) <fields 3..=22>`, where each
+        // token's value equals its field number, so field 22 reads back as 22.
+        let after_comm: String = (3..=22)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let stat = format!("1234 (bash) {after_comm}\n");
+        assert_eq!(starttime_ticks(&stat), Some(22));
+    }
+
+    #[test]
+    fn starttime_ticks_handles_comm_with_spaces_and_parens() {
+        // A program named "(weird) name" must not break field counting.
+        let after_comm: String = (3..=22)
+            .map(|n| (n * 10).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let stat = format!("42 ((weird) name) {after_comm}");
+        assert_eq!(starttime_ticks(&stat), Some(220));
+    }
+
+    #[test]
+    fn starttime_ticks_rejects_malformed() {
+        assert_eq!(starttime_ticks("no parens here"), None);
+        assert_eq!(starttime_ticks("1 (x) S 1 2 3"), None, "too few fields");
+    }
 }

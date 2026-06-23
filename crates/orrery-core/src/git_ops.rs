@@ -66,29 +66,29 @@ fn remote_callbacks() -> RemoteCallbacks<'static> {
     cb
 }
 
-/// Ahead/behind of HEAD vs its upstream.
-fn ahead_behind(repo: &Repository) -> (u32, u32) {
-    (|| {
-        let head = repo.head().ok()?;
-        if !head.is_branch() {
-            return None;
-        }
-        let local = head.target()?;
-        let upstream = git2::Branch::wrap(head).upstream().ok()?;
-        let up_oid = upstream.get().target()?;
-        let (a, b) = repo.graph_ahead_behind(local, up_oid).ok()?;
-        Some((a as u32, b as u32))
-    })()
-    .unwrap_or((0, 0))
+/// Ahead/behind of HEAD vs its upstream, or `None` when HEAD isn't a branch or
+/// has no tracking branch. Canonical impl — `scan` reuses it via `status_of`.
+pub(crate) fn ahead_behind(repo: &Repository) -> Option<(u32, u32)> {
+    let head = repo.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+    let local = head.target()?;
+    let upstream = git2::Branch::wrap(head).upstream().ok()?;
+    let up_oid = upstream.get().target()?;
+    let (a, b) = repo.graph_ahead_behind(local, up_oid).ok()?;
+    Some((a as u32, b as u32))
 }
 
-fn status_of(repo: &Repository) -> GitStatus {
+/// Branch + ahead/behind + dirty count for a repo. The canonical git-status
+/// reader, shared by `scan` (grid snapshot) and the drawer's refresh ops.
+pub(crate) fn status_of(repo: &Repository) -> GitStatus {
     let branch = repo
         .head()
         .ok()
         .and_then(|h| h.shorthand().map(String::from))
         .unwrap_or_else(|| "HEAD".to_string());
-    let (ahead, behind) = ahead_behind(repo);
+    let (ahead, behind) = ahead_behind(repo).unwrap_or((0, 0));
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(false)

@@ -292,7 +292,10 @@ fn count_roots(repos: &[model::Repo]) -> usize {
 /// Load real repos from the shipping SQLite cache. Returns the rows plus the
 /// number of distinct scanned roots (for the header's "N roots · M repos").
 pub fn load(now: i64) -> (Vec<Row>, usize) {
-    let repos = cache::load_repos();
+    let mut repos = cache::load_repos();
+    // Overlay persisted host enrichment (stars/visibility/release) so the launch
+    // paint — and the reload after an enrich pass — show it without a rescan.
+    cache::apply_host_info(&mut repos);
     let n_roots = count_roots(&repos);
     (to_rows(repos, now), n_roots)
 }

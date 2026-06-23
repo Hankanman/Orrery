@@ -7,22 +7,30 @@
 //! unauthenticated by default (fine for public repos, rate-limited) and use a
 //! bearer token when one is available.
 
+use std::time::Duration;
+
 use serde::Deserialize;
 
 use crate::model::{Host, HostInfo};
 
 const UA: &str = "Orrery/0.1 (+https://orrery.app)";
 
-/// Fetch host enrichment for a repo. `domain` routes self-hosted GitLab.
+/// Fetch host enrichment for a repo. `domain` routes self-hosted GitLab;
+/// `gitlab_hosts` is the user's trusted self-hosted GitLab allowlist (see
+/// [`gitlab_host_trusted`]) — a GitLab token is attached only when `domain` is
+/// trusted, so a hostile repo remote can't exfiltrate it.
 pub async fn fetch(
     host: Host,
     domain: &str,
     slug: &str,
     token: Option<&str>,
+    gitlab_hosts: &[String],
 ) -> Result<HostInfo, String> {
     match host {
+        // GitHub always talks to the fixed api.github.com, so its token egress
+        // needs no per-domain check.
         Host::Github => fetch_github(slug, token).await,
-        Host::Gitlab => fetch_gitlab(domain, slug, token).await,
+        Host::Gitlab => fetch_gitlab(domain, slug, token, gitlab_hosts).await,
     }
 }
 
@@ -44,12 +52,31 @@ pub(crate) fn valid_host(domain: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
+/// Whether a GitLab token may be sent to `domain`. Enforces the documented
+/// token-egress invariant: only `gitlab.com` or a host the user explicitly added
+/// to `gitlab_hosts` is trusted. `valid_host` (SSRF) is a necessary precondition
+/// — an untrusted-but-valid host can still be queried *unauthenticated* for
+/// public project metadata, but never receives the token. Matching is
+/// case-insensitive on the host.
+pub(crate) fn gitlab_host_trusted(domain: &str, gitlab_hosts: &[String]) -> bool {
+    if !valid_host(domain) {
+        return false;
+    }
+    domain.eq_ignore_ascii_case("gitlab.com")
+        || gitlab_hosts
+            .iter()
+            .any(|h| h.trim().eq_ignore_ascii_case(domain))
+}
+
 fn client() -> reqwest::Client {
     // One shared client → connection/TLS reuse across the per-repo enrich calls.
-    // reqwest::Client is Arc-backed, so cloning just shares the pool.
+    // reqwest::Client is Arc-backed, so cloning just shares the pool. Bounded
+    // timeouts so a hung/blackholed host can't stall an enrich task forever.
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
         reqwest::Client::builder()
             .user_agent(UA)
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default()
     });
@@ -109,7 +136,12 @@ async fn fetch_github(slug: &str, token: Option<&str>) -> Result<HostInfo, Strin
     })
 }
 
-async fn fetch_gitlab(domain: &str, slug: &str, token: Option<&str>) -> Result<HostInfo, String> {
+async fn fetch_gitlab(
+    domain: &str,
+    slug: &str,
+    token: Option<&str>,
+    gitlab_hosts: &[String],
+) -> Result<HostInfo, String> {
     #[derive(Deserialize)]
     struct Project {
         #[serde(default)]
@@ -126,6 +158,9 @@ async fn fetch_gitlab(domain: &str, slug: &str, token: Option<&str>) -> Result<H
     if !valid_host(domain) {
         return Err(format!("refusing to query untrusted host: {domain}"));
     }
+    // Attach the token only to a trusted host; an arbitrary remote domain still
+    // gets queried (public metadata) but never receives the token.
+    let token = token.filter(|_| gitlab_host_trusted(domain, gitlab_hosts));
     let base = format!("https://{}/api/v4", domain);
     let encoded = urlencoding::encode(slug);
     let client = client();
@@ -169,7 +204,7 @@ async fn fetch_gitlab(domain: &str, slug: &str, token: Option<&str>) -> Result<H
 
 #[cfg(test)]
 mod tests {
-    use super::valid_host;
+    use super::{gitlab_host_trusted, valid_host};
 
     #[test]
     fn valid_host_accepts_dns_names_and_rejects_unsafe() {
@@ -183,5 +218,26 @@ mod tests {
         assert!(!valid_host("evil.com/path"), "path");
         assert!(!valid_host("user@evil.com"), "credentials");
         assert!(!valid_host(""));
+    }
+
+    #[test]
+    fn gitlab_token_only_trusted_for_allowlisted_or_dot_com() {
+        let allow = vec![
+            "gitlab.acme.io".to_string(),
+            "  Git.Internal.Corp ".to_string(),
+        ];
+        // gitlab.com is always trusted; the allowlist is honored case-insensitively
+        // and tolerant of surrounding whitespace in config entries.
+        assert!(gitlab_host_trusted("gitlab.com", &[]));
+        assert!(gitlab_host_trusted("GitLab.com", &[]));
+        assert!(gitlab_host_trusted("gitlab.acme.io", &allow));
+        assert!(gitlab_host_trusted("git.internal.corp", &allow));
+        // An arbitrary remote domain must NOT receive the token, even though it
+        // is a structurally valid host — this is the egress invariant.
+        assert!(!gitlab_host_trusted("evil.com", &allow));
+        assert!(!gitlab_host_trusted("gitlab.com.evil.com", &allow));
+        // SSRF-shaped hosts are never trusted regardless of the allowlist.
+        assert!(!gitlab_host_trusted("169.254.169.254", &allow));
+        assert!(!gitlab_host_trusted("gitlab.acme.io:22", &allow));
     }
 }

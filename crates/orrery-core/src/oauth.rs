@@ -31,6 +31,19 @@ pub fn github_client_id() -> String {
     }
 }
 
+/// Shared HTTP client for the device-flow calls (one connection pool, bounded
+/// timeouts) instead of building a fresh client per request.
+fn client() -> reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(8))
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_default()
+    });
+    CLIENT.clone()
+}
+
 fn token_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("orrery").join("github_token"))
 }
@@ -123,7 +136,7 @@ pub async fn device_start(client_id: &str) -> Result<DeviceStart, String> {
         verification_uri: String,
         interval: u64,
     }
-    let resp: Resp = reqwest::Client::new()
+    let resp: Resp = client()
         .post(DEVICE_CODE_URL)
         .header("Accept", "application/json")
         .form(&[("client_id", client_id), ("scope", SCOPE)])
@@ -155,7 +168,7 @@ pub async fn device_poll(client_id: &str, device_code: &str) -> Result<PollResul
         access_token: Option<String>,
         error: Option<String>,
     }
-    let resp: Resp = reqwest::Client::new()
+    let resp: Resp = client()
         .post(TOKEN_URL)
         .header("Accept", "application/json")
         .form(&[
