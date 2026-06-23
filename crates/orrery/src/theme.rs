@@ -39,6 +39,11 @@ pub struct Theme {
     pub act_folder: u32,
     pub act_host: u32,
 
+    /// Contribution-heatmap ramp: `[0]` is the empty/no-commit cell; `[1..=4]`
+    /// are increasing accent intensities ("Less → More"). Recomputed from the
+    /// system accent in [`Theme::with_system_accent`].
+    pub heat: [u32; 5],
+
     // Radii (px): --r-xs/sm/md/lg.
     pub r_xs: f32,
     pub r_sm: f32,
@@ -84,6 +89,8 @@ impl Theme {
             act_folder: 0xf5b94b,
             act_host: 0x46c8a0,
 
+            heat: heat_ramp((0x38, 0xdb, 0xf0)),
+
             r_xs: 4.,
             r_sm: 6.,
             r_md: 10.,
@@ -106,9 +113,23 @@ impl Theme {
             self.accent_wash = over_page(a, 0.12);
             self.accent_badge = over_page(a, 0.20);
             self.border_accent = over_page(a, 0.40);
+            self.heat = heat_ramp(a);
         }
         self
     }
+}
+
+/// Build the contribution-heatmap ramp from an accent: an empty (faint white)
+/// cell, then four increasing blends of the accent over the page background, up
+/// to the full accent at the top.
+fn heat_ramp(accent: (u8, u8, u8)) -> [u32; 5] {
+    [
+        over_page((255, 255, 255), 0.05),
+        over_page(accent, 0.22),
+        over_page(accent, 0.42),
+        over_page(accent, 0.68),
+        pack(accent),
+    ]
 }
 
 fn pack((r, g, b): (u8, u8, u8)) -> u32 {

@@ -5,6 +5,7 @@
 //! legacy Tauri app re-exports these under its own `crate::` namespace; the
 //! native GPUI app depends on them directly as `orrery_core::*`.
 
+pub mod activity;
 pub mod ai;
 pub mod cache;
 pub mod config;

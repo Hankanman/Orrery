@@ -10,6 +10,7 @@ mod assets;
 mod card;
 mod data;
 mod drawer;
+mod heatmap;
 mod icon;
 mod live;
 mod palette;
@@ -125,6 +126,14 @@ fn main() {
                             ai_status: Default::default(),
                             ai_ready: false,
                             tray_active,
+                            activity: None,
+                            activity_open: true,
+                            filter: Default::default(),
+                            root: None,
+                            language: None,
+                            saved_views: shell::load_saved_views(),
+                            view_filter: None,
+                            sort: Default::default(),
                             focus: cx.focus_handle(),
                         }
                     });
@@ -143,6 +152,7 @@ fn main() {
                     view.update(cx, |this, cx| {
                         this.ai_startup(cx);
                         this.enrich_hosts(cx);
+                        this.load_activity(cx);
                     });
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();

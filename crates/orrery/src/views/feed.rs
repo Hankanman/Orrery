@@ -25,6 +25,9 @@ pub enum FeedState {
 /// A render-ready feed entry.
 pub struct FeedRow {
     pub icon: &'static str,
+    /// Source event kind ("release" / "starred" / "forked" / …) — drives the
+    /// sidebar's activity-type filter.
+    pub kind: SharedString,
     pub repo: SharedString,
     pub line: SharedString,   // "alice starred" / release title
     pub detail: SharedString, // release notes snippet, etc.
@@ -63,6 +66,7 @@ pub fn feed_row(f: inbox::FeedItem, now: i64) -> FeedRow {
     };
     FeedRow {
         icon,
+        kind: f.kind.into(),
         repo: f.repo.into(),
         line: data::oneline(line).into(),
         detail: data::oneline(f.detail).into(),
@@ -73,7 +77,22 @@ pub fn feed_row(f: inbox::FeedItem, now: i64) -> FeedRow {
     }
 }
 
-pub fn render(state: &FeedState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+/// Does `row` pass the sidebar's activity-type filter? `Some("release")` keeps
+/// releases; `Some("activity")` keeps everything else; `None` keeps all.
+fn passes(kind: &str, filter: Option<&str>) -> bool {
+    match filter {
+        Some("release") => kind == "release",
+        Some("activity") => kind != "release",
+        _ => true,
+    }
+}
+
+pub fn render(
+    state: &FeedState,
+    filter: Option<&str>,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     let body = match state {
         FeedState::Idle | FeedState::Loading => super::note("Loading…", t).into_any_element(),
         FeedState::Error(e) => super::note(e.clone(), t).into_any_element(),
@@ -81,11 +100,16 @@ pub fn render(state: &FeedState, t: &Theme, app: &Entity<OrreryApp>) -> impl Int
             super::note("Nothing new in your feed.", t).into_any_element()
         }
         FeedState::Ready(rows) => {
-            let mut col = div().flex().flex_col().gap(px(4.));
-            for r in rows {
-                col = col.child(feed_item(r, t));
+            let shown: Vec<&FeedRow> = rows.iter().filter(|r| passes(&r.kind, filter)).collect();
+            if shown.is_empty() {
+                super::note("Nothing in this filter.", t).into_any_element()
+            } else {
+                let mut col = div().flex().flex_col().gap(px(4.));
+                for r in shown {
+                    col = col.child(feed_item(r, t));
+                }
+                col.into_any_element()
             }
-            col.into_any_element()
         }
     };
 

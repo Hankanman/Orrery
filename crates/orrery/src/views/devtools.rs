@@ -35,35 +35,47 @@ pub fn new_uuid() -> SharedString {
 
 pub fn render(
     s: &DevToolsState,
+    filter: Option<&str>,
     t: &Theme,
     app: &Entity<OrreryApp>,
     cx: &Context<OrreryApp>,
 ) -> impl IntoElement {
     let q = s.search.read(cx).value().to_lowercase();
-    let show = |name: &str, keys: &str| {
-        q.is_empty() || name.to_lowercase().contains(&q) || keys.contains(&q)
+    // A tool shows when it matches the search box AND the sidebar category.
+    let show = |name: &str, keys: &str, category: &str| {
+        let matches_search = q.is_empty() || name.to_lowercase().contains(&q) || keys.contains(&q);
+        let in_category = filter.is_none() || filter == Some(category);
+        matches_search && in_category
     };
 
     let mut grid = div().flex().flex_col().gap(px(12.));
-    if show("UUID", "uuid guid id") {
+    if show("UUID", "uuid guid id", "generators") {
         grid = grid.child(uuid_tool(s, t, app));
     }
-    if show("Base64", "base64 encode decode") {
+    if show("Base64", "base64 encode decode", "encoding") {
         grid = grid.child(base64_tool(s, t, cx));
     }
-    if show("SHA-256", "hash sha sha256 digest") {
+    if show("SHA-256", "hash sha sha256 digest", "hashing") {
         grid = grid.child(hash_tool(s, t, cx));
     }
-    if show("URL encode", "url percent encode decode") {
+    if show("URL encode", "url percent encode decode", "encoding") {
         grid = grid.child(url_tool(s, t, cx));
     }
-    if show("JSON", "json format minify pretty") {
+    if show("JSON", "json format minify pretty", "data") {
         grid = grid.child(json_tool(s, t, cx));
     }
-    if show("Base converter", "base hex octal binary radix number") {
+    if show(
+        "Base converter",
+        "base hex octal binary radix number",
+        "data",
+    ) {
         grid = grid.child(base_tool(s, t, cx));
     }
-    if show("Case converter", "case upper lower snake kebab camel title") {
+    if show(
+        "Case converter",
+        "case upper lower snake kebab camel title",
+        "text",
+    ) {
         grid = grid.child(case_tool(s, t, cx));
     }
 
