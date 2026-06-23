@@ -48,6 +48,9 @@ pub enum RepoFilter {
     Ahead,
     Starred,
     Stale,
+    /// Repos that want a look: uncommitted, or ahead/behind upstream. Toolbar-
+    /// only (not a chip), driven by the "Attention" button.
+    Attention,
 }
 
 impl RepoFilter {
@@ -71,6 +74,7 @@ impl RepoFilter {
             RepoFilter::Ahead => "Ahead",
             RepoFilter::Starred => "Starred",
             RepoFilter::Stale => "Stale",
+            RepoFilter::Attention => "Attention",
         }
     }
 
@@ -83,6 +87,7 @@ impl RepoFilter {
             RepoFilter::Ahead => Some("arrow-up"),
             RepoFilter::Starred => Some("star"),
             RepoFilter::Stale => Some("clock"),
+            RepoFilter::Attention => Some("circle-alert"),
             RepoFilter::All => None,
         }
     }
@@ -98,6 +103,7 @@ impl RepoFilter {
             RepoFilter::Ahead => r.ahead > 0,
             RepoFilter::Starred => r.favorite,
             RepoFilter::Stale => r.activity == Activity::Stale,
+            RepoFilter::Attention => r.dirty > 0 || r.ahead > 0 || r.behind > 0,
         }
     }
 }
@@ -126,6 +132,15 @@ impl SortMode {
             SortMode::Name => SortMode::Activity,
         }
     }
+}
+
+/// Mission Control card layout: the multi-column card grid, or a compact
+/// single-column list.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Layout {
+    #[default]
+    Grid,
+    List,
 }
 
 /// A persisted Mission Control "quick view": a named snapshot of the active
@@ -249,6 +264,8 @@ pub struct OrreryApp {
     pub view_filter: Option<SharedString>,
     /// Mission Control card ordering.
     pub sort: SortMode,
+    /// Mission Control card layout (grid vs. compact list).
+    pub layout: Layout,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
 }
@@ -1196,6 +1213,30 @@ impl OrreryApp {
         cx.notify();
     }
 
+    /// Switch the Mission Control card layout (grid ↔ list).
+    pub fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        self.layout = layout;
+        cx.notify();
+    }
+
+    /// Toggle the "Attention" filter (repos that are dirty / ahead / behind).
+    pub fn toggle_attention(&mut self, cx: &mut Context<Self>) {
+        self.filter = if self.filter == RepoFilter::Attention {
+            RepoFilter::All
+        } else {
+            RepoFilter::Attention
+        };
+        cx.notify();
+    }
+
+    /// How many repos currently want attention (dirty / ahead / behind).
+    fn attention_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| RepoFilter::Attention.matches(r))
+            .count()
+    }
+
     /// Show/hide the contribution graph.
     pub fn toggle_activity(&mut self, cx: &mut Context<Self>) {
         self.activity_open = !self.activity_open;
@@ -1321,6 +1362,32 @@ impl OrreryApp {
             persist_saved_views(&self.saved_views);
             cx.notify();
         }
+    }
+
+    /// Generate local-AI one-line summaries for every repo (cached by commit, so
+    /// repeats are cheap), then reload the grid so the cards show them. Gated on
+    /// `ai_ready` — a no-op when AI is unavailable.
+    pub fn summarize_all(&mut self, cx: &mut Context<Self>) {
+        if !self.ai_ready {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let updated =
+                crate::task::run(async { orrery_core::summarize::run_cached().await }).await;
+            if updated == 0 {
+                return;
+            }
+            let (rows, roots) = cx
+                .background_executor()
+                .spawn(async { crate::data::load(crate::data::now_unix()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.rows = rows;
+                this.roots = roots;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Absolute row indices passing every active filter (chip AND root AND
@@ -2114,6 +2181,7 @@ impl OrreryApp {
         } else {
             format!("{} repos", self.filter.label())
         };
+        let attention_label = format!("Attention {}", self.attention_count());
         div()
             .flex()
             .flex_row()
@@ -2145,6 +2213,15 @@ impl OrreryApp {
                 t,
                 cx.listener(|this, _ev, _w, cx| this.toggle_activity(cx)),
             ))
+            // Attention filter: repos that are dirty / ahead / behind.
+            .child(tool_btn(
+                "tb-attention",
+                "circle-alert",
+                Some(attention_label.as_str()),
+                self.filter == RepoFilter::Attention,
+                t,
+                cx.listener(|this, _ev, _w, cx| this.toggle_attention(cx)),
+            ))
             // Force-refresh host enrichment.
             .child(tool_btn(
                 "tb-fetch",
@@ -2154,6 +2231,18 @@ impl OrreryApp {
                 t,
                 cx.listener(|this, _ev, _w, cx| this.fetch_all_hosts(cx)),
             ))
+            // Summarize (local AI) — hidden unless a backend is ready.
+            .children(self.ai_ready.then(|| {
+                tool_btn(
+                    "tb-summarize",
+                    "sparkles",
+                    Some("Summarize"),
+                    false,
+                    t,
+                    cx.listener(|this, _ev, _w, cx| this.summarize_all(cx)),
+                )
+                .into_any_element()
+            }))
             // Sort order (cycles Activity ↔ Name).
             .child(tool_btn(
                 "tb-sort",
@@ -2162,6 +2251,23 @@ impl OrreryApp {
                 false,
                 t,
                 cx.listener(|this, _ev, _w, cx| this.cycle_sort(cx)),
+            ))
+            // Layout toggle: grid vs. compact list.
+            .child(tool_btn(
+                "tb-grid",
+                "layout-grid",
+                None,
+                self.layout == Layout::Grid,
+                t,
+                cx.listener(|this, _ev, _w, cx| this.set_layout(Layout::Grid, cx)),
+            ))
+            .child(tool_btn(
+                "tb-list",
+                "list",
+                None,
+                self.layout == Layout::List,
+                t,
+                cx.listener(|this, _ev, _w, cx| this.set_layout(Layout::List, cx)),
             ))
     }
 
@@ -2219,51 +2325,76 @@ impl OrreryApp {
         let theme = self.theme.clone();
         let ide = self.config.ide_command.clone();
         let agent = self.config.agent_command.clone();
-        let grid_rows = visible.len().div_ceil(cols);
-        // uniform_list needs one row height, so size it to the tallest card. The
-        // AI-summary line is all-or-nothing per user (gated on aiReady), so pick
-        // the taller height only when summaries are present — keeping cards snug
-        // either way rather than clipping the launcher row at the bottom.
-        let has_ai = visible.iter().any(|&i| !self.rows[i].ai_summary.is_empty());
-        let row_h = if has_ai { ROW_H_AI } else { ROW_H };
 
-        gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
-            let app = entity.read(cx);
-            range
-                .map(|gi| {
-                    let start = gi * cols;
-                    let end = (start + cols).min(visible.len());
-                    // Map each grid slot to its absolute row index (so the card's
-                    // favorite toggle keeps editing the right `rows[idx]`).
-                    let mut cells: Vec<gpui::AnyElement> = visible[start..end]
-                        .iter()
-                        .map(|&i| {
-                            card(&app.rows[i], i, &theme, &entity, &ide, &agent).into_any_element()
+        let list = match self.layout {
+            // Compact single-column list: one repo per row.
+            Layout::List => {
+                gpui::uniform_list("repo-list", visible.len(), move |range, _win, cx| {
+                    let app = entity.read(cx);
+                    range
+                        .map(|i| {
+                            let abs = visible[i];
+                            crate::card::list_item(
+                                &app.rows[abs],
+                                abs,
+                                &theme,
+                                &entity,
+                                &ide,
+                                &agent,
+                            )
+                            .into_any_element()
                         })
-                        .collect();
-                    while cells.len() < cols {
-                        cells.push(div().flex_1().min_w(px(0.)).into_any_element());
-                    }
-                    // w_full so the row fills the list width and the flex_1 cells
-                    // divide it equally — otherwise the row shrink-wraps to the
-                    // cards' content width and overflows horizontally.
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_stretch()
-                        .h(px(row_h))
-                        .gap(px(12.))
-                        .px(px(16.))
-                        .py(px(8.))
-                        .children(cells)
-                        .into_any_element()
+                        .collect()
                 })
-                .collect()
-        })
-        .flex_1()
-        .size_full()
-        .bg(rgb(t.page))
+            }
+            // Multi-column card grid (one uniform_list row = `cols` cards).
+            Layout::Grid => {
+                let grid_rows = visible.len().div_ceil(cols);
+                // uniform_list needs one row height, so size it to the tallest
+                // card. The AI-summary line is all-or-nothing per user (gated on
+                // aiReady), so pick the taller height only when summaries are
+                // present — keeping cards snug either way rather than clipping
+                // the launcher row at the bottom.
+                let has_ai = visible.iter().any(|&i| !self.rows[i].ai_summary.is_empty());
+                let row_h = if has_ai { ROW_H_AI } else { ROW_H };
+                gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
+                    let app = entity.read(cx);
+                    range
+                        .map(|gi| {
+                            let start = gi * cols;
+                            let end = (start + cols).min(visible.len());
+                            // Map each grid slot to its absolute row index (so the
+                            // card's favorite toggle keeps editing the right row).
+                            let mut cells: Vec<gpui::AnyElement> = visible[start..end]
+                                .iter()
+                                .map(|&i| {
+                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent)
+                                        .into_any_element()
+                                })
+                                .collect();
+                            while cells.len() < cols {
+                                cells.push(div().flex_1().min_w(px(0.)).into_any_element());
+                            }
+                            // w_full so the row fills the list width and the flex_1
+                            // cells divide it equally — otherwise the row shrink-
+                            // wraps to content width and overflows horizontally.
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_row()
+                                .items_stretch()
+                                .h(px(row_h))
+                                .gap(px(12.))
+                                .px(px(16.))
+                                .py(px(8.))
+                                .children(cells)
+                                .into_any_element()
+                        })
+                        .collect()
+                })
+            }
+        };
+        list.flex_1().size_full().bg(rgb(t.page))
     }
 }
 
