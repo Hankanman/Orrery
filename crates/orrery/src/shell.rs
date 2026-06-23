@@ -1,10 +1,9 @@
 //! App shell — the chrome that wraps every view: the 52px header (brand,
 //! roots·repos, search, new/rescan), the 236px left rail with the 8 primary nav
-//! items, and the main column. Ported from `AppShell.tsx` + `Sidebar.tsx` +
-//! the `.orr-header`/`.orr-sidebar`/`.orr-sb-*` rules in `index.css`.
+//! items, and the main column.
 //!
-//! The nav is live: clicking an item switches the active `View`. Most views are
-//! Phase-2 scaffolds; Grid renders the real card grid.
+//! The nav is live: clicking an item switches the active `View`; each view loads
+//! its data lazily on first selection.
 
 use std::rc::Rc;
 
@@ -49,7 +48,7 @@ pub enum Overlay {
     NewProject(crate::views::newproject::NewProjectData),
 }
 
-/// The RepoDrawer's tabs (mirrors `RepoDrawer.tsx`).
+/// The RepoDrawer's tabs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DrawerTab {
     Overview,
