@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libvulkan-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libxcb1-dev libfontconfig-1-dev libssl-dev \
+            libxcb1-dev libfontconfig1-dev libssl-dev \
             build-essential cmake pkg-config
 
       # Pinned (matches rust-toolchain.toml) so a newer clippy can't fail CI on

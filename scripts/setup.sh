@@ -73,7 +73,7 @@ install_system_deps() {
     $SUDO apt-get install "${yes[@]}" \
       libvulkan-dev vulkan-tools mesa-vulkan-drivers \
       libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-      libxcb1-dev libfontconfig-1-dev libssl-dev \
+      libxcb1-dev libfontconfig1-dev libssl-dev \
       build-essential cmake pkg-config
   elif have pacman; then
     say "installing system deps (pacman)…"
