@@ -11,6 +11,7 @@ license = "MIT"
 [dependencies]
 # Logic: scan/config for the file-watcher, inbox/oauth/cache for the poller.
 orrery-core = { path = "../orrery-core" }
+dirs = "6"               # XDG data path for the KRunner dbusplugin descriptor
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"         # attention-snapshot dedupe
 zbus = "5"               # D-Bus: appearance portal + desktop notifications

@@ -4690,6 +4690,7 @@ name = "orrery-platform"
 version = "0.2.0"
 dependencies = [
  "ashpd",
+ "dirs",
  "futures-util",
  "ksni",
  "notify-debouncer-mini",

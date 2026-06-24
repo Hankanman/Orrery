@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod appearance;
+pub mod krunner;
 pub mod notifier;
 pub mod notify;
 pub mod shortcut;
