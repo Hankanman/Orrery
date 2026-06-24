@@ -24,6 +24,12 @@ pub struct NewProjectData {
     pub mode: NewMode,
     pub url: Entity<InputState>,
     pub name: Entity<InputState>,
+    /// Create-mode: optional `origin` remote to set on the new repo.
+    pub remote: Entity<InputState>,
+    /// Create-mode: optional template directory to copy in.
+    pub template: Entity<InputState>,
+    /// Create-mode: whether to make an initial commit (vs an empty repo).
+    pub first_commit: bool,
     /// Index into `config.roots` — the destination root.
     pub root: usize,
     pub status: SharedString,
@@ -71,6 +77,12 @@ pub fn render(
         panel = panel.child(field("Repository URL", &d.url, t));
     }
     panel = panel.child(field("Folder name", &d.name, t));
+    if d.mode == NewMode::Create {
+        panel = panel
+            .child(field("Remote URL (optional)", &d.remote, t))
+            .child(field("Template directory (optional)", &d.template, t))
+            .child(first_commit_toggle(d.first_commit, t, app));
+    }
 
     // Destination root.
     if roots.is_empty() {
@@ -174,6 +186,34 @@ fn mode_tab(
         .child(SharedString::from(label.to_string()))
         .on_click(move |_ev, _win, cx| {
             app.update(cx, |this, cx| this.new_project_set_mode(mode, cx));
+        })
+}
+
+/// A checkbox-style row toggling whether `init` makes an initial commit.
+fn first_commit_toggle(on: bool, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let app = app.clone();
+    div()
+        .id("np-first-commit")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .cursor_pointer()
+        .child(crate::icon::lucide(
+            if on { "circle-check" } else { "circle-dot" },
+            15.,
+            if on { t.clean } else { t.fg3 },
+        ))
+        .child(
+            div()
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg1))
+                .child("Make initial commit"),
+        )
+        .on_click(move |_ev, _win, cx| {
+            app.update(cx, |this, cx| {
+                this.new_project_toggle_first_commit(cx);
+            });
         })
 }
 

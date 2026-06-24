@@ -365,19 +365,35 @@ impl OrreryApp {
         let url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://github.com/owner/repo"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("repo"));
+        let remote =
+            cx.new(|cx| InputState::new(window, cx).placeholder("git@github.com:owner/repo.git"));
+        let template = cx.new(|cx| InputState::new(window, cx).placeholder("~/templates/rust"));
         let subs = vec![
             cx.observe(&url, |_this, _e, cx| cx.notify()),
             cx.observe(&name, |_this, _e, cx| cx.notify()),
+            cx.observe(&remote, |_this, _e, cx| cx.notify()),
+            cx.observe(&template, |_this, _e, cx| cx.notify()),
         ];
         self.overlay = Some(Overlay::NewProject(NewProjectData {
             mode: NewMode::Clone,
             url,
             name,
+            remote,
+            template,
+            first_commit: true,
             root: 0,
             status: "".into(),
             busy: false,
             _subs: subs,
         }));
+        cx.notify();
+    }
+
+    /// Toggle the new-project "make initial commit" option.
+    pub fn new_project_toggle_first_commit(&mut self, cx: &mut Context<Self>) {
+        if let Some(Overlay::NewProject(d)) = &mut self.overlay {
+            d.first_commit = !d.first_commit;
+        }
         cx.notify();
     }
 
@@ -418,6 +434,9 @@ impl OrreryApp {
         let mode = d.mode;
         let name = d.name.read(cx).value().trim().to_string();
         let url = d.url.read(cx).value().trim().to_string();
+        let remote = d.remote.read(cx).value().trim().to_string();
+        let template = d.template.read(cx).value().trim().to_string();
+        let first_commit = d.first_commit;
         let Some(root) = self.config.roots.get(d.root).cloned() else {
             self.set_new_project_status("Add a workspace root in Settings first.", cx);
             return;
@@ -450,9 +469,9 @@ impl OrreryApp {
                         NewMode::Create => orrery_core::git_ops::init(
                             &dest,
                             &name,
-                            None,
-                            None,
-                            Some("Initial commit"),
+                            (!template.is_empty()).then_some(template.as_str()),
+                            (!remote.is_empty()).then_some(remote.as_str()),
+                            first_commit.then_some("Initial commit"),
                         ),
                     }
                 })
