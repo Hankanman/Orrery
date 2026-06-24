@@ -5,10 +5,11 @@
 //! This is the workhorse primitive — most journeys (catch-up, dive, commit, PR
 //! triage) live here. All five tabs are in: Overview (Row facts + async
 //! branches/commits/worktrees, with worktree add/remove), Readme (gpui-component
-//! markdown), PR (lazy, GitHub-only, via the `task` bridge — rollups + inline
-//! approve/merge), Changes (staged diff + commit-message field + Commit), and
-//! Notes (catch-up + an editable markdown note via gpui-component's multiline
-//! input). Follow-up: the AI "generate commit message" (gated on aiReady, #102).
+//! markdown), PR (lazy, GitHub-only, via the `task` bridge — rollups, per-check
+//! breakdown + inline approve/merge), Changes (staged/working diff toggle +
+//! commit-message field + Commit, plus AI commit-message + changelog generation
+//! gated on aiReady), and Notes (catch-up + AI "what changed" narrative + an
+//! editable markdown note via gpui-component's multiline input).
 
 use gpui::{
     AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
@@ -105,14 +106,24 @@ pub enum PrState {
     Error(SharedString),
 }
 
-/// Lazy-loaded staged-diff state (sync git, but loaded off the UI thread).
+/// Lazy-loaded diff state (sync git, but loaded off the UI thread).
 #[derive(Default)]
 pub enum DiffState {
     #[default]
     Idle,
     Loading,
-    /// The staged diff text ("" when nothing is staged).
+    /// The diff text ("" when there's nothing in the selected mode).
     Ready(SharedString),
+}
+
+/// Which diff the Changes tab is showing.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub enum DiffMode {
+    /// `git diff --cached` — what a commit would record.
+    #[default]
+    Staged,
+    /// `git diff` — unstaged working-tree changes.
+    Working,
 }
 
 /// Notes tab data: the "resume where I left off" catch-up line (the note text
@@ -122,6 +133,8 @@ pub struct NotesData {
     /// Commits since last seen — drives whether "Mark caught up" is offered.
     pub count: usize,
     pub first_visit: bool,
+    /// AI "what changed" narrative, once generated (gated on `aiReady`).
+    pub resume: Option<SharedString>,
 }
 
 /// Async-loaded data for the currently open repo's drawer. Overview loads on
@@ -135,6 +148,12 @@ pub struct DrawerData {
     pub readme: ReadmeState,
     pub pr: PrState,
     pub diff: DiffState,
+    /// Which diff the Changes tab shows (staged vs working tree).
+    pub diff_mode: DiffMode,
+    /// AI-generated commit message for the staged diff, once requested.
+    pub commit_suggestion: Option<SharedString>,
+    /// AI-generated changelog from recent commits, once requested.
+    pub changelog: Option<SharedString>,
     /// Notes tab (catch-up + saved note); `None` until first shown.
     pub notes: Option<NotesData>,
     /// The editable note field (gpui-component multiline input), seeded from the
@@ -244,13 +263,21 @@ pub fn load_readme(repo: SharedString, cx: &mut Context<OrreryApp>) {
     .detach();
 }
 
-/// Lazily load the staged diff (sync git, off the UI thread) for the Changes tab.
+/// Lazily load the diff (sync git, off the UI thread) for the Changes tab, in
+/// the currently selected mode (staged vs working tree).
 pub fn load_diff(repo: SharedString, cx: &mut Context<OrreryApp>) {
     let id = repo.to_string();
+    let mode = cx.entity().read(cx).drawer.diff_mode;
     cx.spawn(async move |this, cx| {
         let diff = cx
             .background_executor()
-            .spawn(async move { git_ops::staged_diff(&id).unwrap_or_default() })
+            .spawn(async move {
+                match mode {
+                    DiffMode::Staged => git_ops::staged_diff(&id),
+                    DiffMode::Working => git_ops::working_diff(&id),
+                }
+                .unwrap_or_default()
+            })
             .await;
         let _ = this.update(cx, |this, cx| {
             if this.drawer.repo == repo {
@@ -260,6 +287,19 @@ pub fn load_diff(repo: SharedString, cx: &mut Context<OrreryApp>) {
         });
     })
     .detach();
+}
+
+/// Switch the Changes-tab diff between staged and working tree, then reload.
+/// Called from within an `app.update` closure (so it holds `&mut OrreryApp`).
+pub fn set_diff_mode(mode: DiffMode, this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
+    if this.drawer.diff_mode == mode {
+        return;
+    }
+    this.drawer.diff_mode = mode;
+    this.drawer.diff = DiffState::Loading;
+    let repo = this.drawer.repo.clone();
+    load_diff(repo, cx);
+    cx.notify();
 }
 
 /// Commit the staged changes with `message`, then refresh the (now-empty) diff
@@ -308,6 +348,7 @@ fn read_notes(id: &str) -> NotesData {
         catchup: catchup.into(),
         count,
         first_visit,
+        resume: None,
     }
 }
 
@@ -547,6 +588,7 @@ pub fn drawer(
     data: &DrawerData,
     ide_cmd: &str,
     agent_cmd: &str,
+    ai_ready: bool,
 ) -> impl IntoElement {
     // Scrim: click anywhere outside the panel to dismiss.
     let backdrop = {
@@ -574,7 +616,7 @@ pub fn drawer(
         .border_color(rgb(t.border))
         .child(header(row, t, app))
         .child(tab_bar(tab, t, app, data.repo.clone(), github_slug(row)))
-        .child(body(row, tab, t, data, app))
+        .child(body(row, tab, t, data, app, ai_ready))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
     div()
@@ -755,13 +797,14 @@ fn body(
     t: &Theme,
     data: &DrawerData,
     app: &Entity<OrreryApp>,
+    ai_ready: bool,
 ) -> impl IntoElement {
     let content = match tab {
         DrawerTab::Overview => overview(row, t, data, app).into_any_element(),
         DrawerTab::Readme => readme_view(data, t).into_any_element(),
         DrawerTab::Pr => pr_view(row, data, t, app).into_any_element(),
-        DrawerTab::Changes => changes_view(row, data, t, app).into_any_element(),
-        DrawerTab::Notes => notes_view(row, data, t, app).into_any_element(),
+        DrawerTab::Changes => changes_view(row, data, t, app, ai_ready).into_any_element(),
+        DrawerTab::Notes => notes_view(row, data, t, app, ai_ready).into_any_element(),
     };
     div()
         .id("drawer-body")
@@ -1104,6 +1147,7 @@ fn changes_view(
     data: &DrawerData,
     t: &Theme,
     app: &Entity<OrreryApp>,
+    ai_ready: bool,
 ) -> impl IntoElement {
     let mut col = div().flex().flex_col().gap(px(12.));
 
@@ -1112,32 +1156,152 @@ fn changes_view(
         let repo = row.id.clone();
         let app2 = app.clone();
         let input2 = input.clone();
-        col = col.child(gpui_component::input::Input::new(input)).child(
-            div().flex().flex_row().justify_end().child(pr_btn(
-                SharedString::from("commit"),
-                "Commit",
+        let mut actions = div().flex().flex_row().items_center().gap(px(6.));
+        // AI: suggest a commit message for the staged diff (gated on aiReady).
+        if ai_ready {
+            let app3 = app.clone();
+            actions = actions.child(pr_btn(
+                SharedString::from("gen-commit"),
+                "Generate message",
                 t,
                 move |cx: &mut gpui::App| {
-                    let repo = repo.clone();
-                    let msg = input2.read(cx).value();
-                    if msg.trim().is_empty() {
-                        return;
-                    }
-                    app2.update(cx, |_this, cx| commit_staged(repo, msg.to_string(), cx));
+                    app3.update(cx, |this, cx| this.drawer_generate_commit(cx));
                 },
-            )),
+            ));
+        }
+        actions = actions.child(div().flex_1()).child(pr_btn(
+            SharedString::from("commit"),
+            "Commit",
+            t,
+            move |cx: &mut gpui::App| {
+                let repo = repo.clone();
+                let msg = input2.read(cx).value();
+                if msg.trim().is_empty() {
+                    return;
+                }
+                app2.update(cx, |_this, cx| commit_staged(repo, msg.to_string(), cx));
+            },
+        ));
+        col = col
+            .child(gpui_component::input::Input::new(input))
+            .child(actions);
+    }
+
+    // The AI commit-message suggestion, with a one-click commit using it.
+    if let Some(msg) = &data.commit_suggestion {
+        let repo = row.id.clone();
+        let app4 = app.clone();
+        let msg2 = msg.clone();
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .p(px(10.))
+                .rounded(px(t.r_sm))
+                .bg(rgb(t.surface))
+                .border_1()
+                .border_color(rgb(t.border))
+                .child(seg("sparkles", msg.clone(), t.fg1))
+                .child(div().flex().flex_row().justify_end().child(pr_btn(
+                    SharedString::from("commit-ai"),
+                    "Commit this",
+                    t,
+                    move |cx: &mut gpui::App| {
+                        let (repo, msg) = (repo.clone(), msg2.to_string());
+                        if msg.trim().is_empty() {
+                            return;
+                        }
+                        app4.update(cx, |_this, cx| commit_staged(repo, msg, cx));
+                    },
+                ))),
         );
     }
 
-    // Staged diff.
+    // Diff with a staged / working-tree toggle.
+    col = col.child(diff_mode_tabs(data.diff_mode, t, app));
     let diff = match &data.diff {
         DiffState::Ready(d) if d.trim().is_empty() => {
-            placeholder("Nothing staged — `git add` your changes first.", t).into_any_element()
+            let empty = match data.diff_mode {
+                DiffMode::Staged => "Nothing staged — `git add` your changes first.",
+                DiffMode::Working => "No unstaged changes in the working tree.",
+            };
+            placeholder(empty, t).into_any_element()
         }
         DiffState::Ready(d) => diff_block(d, t).into_any_element(),
         _ => placeholder("Loading…", t).into_any_element(),
     };
-    col.child(diff)
+    col = col.child(diff);
+
+    // AI changelog from recent commits (gated on aiReady).
+    if ai_ready {
+        let app5 = app.clone();
+        col = col.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .child(pr_btn(
+                    SharedString::from("gen-changelog"),
+                    "Generate changelog",
+                    t,
+                    move |cx: &mut gpui::App| {
+                        app5.update(cx, |this, cx| this.drawer_generate_changelog(cx));
+                    },
+                )),
+        );
+    }
+    if let Some(log) = &data.changelog {
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(px(10.))
+                .rounded(px(t.r_sm))
+                .bg(rgb(t.surface))
+                .border_1()
+                .border_color(rgb(t.border))
+                .child(seg("sparkles", "Changelog".into(), t.fg3))
+                .child(
+                    div()
+                        .text_size(px(t.text_small))
+                        .text_color(rgb(t.fg1))
+                        .child(log.clone()),
+                ),
+        );
+    }
+    col
+}
+
+/// Staged / Working toggle for the Changes-tab diff.
+fn diff_mode_tabs(active: DiffMode, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let tab = |label: &'static str, mode: DiffMode| {
+        let app = app.clone();
+        let on = mode == active;
+        div()
+            .id(label)
+            .px(px(10.))
+            .py(px(4.))
+            .rounded(px(t.r_sm))
+            .bg(rgb(if on { t.accent_wash } else { t.button_bg }))
+            .border_1()
+            .border_color(rgb(if on { t.primary } else { t.border }))
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(if on { t.fg0 } else { t.fg2 }))
+            .cursor_pointer()
+            .child(label)
+            .on_click(move |_ev, _win, cx| {
+                app.update(cx, |this, cx| set_diff_mode(mode, this, cx));
+            })
+    };
+    div()
+        .flex()
+        .flex_row()
+        .gap(px(6.))
+        .child(tab("Staged", DiffMode::Staged))
+        .child(tab("Working", DiffMode::Working))
 }
 
 /// Render a unified diff with per-line sentiment colouring.
@@ -1444,7 +1608,13 @@ fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
 
 /// Notes tab: a "resume where I left off" catch-up + an editable markdown note
 /// (gpui-component multiline input) with Save.
-fn notes_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> Div {
+fn notes_view(
+    row: &Row,
+    data: &DrawerData,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+    ai_ready: bool,
+) -> Div {
     let mut col = div().flex().flex_col().gap(px(14.));
     let Some(n) = &data.notes else {
         return col.child(placeholder("Loading…", t));
@@ -1469,6 +1639,18 @@ fn notes_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) 
                 .text_color(rgb(t.fg1))
                 .child(n.catchup.clone()),
         );
+    // AI "what changed" catch-up (gated on aiReady; only when there are commits).
+    if ai_ready && n.count > 0 {
+        let app2 = app.clone();
+        catch = catch.child(pr_btn(
+            SharedString::from("gen-resume"),
+            "Catch me up",
+            t,
+            move |cx| {
+                app2.update(cx, |this, cx| this.drawer_generate_resume(cx));
+            },
+        ));
+    }
     if n.count > 0 || n.first_visit {
         let (app, repo) = (app.clone(), row.id.clone());
         catch = catch.child(pr_btn(
@@ -1482,6 +1664,28 @@ fn notes_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) 
         ));
     }
     col = col.child(catch);
+
+    // The AI narrative, once generated.
+    if let Some(resume) = &n.resume {
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .p(px(11.))
+                .rounded(px(t.r_sm))
+                .bg(rgb(t.surface))
+                .border_1()
+                .border_color(rgb(t.border))
+                .child(seg("sparkles", "What changed".into(), t.fg3))
+                .child(
+                    div()
+                        .text_size(px(t.text_small))
+                        .text_color(rgb(t.fg1))
+                        .child(resume.clone()),
+                ),
+        );
+    }
 
     // Editable note field + Save.
     let mut note = section(t, "Note", None);
