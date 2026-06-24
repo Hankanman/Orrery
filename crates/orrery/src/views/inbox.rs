@@ -103,8 +103,8 @@ fn ready(d: &InboxData, filter: Option<&str>, t: &Theme) -> impl IntoElement {
     if show("issue") && !issues.is_empty() {
         col = col.child(group("circle-dot", "Assigned issues", &issues, t));
     }
-    // Notifications only appear in the unfiltered (All) view.
-    if filter.is_none() && !d.notifications.is_empty() {
+    // Notifications appear in the unfiltered (All) view and under their own filter.
+    if show("notification") && !d.notifications.is_empty() {
         col = col.child(notifications(&d.notifications, t));
     }
     col
