@@ -118,6 +118,8 @@ fn main() {
                             explore: Default::default(),
                             cleanup: Default::default(),
                             agents: Default::default(),
+                            active_agents: Default::default(),
+                            agents_polling: false,
                             explore_cloning: Default::default(),
                             settings: None,
                             devtools: None,
