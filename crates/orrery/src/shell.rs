@@ -696,8 +696,27 @@ impl OrreryApp {
         let base_conv = cx.new(|cx| InputState::new(window, cx).placeholder("decimal number"));
         let case_conv = cx.new(|cx| InputState::new(window, cx).placeholder("text"));
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("text"));
+        let jwt = cx.new(|cx| InputState::new(window, cx).placeholder("eyJ… JWT"));
+        let timestamp =
+            cx.new(|cx| InputState::new(window, cx).placeholder("unix epoch or RFC 3339"));
+        let colour = cx.new(|cx| InputState::new(window, cx).placeholder("#1f6feb or r,g,b"));
+        let regex_pat = cx.new(|cx| InputState::new(window, cx).placeholder("pattern"));
+        let regex_text = cx.new(|cx| InputState::new(window, cx).placeholder("text to match"));
         let mut subs = Vec::new();
-        for input in [&search, &base64, &hash, &json, &base_conv, &case_conv, &url] {
+        for input in [
+            &search,
+            &base64,
+            &hash,
+            &json,
+            &base_conv,
+            &case_conv,
+            &url,
+            &jwt,
+            &timestamp,
+            &colour,
+            &regex_pat,
+            &regex_text,
+        ] {
             subs.push(cx.observe(input, |_this, _e, cx| cx.notify()));
         }
         self.devtools = Some(DevToolsState {
@@ -709,6 +728,11 @@ impl OrreryApp {
             base_conv,
             case_conv,
             url,
+            jwt,
+            timestamp,
+            colour,
+            regex_pat,
+            regex_text,
             _subs: subs,
         });
         cx.notify();
@@ -1813,7 +1837,7 @@ impl OrreryApp {
             cx,
             "CATEGORY",
             vec![
-                (None, "wrench", "All tools".into(), Some(7)),
+                (None, "wrench", "All tools".into(), Some(11)),
                 (
                     Some("generators".into()),
                     "box",
@@ -1828,7 +1852,13 @@ impl OrreryApp {
                 ),
                 (Some("hashing".into()), "hash", "Hashing".into(), Some(1)),
                 (Some("data".into()), "braces", "Data".into(), Some(2)),
-                (Some("text".into()), "type", "Text".into(), Some(1)),
+                (
+                    Some("convert".into()),
+                    "arrow-up-down",
+                    "Convert".into(),
+                    Some(3),
+                ),
+                (Some("text".into()), "type", "Text".into(), Some(2)),
             ],
         )
     }
