@@ -8,8 +8,10 @@ use gpui::{
     Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px, rgb,
 };
+use orrery_core::model::Host;
 use orrery_core::{inbox, launch};
 
+use crate::icon::brand;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
 
@@ -30,19 +32,26 @@ pub struct StarRow {
     pub stars: u32,
     pub language: SharedString,
     pub clone_url: SharedString,
-    pub url: SharedString, // host page
+    pub url: SharedString,  // host page
+    pub host: &'static str, // brand-icon name: "github" | "gitlab"
 }
 
 pub fn star_row(r: inbox::RemoteRepo) -> StarRow {
     let name = r.slug.rsplit('/').next().unwrap_or(&r.slug).to_string();
+    // Link to the repo on its actual host, not always github.com.
+    let (host, base) = match r.host {
+        Host::Github => ("github", "https://github.com"),
+        Host::Gitlab => ("gitlab", "https://gitlab.com"),
+    };
     StarRow {
-        url: format!("https://github.com/{}", r.slug).into(),
+        url: format!("{base}/{}", r.slug).into(),
         name: name.into(),
         slug: r.slug.into(),
         description: r.description.unwrap_or_default().into(),
         stars: r.stars,
         language: r.language.unwrap_or_default().into(),
         clone_url: r.clone_url.into(),
+        host,
     }
 }
 
@@ -51,6 +60,7 @@ pub fn render(
     cloned: &HashSet<SharedString>,
     cloning: &HashSet<SharedString>,
     filter: Option<&str>,
+    root: Option<&str>,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -69,6 +79,16 @@ pub fn render(
                 super::note("Nothing in this filter.", t).into_any_element()
             } else {
                 let mut col = div().flex().flex_col().gap(px(10.));
+                // Where a click-to-clone lands, so it's not a surprise.
+                if let Some(root) = root {
+                    col = col.child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(t.text_data_sm))
+                            .text_color(rgb(t.fg3))
+                            .child(SharedString::from(format!("Clones land in {root}"))),
+                    );
+                }
                 for r in shown {
                     col = col.child(star_card(
                         r,
@@ -105,6 +125,7 @@ fn star_card(
         .flex_row()
         .items_center()
         .gap(px(8.))
+        .child(brand(r.host, 14., t.fg2))
         .child(
             div()
                 .id(r.slug.clone())

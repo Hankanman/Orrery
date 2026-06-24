@@ -2213,6 +2213,7 @@ impl OrreryApp {
                     &cloned,
                     &self.explore_cloning,
                     self.view_filter.as_deref(),
+                    self.config.roots.first().map(|s| s.as_str()),
                     t,
                     &cx.entity(),
                 )
