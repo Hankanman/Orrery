@@ -79,6 +79,10 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> bool {
         });
     }
 
+    // KDE KRunner service. Self-contained — it reads the cached repo list and
+    // opens a match in the IDE directly, so it needs no channel back to the app.
+    orrery_platform::krunner::spawn();
+
     // System tray. Menu activations come back on the tray thread; forward the
     // app-level ones onto the channel (Open is handled inside the tray itself).
     let tray = {
