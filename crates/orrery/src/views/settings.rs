@@ -54,6 +54,8 @@ pub struct SettingsState {
     pub scan_depth: Entity<InputState>,
     /// Flash a "Saved" confirmation after a successful save.
     pub saved: bool,
+    /// Result line for the AI Test / Clear-cache actions.
+    pub ai_note: SharedString,
 }
 
 impl SettingsState {
@@ -86,6 +88,7 @@ impl SettingsState {
             }),
             draft: cfg.clone(),
             saved: false,
+            ai_note: SharedString::default(),
         }
     }
 }
@@ -350,6 +353,18 @@ fn ai_status_block(
             ),
             AiStatus::Pulling(name) => status_row("clock", format!("Pulling {name}…"), t.fg2, t),
         }))
+        .child(button("Test", t, {
+            let app = app.clone();
+            move |cx| {
+                app.update(cx, |this, cx| this.ai_test(cx));
+            }
+        }))
+        .child(button("Clear cache", t, {
+            let app = app.clone();
+            move |cx| {
+                app.update(cx, |this, cx| this.ai_clear_cache(cx));
+            }
+        }))
         .child(button("Refresh", t, {
             let app = app.clone();
             move |cx| {
@@ -357,20 +372,37 @@ fn ai_status_block(
             }
         }));
     block = block.child(head);
+    if !s.ai_note.is_empty() {
+        block = block.child(note_line(s.ai_note.clone(), t.fg2, t));
+    }
 
     if let AiStatus::Ready(models) = ai {
         if models.is_empty() {
             block = block.child(note_line("No models installed.".into(), t.fg3, t));
         } else {
+            block = block.child(note_line(
+                "Click a model to use it for chat.".into(),
+                t.fg3,
+                t,
+            ));
             for (name, size) in models {
+                // Clicking a model sets it as the chat model (a lightweight picker
+                // over the installed list — writes the field + draft).
+                let (app, ai_model, pick) = (app.clone(), s.ai_model.clone(), name.clone());
                 block = block.child(
                     div()
+                        .id(SharedString::from(format!("ai-model-{name}")))
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(8.))
+                        .px(px(6.))
+                        .py(px(3.))
+                        .rounded(px(t.r_sm))
                         .font_family("monospace")
                         .text_size(px(t.text_data_sm))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(t.surface_hover)))
                         .child(lucide("box", 12., t.fg3))
                         .child(
                             div()
@@ -380,7 +412,16 @@ fn ai_status_block(
                                 .text_color(rgb(t.fg1))
                                 .child(name.clone()),
                         )
-                        .child(super::muted_mono(size.clone(), t)),
+                        .child(super::muted_mono(size.clone(), t))
+                        .on_click(move |_ev, window, cx| {
+                            let pick = pick.clone();
+                            ai_model.update(cx, |st, cx| st.set_value(pick.clone(), window, cx));
+                            app.update(cx, |this, _cx| {
+                                if let Some(s) = &mut this.settings {
+                                    s.draft.ai_model = pick.to_string();
+                                }
+                            });
+                        }),
                 );
             }
         }

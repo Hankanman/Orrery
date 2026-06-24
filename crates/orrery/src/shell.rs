@@ -920,6 +920,57 @@ impl OrreryApp {
         .detach();
     }
 
+    /// Probe the AI backend with a tiny round-trip and report ok/latency in the
+    /// Settings AI note. A quick way to confirm the model actually responds.
+    pub fn ai_test(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = &mut self.settings {
+            s.ai_note = "Testing…".into();
+        }
+        cx.notify();
+        let model = self.config.ai_model.clone();
+        cx.spawn(async move |this, cx| {
+            let note = crate::task::run(async move {
+                let start = std::time::Instant::now();
+                match orrery_core::ai::generate(&model, "Reply with the single word: pong.").await {
+                    Ok(_) => format!("AI responded in {} ms", start.elapsed().as_millis()),
+                    Err(e) => format!("AI test failed: {e}"),
+                }
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(s) = &mut this.settings {
+                    s.ai_note = note.into();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Clear cached AI summaries + embeddings, reporting the counts in the
+    /// Settings AI note. Frees the semantic index and stale summaries.
+    pub fn ai_clear_cache(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { orrery_core::cache::clear_ai() })
+                .await;
+            let note = match result {
+                Ok((summaries, embeddings)) => {
+                    format!("Cleared {summaries} summaries, {embeddings} embeddings")
+                }
+                Err(e) => format!("Clear failed: {e}"),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(s) = &mut this.settings {
+                    s.ai_note = note.into();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// One-shot at launch: if AI is enabled and reachable, mark it ready and
     /// kick off the semantic index (so Ctrl+K works without opening Settings).
     pub fn ai_startup(&mut self, cx: &mut Context<Self>) {
