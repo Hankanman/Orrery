@@ -228,6 +228,11 @@ pub struct OrreryApp {
     pub cleanup: crate::views::cleanup::CleanupState,
     /// Agents view state (lazy; detected agent sessions on the machine).
     pub agents: crate::views::agents::AgentsState,
+    /// Repo ids (paths) with a live agent session — drives the card indicator.
+    /// Refreshed on rescan and by the Agents-view poll.
+    pub active_agents: std::collections::HashSet<SharedString>,
+    /// Whether the Agents-view poll loop is running (guards against duplicates).
+    pub agents_polling: bool,
     /// Slugs currently being cloned from the Explore view.
     pub explore_cloning: std::collections::HashSet<SharedString>,
     /// Settings editing session (draft config + field inputs); created on first
@@ -671,8 +676,13 @@ impl OrreryApp {
             View::Janitor if matches!(self.cleanup, views::cleanup::CleanupState::Idle) => {
                 self.load_cleanup(cx)
             }
-            View::Agents if matches!(self.agents, views::agents::AgentsState::Idle) => {
-                self.load_agents(cx)
+            View::Agents => {
+                if matches!(self.agents, views::agents::AgentsState::Idle) {
+                    self.load_agents(cx);
+                } else {
+                    // Already loaded once — just (re)start the live poll.
+                    self.start_agents_poll(cx);
+                }
             }
             View::Settings if self.settings.is_none() => self.open_settings(window, cx),
             View::Tools if self.devtools.is_none() => self.open_devtools(window, cx),
@@ -1167,10 +1177,23 @@ impl OrreryApp {
     }
 
     /// Scan the machine for running agent sessions (off the UI thread).
+    /// Initial load when the Agents view first opens: scan with the spinner, then
+    /// start the live poll.
     pub fn load_agents(&mut self, cx: &mut Context<Self>) {
+        self.scan_agents(true, cx);
+        self.start_agents_poll(cx);
+    }
+
+    /// Scan running agents off the UI thread, then update both the Agents list and
+    /// the `active_agents` set (which drives the card indicator). `loading` shows
+    /// the spinner; the poll passes `false` to refresh in place. Only repaints when
+    /// the active set changed or the Agents view is showing.
+    fn scan_agents(&mut self, loading: bool, cx: &mut Context<Self>) {
         use crate::views::agents::AgentsState;
-        self.agents = AgentsState::Loading;
-        cx.notify();
+        if loading {
+            self.agents = AgentsState::Loading;
+            cx.notify();
+        }
         let rows = self.rows.clone();
         let agent_command = self.config.agent_command.clone();
         cx.spawn(async move |this, cx| {
@@ -1179,9 +1202,46 @@ impl OrreryApp {
                 .spawn(async move { crate::views::agents::scan(&rows, &agent_command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let active: std::collections::HashSet<SharedString> =
+                    result.iter().map(|a| a.repo.clone()).collect();
+                let changed = active != this.active_agents;
+                this.active_agents = active;
                 this.agents = AgentsState::Ready(result);
-                cx.notify();
+                if changed || this.view == View::Agents {
+                    cx.notify();
+                }
             });
+        })
+        .detach();
+    }
+
+    /// Re-scan agents every 5s while the Agents view is open, so the list stays
+    /// live (terminated sessions drop off, new ones appear). Exits when the view
+    /// changes; restarted on re-entry by `maybe_load_view`.
+    fn start_agents_poll(&mut self, cx: &mut Context<Self>) {
+        if self.agents_polling {
+            return;
+        }
+        self.agents_polling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                let on_view = this
+                    .update(cx, |this, _| this.view == View::Agents)
+                    .unwrap_or(false);
+                if !on_view {
+                    let _ = this.update(cx, |this, _| this.agents_polling = false);
+                    break;
+                }
+                if this
+                    .update(cx, |this, cx| this.scan_agents(false, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
         })
         .detach();
     }
@@ -1192,19 +1252,7 @@ impl OrreryApp {
             cx.background_executor()
                 .spawn(async move { orrery_platform::agents::terminate(pid) })
                 .await;
-            let Ok((rows, agent_command)) = this.update(cx, |this, _| {
-                (this.rows.clone(), this.config.agent_command.clone())
-            }) else {
-                return;
-            };
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::views::agents::scan(&rows, &agent_command) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.agents = crate::views::agents::AgentsState::Ready(result);
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.scan_agents(false, cx));
         })
         .detach();
     }
@@ -1246,6 +1294,9 @@ impl OrreryApp {
                 this.roots = roots;
                 this.enrich_hosts(cx);
                 this.load_activity(cx);
+                // Refresh which repos have a live agent, so Mission Control shows
+                // the indicator without needing the Agents view open.
+                this.scan_agents(false, cx);
                 cx.notify();
             });
         })
@@ -2447,6 +2498,7 @@ impl OrreryApp {
                                 &entity,
                                 &ide,
                                 &agent,
+                                app.active_agents.contains(&app.rows[abs].id),
                             )
                             .into_any_element()
                         })
@@ -2474,7 +2526,8 @@ impl OrreryApp {
                             let mut cells: Vec<gpui::AnyElement> = visible[start..end]
                                 .iter()
                                 .map(|&i| {
-                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent)
+                                    let active = app.active_agents.contains(&app.rows[i].id);
+                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent, active)
                                         .into_any_element()
                                 })
                                 .collect();

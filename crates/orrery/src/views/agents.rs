@@ -210,6 +210,14 @@ fn agent_card(a: &AgentRow, now: i64, t: &Theme, app: &Entity<OrreryApp>) -> imp
                 .flex_row()
                 .items_center()
                 .gap(px(8.))
+                .child(action(
+                    "agent",
+                    "Re-open",
+                    a.repo.clone(),
+                    t,
+                    app,
+                    Act::Agent,
+                ))
                 .child(action("ide", "Open IDE", a.repo.clone(), t, app, Act::Ide))
                 .child(action(
                     "folder",
@@ -226,6 +234,7 @@ fn agent_card(a: &AgentRow, now: i64, t: &Theme, app: &Entity<OrreryApp>) -> imp
 
 #[derive(Clone, Copy)]
 enum Act {
+    Agent,
     Ide,
     Folder,
 }
@@ -255,6 +264,9 @@ fn action(
         .on_click(move |_ev, _win, cx| {
             let repo = repo.clone();
             app.update(cx, |this, _cx| match act {
+                Act::Agent => {
+                    let _ = orrery_core::launch::spawn(&this.config.agent_command, &repo);
+                }
                 Act::Ide => {
                     let _ = orrery_core::launch::launch(&this.config.ide_command, &repo);
                 }

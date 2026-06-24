@@ -89,6 +89,7 @@ pub fn card(
     app: &Entity<OrreryApp>,
     ide_cmd: &str,
     agent_cmd: &str,
+    active: bool,
 ) -> impl IntoElement {
     // ── head: language mark + name, and the (clickable) favorite star ──────
     let fav_star = {
@@ -133,7 +134,9 @@ pub fn card(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(t.fg0))
                 .child(lang_mark(&row.language, t))
-                .child(div().min_w(px(0.)).truncate().child(row.name.clone())),
+                .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
+                // Live agent session running in this repo.
+                .children(active.then(|| lucide("square-terminal", 13., t.clean))),
         )
         .child(fav_star);
 
@@ -349,6 +352,7 @@ pub(crate) fn list_item(
     app: &Entity<OrreryApp>,
     ide_cmd: &str,
     agent_cmd: &str,
+    active: bool,
 ) -> impl IntoElement {
     let fav_star = {
         let app = app.clone();
@@ -414,6 +418,8 @@ pub(crate) fn list_item(
                             .child(SharedString::from(format!("{} · {}", row.slug, row.path))),
                     ),
             )
+            // Live agent session running in this repo.
+            .children(active.then(|| lucide("square-terminal", 13., t.clean)))
     };
 
     // Status segments (branch / ahead-behind / dirty / stars / age).
