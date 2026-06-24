@@ -307,6 +307,16 @@ impl Default for GridState {
     }
 }
 
+/// Recent commit subject lines for a repo (newest first) — the input for the
+/// AI changelog / resume prompts. Empty on any git error.
+fn recent_summaries(id: &str, limit: usize) -> Vec<String> {
+    orrery_core::git_ops::recent_log(id, limit)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| c.summary)
+        .collect()
+}
+
 impl OrreryApp {
     /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
     /// async git load.
@@ -985,6 +995,102 @@ impl OrreryApp {
                     s.ai_note = note.into();
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drawer Changes tab: generate a commit message for the staged diff (gated
+    /// on `aiReady`). The suggestion lands in `drawer.commit_suggestion`.
+    pub fn drawer_generate_commit(&mut self, cx: &mut Context<Self>) {
+        if !self.services.ai_ready {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        self.drawer.commit_suggestion = Some("Generating…".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let id = repo.to_string();
+            let diff = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::staged_diff(&id).unwrap_or_default() })
+                .await;
+            let text = if diff.trim().is_empty() {
+                "Nothing staged — `git add` your changes first.".to_string()
+            } else {
+                crate::task::run(async move { orrery_core::ai::commit_message(&diff).await })
+                    .await
+                    .map(|m| m.trim().to_string())
+                    .unwrap_or_else(|e| format!("Generate failed: {e}"))
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo {
+                    this.drawer.commit_suggestion = Some(text.into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Drawer: generate a markdown changelog from recent commits (gated on
+    /// `aiReady`). Lands in `drawer.changelog`.
+    pub fn drawer_generate_changelog(&mut self, cx: &mut Context<Self>) {
+        if !self.services.ai_ready {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        self.drawer.changelog = Some("Generating…".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let id = repo.to_string();
+            let commits = cx
+                .background_executor()
+                .spawn(async move { recent_summaries(&id, 30) })
+                .await;
+            let text = crate::task::run(async move { orrery_core::ai::changelog(&commits).await })
+                .await
+                .unwrap_or_else(|e| format!("Changelog failed: {e}"));
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo {
+                    this.drawer.changelog = Some(text.into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Drawer Notes tab: generate an AI "what changed" catch-up from recent
+    /// commits (gated on `aiReady`). Lands in `drawer.notes.resume`.
+    pub fn drawer_generate_resume(&mut self, cx: &mut Context<Self>) {
+        if !self.services.ai_ready {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
+        if let Some(n) = &mut self.drawer.notes {
+            n.resume = Some("Generating…".into());
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let id = repo.to_string();
+            let commits = cx
+                .background_executor()
+                .spawn(async move { recent_summaries(&id, 30) })
+                .await;
+            let text =
+                crate::task::run(async move { orrery_core::ai::resume(&name, &commits).await })
+                    .await
+                    .map(|m| m.trim().to_string())
+                    .unwrap_or_else(|e| format!("Catch-up failed: {e}"));
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo
+                    && let Some(n) = &mut this.drawer.notes
+                {
+                    n.resume = Some(text.into());
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -2756,6 +2862,7 @@ impl OrreryApp {
                         &self.drawer,
                         &cmds.0,
                         &cmds.1,
+                        self.services.ai_ready,
                     )
                     .into_any_element(),
                 )

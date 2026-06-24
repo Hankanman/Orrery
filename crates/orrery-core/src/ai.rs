@@ -380,6 +380,32 @@ Commits:\n{}\n\nWhat changed:",
     )
 }
 
+/// Run `prompt` through the configured chat model on the active backend.
+/// Picks the configured model if installed, else the smallest non-embed —
+/// returns an error when AI is unreachable or no model is installed, so callers
+/// degrade gracefully (the `aiReady` contract).
+async fn generate_with_model(prompt: &str) -> Result<String, String> {
+    let cfg = crate::config::load();
+    let models = installed_models().await;
+    let model = pick_model(&cfg.ai_model, &models).ok_or("no AI model installed")?;
+    generate(&model, prompt).await
+}
+
+/// Generate a Conventional Commit message for a staged diff.
+pub async fn commit_message(diff: &str) -> Result<String, String> {
+    generate_with_model(&commit_prompt(diff)).await
+}
+
+/// Summarize commit subjects into a markdown changelog.
+pub async fn changelog(commits: &[String]) -> Result<String, String> {
+    generate_with_model(&changelog_prompt(commits)).await
+}
+
+/// A 2–3 sentence catch-up on what changed in a repo since the last look.
+pub async fn resume(repo_name: &str, commits: &[String]) -> Result<String, String> {
+    generate_with_model(&resume_prompt(repo_name, commits)).await
+}
+
 /// Prompt for a short daily briefing across recently-active repos.
 pub fn briefing_prompt(lines: &[String]) -> String {
     format!(
