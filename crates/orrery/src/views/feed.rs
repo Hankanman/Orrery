@@ -35,6 +35,8 @@ pub struct FeedRow {
     pub age: SharedString,
     pub prerelease: bool,
     pub url: SharedString,
+    /// Newer than the last time the Feed was viewed (drives the "New" filter).
+    pub is_new: bool,
 }
 
 fn action(kind: &str) -> &'static str {
@@ -47,7 +49,7 @@ fn action(kind: &str) -> &'static str {
     }
 }
 
-pub fn feed_row(f: inbox::FeedItem, now: i64) -> FeedRow {
+pub fn feed_row(f: inbox::FeedItem, now: i64, since: i64) -> FeedRow {
     let icon = match f.kind.as_str() {
         "release" => "tag",
         "starred" => "star",
@@ -74,16 +76,18 @@ pub fn feed_row(f: inbox::FeedItem, now: i64) -> FeedRow {
         age: data::rel_age(f.timestamp, now).into(),
         prerelease: f.prerelease,
         url: f.url.into(),
+        is_new: f.timestamp > since,
     }
 }
 
-/// Does `row` pass the sidebar's activity-type filter? `Some("release")` keeps
-/// releases; `Some("activity")` keeps everything else; `None` keeps all.
-fn passes(kind: &str, filter: Option<&str>) -> bool {
+/// Does `row` pass the sidebar's activity-type filter? Each filter key maps to a
+/// source event kind; `Some("new")` keeps items newer than the last visit;
+/// `None` keeps everything.
+fn passes(row: &FeedRow, filter: Option<&str>) -> bool {
     match filter {
-        Some("release") => kind == "release",
-        Some("activity") => kind != "release",
-        _ => true,
+        None => true,
+        Some("new") => row.is_new,
+        Some(kind) => row.kind.as_ref() == kind,
     }
 }
 
@@ -100,7 +104,7 @@ pub fn render(
             super::note("Nothing new in your feed.", t).into_any_element()
         }
         FeedState::Ready(rows) => {
-            let shown: Vec<&FeedRow> = rows.iter().filter(|r| passes(&r.kind, filter)).collect();
+            let shown: Vec<&FeedRow> = rows.iter().filter(|r| passes(r, filter)).collect();
             if shown.is_empty() {
                 super::note("Nothing in this filter.", t).into_any_element()
             } else {
@@ -136,6 +140,9 @@ fn feed_item(r: &FeedRow, t: &Theme) -> impl IntoElement {
     }
     if r.prerelease {
         top = top.child(super::tag("pre-release", t.behind, t));
+    }
+    if r.is_new {
+        top = top.child(super::tag("new", t.accent_bright, t));
     }
     top = top
         .child(div().flex_1())

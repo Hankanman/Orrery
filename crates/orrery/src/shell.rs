@@ -1063,12 +1063,25 @@ impl OrreryApp {
         self.feed = FeedState::Loading;
         cx.notify();
         let now = crate::data::now_unix();
+        // Items newer than the last time the Feed was viewed are "new". Read the
+        // mark before the load, then advance it to now so the next visit compares
+        // against this one.
+        let since = orrery_core::cache::get_meta("feed_seen_at")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
         cx.spawn(async move |this, cx| {
             let res = crate::task::run(async { orrery_core::inbox::github_feed().await }).await;
             let _ = this.update(cx, |this, cx| {
                 this.feed = match res {
                     Ok(items) => {
-                        FeedState::Ready(items.into_iter().map(|f| feed_row(f, now)).collect())
+                        cx.background_executor()
+                            .spawn(async move {
+                                orrery_core::cache::set_meta("feed_seen_at", &now.to_string());
+                            })
+                            .detach();
+                        FeedState::Ready(
+                            items.into_iter().map(|f| feed_row(f, now, since)).collect(),
+                        )
                     }
                     Err(e) => FeedState::Error(e.into()),
                 };
@@ -1761,30 +1774,49 @@ impl OrreryApp {
     /// Feed: filter by activity type.
     fn feed_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::views::feed::FeedState;
-        let (total, releases) = match &self.feed {
-            FeedState::Ready(rows) => (
-                rows.len(),
-                rows.iter().filter(|r| r.kind.as_ref() == "release").count(),
-            ),
-            _ => (0, 0),
+        let rows = match &self.feed {
+            FeedState::Ready(rows) => rows.as_slice(),
+            _ => &[],
         };
+        let total = rows.len();
+        let count = |kind: &str| rows.iter().filter(|r| r.kind.as_ref() == kind).count();
+        let new = rows.iter().filter(|r| r.is_new).count();
         self.category_panel(
             t,
             cx,
             "FILTER",
             vec![
                 (None, "rss", "All".into(), Some(total)),
+                (Some("new".into()), "sparkles", "New".into(), Some(new)),
                 (
                     Some("release".into()),
                     "tag",
                     "Releases".into(),
-                    Some(releases),
+                    Some(count("release")),
                 ),
                 (
-                    Some("activity".into()),
+                    Some("starred".into()),
                     "star",
-                    "Activity".into(),
-                    Some(total - releases),
+                    "Stars".into(),
+                    Some(count("starred")),
+                ),
+                (
+                    Some("created".into()),
+                    "box",
+                    "New repos".into(),
+                    Some(count("created")),
+                ),
+                (
+                    Some("forked".into()),
+                    "git-branch",
+                    "Forks".into(),
+                    Some(count("forked")),
+                ),
+                (
+                    Some("public".into()),
+                    "globe",
+                    "Open-sourced".into(),
+                    Some(count("public")),
                 ),
             ],
         )
