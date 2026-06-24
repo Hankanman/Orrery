@@ -77,10 +77,18 @@ pub struct PrRow {
     pub url: SharedString,
     pub draft: bool,
     pub author: SharedString,
-    pub refs: SharedString,      // "head → base"
-    pub mergeable: SharedString, // clean | conflicting | unknown
-    pub review: SharedString,    // approved | changes_requested | review_required | none
-    pub checks: SharedString,    // success | failure | pending | none
+    pub refs: SharedString,         // "head → base"
+    pub mergeable: SharedString,    // clean | conflicting | unknown
+    pub review: SharedString,       // approved | changes_requested | review_required | none
+    pub checks: SharedString,       // success | failure | pending | none (rollup)
+    pub check_runs: Vec<CheckItem>, // individual status checks / CI contexts
+}
+
+/// One status check on a PR, for the per-check breakdown under the rollup.
+pub struct CheckItem {
+    pub name: SharedString,
+    pub state: SharedString, // success | failure | pending | neutral
+    pub url: Option<SharedString>,
 }
 
 /// Lazy-loaded PR panel state (network).
@@ -443,6 +451,15 @@ fn pr_row(p: inbox::PrDetail) -> PrRow {
         mergeable: p.mergeable.into(),
         review: p.review_decision.into(),
         checks: p.checks_state.into(),
+        check_runs: p
+            .checks
+            .into_iter()
+            .map(|c| CheckItem {
+                name: c.name.into(),
+                state: c.state.into(),
+                url: c.url.map(Into::into),
+            })
+            .collect(),
     }
 }
 
@@ -1151,6 +1168,16 @@ fn diff_block(diff: &str, t: &Theme) -> impl IntoElement {
     block
 }
 
+/// Pick an icon for an individual check state.
+fn check_icon(state: &str) -> &'static str {
+    match state {
+        "success" => "circle-check",
+        "failure" => "circle-alert",
+        "pending" => "clock",
+        _ => "circle-dot",
+    }
+}
+
 /// Colour a PR state string (checks / mergeable / review) by sentiment.
 fn state_color(s: &str, t: &Theme) -> u32 {
     match s {
@@ -1245,6 +1272,53 @@ fn pr_card(
         ))
         .child(seg_str("eye", &pr.review, state_color(&pr.review, t)));
 
+    // Per-check breakdown: one clickable chip per status check / CI context,
+    // so you can see which check failed and jump to its run (not just the rollup).
+    let check_runs = (!pr.check_runs.is_empty()).then(|| {
+        let mut wrap = div().flex().flex_row().flex_wrap().gap(px(6.));
+        for c in &pr.check_runs {
+            let color = state_color(&c.state, t);
+            let chip = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .px(px(7.))
+                .py(px(3.))
+                .rounded(px(t.r_sm))
+                .bg(rgb(t.button_bg))
+                .text_color(rgb(color))
+                .child(lucide(check_icon(&c.state), 12., color))
+                .child(
+                    div()
+                        .font_family(MONO)
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg2))
+                        .child(c.name.clone()),
+                );
+            // Clickable (jumps to the CI run) only when the check carries a URL.
+            let chip = match &c.url {
+                Some(url) => {
+                    let (url, hov) = (url.clone(), t.surface_hover);
+                    chip.id(SharedString::from(format!(
+                        "check-{}-{}",
+                        pr.number, c.name
+                    )))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgb(hov)))
+                    .child(lucide("external-link", 11., t.fg3))
+                    .on_click(move |_ev, _win, _cx| {
+                        let _ = launch::open(&url);
+                    })
+                    .into_any_element()
+                }
+                None => chip.into_any_element(),
+            };
+            wrap = wrap.child(chip);
+        }
+        wrap
+    });
+
     // Actions: approve + each allowed merge method.
     let mut actions = div()
         .flex()
@@ -1301,6 +1375,9 @@ fn pr_card(
         .border_color(rgb(t.border))
         .child(title)
         .child(states);
+    if let Some(check_runs) = check_runs {
+        card = card.child(check_runs);
+    }
     if !pr.author.is_empty() {
         card = card.child(
             div()

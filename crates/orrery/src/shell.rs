@@ -1797,8 +1797,12 @@ impl OrreryApp {
             InboxState::Ready(d) => d.items.iter().filter(|i| i.kind.as_ref() == kind).count(),
             _ => 0,
         };
+        let notifications = match &self.inbox {
+            InboxState::Ready(d) => d.notifications.len(),
+            _ => 0,
+        };
         let total = match &self.inbox {
-            InboxState::Ready(d) => d.items.len(),
+            InboxState::Ready(d) => d.items.len() + d.notifications.len(),
             _ => 0,
         };
         self.category_panel(
@@ -1824,6 +1828,12 @@ impl OrreryApp {
                     "circle-dot",
                     "Issues".into(),
                     Some(count("issue")),
+                ),
+                (
+                    Some("notification".into()),
+                    "bell",
+                    "Notifications".into(),
+                    Some(notifications),
                 ),
             ],
         )
