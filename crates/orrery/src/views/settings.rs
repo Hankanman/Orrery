@@ -3,8 +3,9 @@
 //! A draft `AppConfig` (toggles / scan depth / roots) lives on `OrreryApp`
 //! alongside text-input entities for the string fields; "Save & rescan" reads
 //! them back, persists via `config::save`, and re-scans. This first cut covers
-//! roots, launchers, AI toggles/endpoints, and notifications, plus the live
-//! network panels: GitHub device-flow login and AI (Ollama) status/model-pull.
+//! roots, launchers, AI backend/endpoints, and notifications, plus the live
+//! panels: GitHub device-flow login and AI status — Ollama (host + model pull)
+//! or llama.cpp (server path + GGUF download), switchable in-app.
 
 use gpui::{
     AppContext, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -47,6 +48,10 @@ pub struct SettingsState {
     pub ollama_host: Entity<InputState>,
     pub ai_model: Entity<InputState>,
     pub embed_model: Entity<InputState>,
+    /// llama.cpp: path override for the `llama-server` binary.
+    pub llama_server: Entity<InputState>,
+    /// llama.cpp: a GGUF model URL to download.
+    pub llama_url: Entity<InputState>,
     pub client_id: Entity<InputState>,
     pub ignore: Entity<InputState>,
     pub add_root: Entity<InputState>,
@@ -75,6 +80,13 @@ impl SettingsState {
             ollama_host: field(window, cx, "http://localhost:11434", &cfg.ollama_host),
             ai_model: field(window, cx, "model name", &cfg.ai_model),
             embed_model: field(window, cx, "embed model", &cfg.embed_model),
+            llama_server: field(
+                window,
+                cx,
+                "llama-server (auto-detected)",
+                &cfg.llama_server_path,
+            ),
+            llama_url: field(window, cx, "https://…/model.gguf", ""),
             client_id: field(window, cx, "GitHub OAuth client id", &cfg.github_client_id),
             ignore: field(window, cx, "node_modules, .cache", &cfg.ignore.join(", ")),
             add_root: field(window, cx, "~/dev", ""),
@@ -293,13 +305,19 @@ fn launchers_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
         .child(labeled("Agent command", s.agent.clone(), t))
 }
 
+/// True when the configured backend string selects the llama.cpp sidecar.
+fn backend_is_llama(backend: &str) -> bool {
+    matches!(backend, "llamaCpp" | "llama_cpp" | "llamacpp")
+}
+
 fn ai_section(
     s: &SettingsState,
     ai: &AiStatus,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
-    section(t, "AI & search")
+    let is_llama = backend_is_llama(&s.draft.ai_backend);
+    let mut sec = section(t, "AI & search")
         .child(toggle(
             "Enable AI features",
             s.draft.ai_enabled,
@@ -311,16 +329,118 @@ fn ai_section(
                 }
             },
         ))
-        .child(labeled("Ollama host", s.ollama_host.clone(), t))
-        .child(labeled("Chat model", s.ai_model.clone(), t))
-        .child(labeled("Embedding model", s.embed_model.clone(), t))
-        .child(labeled("GitHub OAuth client id", s.client_id.clone(), t))
-        .child(ai_status_block(s, ai, t, app))
+        .child(backend_picker(is_llama, t, app));
+    if is_llama {
+        sec = sec
+            .child(labeled("llama-server path", s.llama_server.clone(), t))
+            .child(llama_download_row(s, t, app))
+            .child(llama_model_line(s, t));
+    } else {
+        sec = sec
+            .child(labeled("Ollama host", s.ollama_host.clone(), t))
+            .child(labeled("Chat model", s.ai_model.clone(), t))
+            .child(labeled("Embedding model", s.embed_model.clone(), t));
+    }
+    sec.child(labeled("GitHub OAuth client id", s.client_id.clone(), t))
+        .child(ai_status_block(s, is_llama, ai, t, app))
+}
+
+/// Two-way Ollama / llama.cpp backend picker. Takes effect on Save.
+fn backend_picker(is_llama: bool, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let opt = |label: &'static str, llama: bool| {
+        let app = app.clone();
+        let on = llama == is_llama;
+        div()
+            .id(label)
+            .px(px(12.))
+            .py(px(6.))
+            .rounded(px(t.r_sm))
+            .bg(rgb(if on { t.accent_wash } else { t.button_bg }))
+            .border_1()
+            .border_color(rgb(if on { t.primary } else { t.border }))
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(if on { t.fg0 } else { t.fg2 }))
+            .cursor_pointer()
+            .child(label)
+            .on_click(move |_ev, _win, cx| {
+                app.update(cx, |this, cx| {
+                    if let Some(s) = &mut this.settings {
+                        s.draft.ai_backend = if llama {
+                            "llamaCpp".into()
+                        } else {
+                            "ollama".into()
+                        };
+                    }
+                    cx.notify();
+                });
+            })
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(field_label("Backend", t))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(6.))
+                .child(opt("Ollama", false))
+                .child(opt("llama.cpp", true)),
+        )
+}
+
+/// GGUF download row: a URL field + a Download button (progress shows in the AI
+/// note line below). Only shown for the llama.cpp backend.
+fn llama_download_row(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let (app, url_input) = (app.clone(), s.llama_url.clone());
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(field_label("Download GGUF model", t))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(div().flex_1().child(Input::new(&s.llama_url)))
+                .child(button("Download", t, move |cx| {
+                    let url = url_input.read(cx).value().to_string();
+                    app.update(cx, |this, cx| this.llama_download(url, cx));
+                })),
+        )
+}
+
+/// Read-only display of the currently-selected GGUF model.
+fn llama_model_line(s: &SettingsState, t: &Theme) -> impl IntoElement {
+    let sel = s
+        .draft
+        .llama_model_path
+        .rsplit('/')
+        .next()
+        .filter(|x| !x.is_empty())
+        .unwrap_or("none — download or pick a model below");
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .child(field_label("Selected model", t))
+        .child(
+            div()
+                .font_family("monospace")
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg1))
+                .child(SharedString::from(sel.to_string())),
+        )
 }
 
 /// The live AI-backend status row + installed models + refresh/pull actions.
 fn ai_status_block(
     s: &SettingsState,
+    is_llama: bool,
     ai: &AiStatus,
     t: &Theme,
     app: &Entity<OrreryApp>,
@@ -380,14 +500,10 @@ fn ai_status_block(
         if models.is_empty() {
             block = block.child(note_line("No models installed.".into(), t.fg3, t));
         } else {
-            block = block.child(note_line(
-                "Click a model to use it for chat.".into(),
-                t.fg3,
-                t,
-            ));
+            block = block.child(note_line("Click a model to use it.".into(), t.fg3, t));
             for (name, size) in models {
-                // Clicking a model sets it as the chat model (a lightweight picker
-                // over the installed list — writes the field + draft).
+                // Clicking a model selects it: the GGUF path for llama.cpp, or the
+                // chat-model name for Ollama (a lightweight picker over the list).
                 let (app, ai_model, pick) = (app.clone(), s.ai_model.clone(), name.clone());
                 block = block.child(
                     div()
@@ -415,19 +531,32 @@ fn ai_status_block(
                         .child(super::muted_mono(size.clone(), t))
                         .on_click(move |_ev, window, cx| {
                             let pick = pick.clone();
-                            ai_model.update(cx, |st, cx| st.set_value(pick.clone(), window, cx));
-                            app.update(cx, |this, _cx| {
-                                if let Some(s) = &mut this.settings {
-                                    s.draft.ai_model = pick.to_string();
-                                }
-                            });
+                            if is_llama {
+                                let path = orrery_core::llama::models_dir()
+                                    .map(|d| d.join(pick.as_ref()).to_string_lossy().into_owned());
+                                app.update(cx, |this, cx| {
+                                    if let (Some(s), Some(path)) = (&mut this.settings, path) {
+                                        s.draft.llama_model_path = path;
+                                    }
+                                    cx.notify();
+                                });
+                            } else {
+                                ai_model
+                                    .update(cx, |st, cx| st.set_value(pick.clone(), window, cx));
+                                app.update(cx, |this, _cx| {
+                                    if let Some(s) = &mut this.settings {
+                                        s.draft.ai_model = pick.to_string();
+                                    }
+                                });
+                            }
                         }),
                 );
             }
         }
-        // Pull the configured (last-saved) chat model.
+        // Ollama can pull the configured chat model from the registry; the
+        // llama.cpp backend downloads GGUFs via the field above instead.
         let model = s.draft.ai_model.clone();
-        if !model.trim().is_empty() {
+        if !is_llama && !model.trim().is_empty() {
             block = block.child(div().child(button(&format!("Pull \"{model}\""), t, {
                 let app = app.clone();
                 move |cx| {

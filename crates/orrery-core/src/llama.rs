@@ -134,6 +134,68 @@ pub fn available() -> bool {
     server_binary().is_some() && model_path().is_some()
 }
 
+/// Download a GGUF model from `url` into [`models_dir`], reporting
+/// `(downloaded, total)` bytes via `on_progress`. Streams to a `.part` file and
+/// renames on success; the partial is removed on any error. Returns the final
+/// path. `total` is 0 when the server sends no Content-Length.
+pub async fn download_model(
+    url: &str,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<String, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    // Derive the filename from the URL path (strip any query/fragment).
+    let name = url
+        .rsplit('/')
+        .next()
+        .map(|s| s.split(['?', '#']).next().unwrap_or(s))
+        .filter(|s| !s.is_empty())
+        .ok_or("could not derive a filename from the URL")?;
+    if !name.to_lowercase().ends_with(".gguf") {
+        return Err("URL must point to a .gguf file".into());
+    }
+    let dir = models_dir().ok_or("no models directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let final_path = dir.join(name);
+    let part_path = dir.join(format!("{name}.part"));
+
+    let resp = client().get(url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("download failed: HTTP {}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+
+    let mut file = std::fs::File::create(&part_path).map_err(|e| e.to_string())?;
+    let mut downloaded: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part_path);
+                return Err(e.to_string());
+            }
+        };
+        if let Err(e) = file.write_all(&chunk) {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(e.to_string());
+        }
+        downloaded += chunk.len() as u64;
+        on_progress(downloaded, total);
+    }
+    if let Err(e) = file.flush() {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(e.to_string());
+    }
+    drop(file);
+    std::fs::rename(&part_path, &final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&part_path);
+        e.to_string()
+    })?;
+    Ok(final_path.to_string_lossy().into_owned())
+}
+
 /// Downloaded GGUF models as (filename, size_bytes).
 pub fn installed_models() -> Vec<(String, u64)> {
     let Some(dir) = models_dir() else {
