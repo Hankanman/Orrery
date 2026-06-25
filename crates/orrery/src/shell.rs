@@ -1000,6 +1000,81 @@ impl OrreryApp {
         .detach();
     }
 
+    /// Download a GGUF model for the llama.cpp backend, streaming progress into
+    /// the Settings AI note. The file lands in the app-data models dir; on
+    /// success the model list refreshes so it can be selected.
+    pub fn llama_download(&mut self, url: String, cx: &mut Context<Self>) {
+        let url = url.trim().to_string();
+        let note = |this: &mut Self, msg: SharedString| {
+            if let Some(s) = &mut this.settings {
+                s.ai_note = msg;
+            }
+        };
+        if url.is_empty() {
+            note(self, "Enter a model URL to download.".into());
+            cx.notify();
+            return;
+        }
+        note(self, "Starting download…".into());
+        cx.notify();
+
+        // Progress messages flow from the (core-runtime) download callback to the
+        // UI over a channel — the live-wiring pattern, since the callback can't
+        // touch the app entity directly.
+        let (tx, rx) = async_channel::unbounded::<SharedString>();
+        cx.spawn(async move |this, cx| {
+            while let Ok(msg) = rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if let Some(s) = &mut this.settings {
+                            s.ai_note = msg;
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            let tx_progress = tx.clone();
+            let result = crate::task::run(async move {
+                let mut last_pct = u64::MAX;
+                orrery_core::llama::download_model(&url, move |downloaded, total| {
+                    let msg = match (downloaded * 100).checked_div(total) {
+                        Some(pct) => {
+                            if pct == last_pct {
+                                return; // throttle to whole-percent steps
+                            }
+                            last_pct = pct;
+                            format!(
+                                "Downloading… {pct}% ({} / {})",
+                                crate::data::human_bytes(downloaded),
+                                crate::data::human_bytes(total)
+                            )
+                        }
+                        None => format!("Downloading… {}", crate::data::human_bytes(downloaded)),
+                    };
+                    let _ = tx_progress.try_send(msg.into());
+                })
+                .await
+            })
+            .await;
+            let final_msg = match result {
+                Ok(path) => format!("Downloaded {}", path.rsplit('/').next().unwrap_or(&path)),
+                Err(e) => format!("Download failed: {e}"),
+            };
+            let _ = tx.send(final_msg.into()).await;
+            drop(tx); // close the channel so the drain task ends
+            // Pick up the new model in the installed list.
+            let _ = this.update(cx, |this, cx| this.ai_refresh(cx));
+        })
+        .detach();
+    }
+
     /// Drawer Changes tab: generate a commit message for the staged diff (gated
     /// on `aiReady`). The suggestion lands in `drawer.commit_suggestion`.
     pub fn drawer_generate_commit(&mut self, cx: &mut Context<Self>) {
@@ -1215,6 +1290,7 @@ impl OrreryApp {
         draft.ollama_host = s.ollama_host.read(cx).value().to_string();
         draft.ai_model = s.ai_model.read(cx).value().to_string();
         draft.embed_model = s.embed_model.read(cx).value().to_string();
+        draft.llama_server_path = s.llama_server.read(cx).value().to_string();
         draft.github_client_id = s.client_id.read(cx).value().to_string();
         draft.ignore = s
             .ignore

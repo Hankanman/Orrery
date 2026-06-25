@@ -25,9 +25,10 @@ fn active_backend() -> Backend {
 }
 
 // ── Backend-dispatching entry points ───────────────────────────────────────
-// Each delegates to the active backend. The llama.cpp arms are stubs until #21
-// PR2 lands its sidecar implementation — they report "unavailable" so the UI
-// degrades exactly as it does when Ollama is down.
+// Each delegates to the active backend. The llama.cpp arms drive the bundled
+// `llama-server` sidecar (see `crate::llama`); embeddings stay Ollama-only, and
+// model "pull" is a GGUF download from Settings rather than an Ollama registry
+// pull. All degrade to "unavailable" when the backend isn't reachable.
 
 /// Is the active backend reachable?
 pub async fn available() -> bool {

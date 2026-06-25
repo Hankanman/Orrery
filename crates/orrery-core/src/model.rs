@@ -115,8 +115,8 @@ pub struct AppConfig {
     /// Whether to generate local AI summaries.
     #[serde(default = "default_true")]
     pub ai_enabled: bool,
-    /// Which inference backend serves AI features: "ollama" (default, HTTP) or
-    /// "llamaCpp" (bundled llama.cpp sidecar). See #21.
+    /// Which inference backend serves AI features: "llamaCpp" (default, bundled
+    /// llama.cpp sidecar) or "ollama" (HTTP). See #21.
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
     /// Optional override path to the `llama-server` binary. Empty → auto-discover
@@ -148,7 +148,7 @@ pub struct AppConfig {
 }
 
 pub(crate) fn default_ai_backend() -> String {
-    "ollama".to_string()
+    "llamaCpp".to_string()
 }
 
 pub(crate) fn default_ai_model() -> String {
