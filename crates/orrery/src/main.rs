@@ -55,11 +55,11 @@ fn main() {
     }
 
     let now = data::now_unix();
-    let (rows, roots) = data::load(now);
+    let snap = data::load(now);
     eprintln!(
         "[native] loaded {} repos across {} roots",
-        rows.len(),
-        roots
+        snap.rows.len(),
+        snap.roots
     );
     // Borrow the desktop's accent colour (KDE/portal) so the app harmonises
     // with the user's theme — the design system's runtime accent override.
@@ -108,11 +108,14 @@ fn main() {
                         let (tray_active, watcher) = live::spawn(cx);
                         OrreryApp {
                             view: View::Grid,
-                            rows,
-                            roots,
+                            rows: snap.rows,
+                            roots: snap.roots,
+                            repos: snap.repos,
                             theme,
                             config,
                             attention: Vec::new(),
+                            attention_items: Vec::new(),
+                            attention_by_repo: Default::default(),
                             overlay: None,
                             drawer: Default::default(),
                             inbox: Default::default(),
@@ -151,6 +154,11 @@ fn main() {
                     // background, so Ctrl+K can search by meaning. Also kick off a
                     // host-enrichment pass so cards fill in stars/visibility.
                     view.update(cx, |this, cx| {
+                        // First attention pass from the launch snapshot's local
+                        // git facts (dirty/ahead/behind), so badges and card
+                        // dots are right on the first paint; host/inbox/agent
+                        // facts refine it as their sources load.
+                        this.recompute_attention();
                         this.ai_startup(cx);
                         this.enrich_hosts(cx);
                         this.load_activity(cx);

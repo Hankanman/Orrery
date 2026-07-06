@@ -111,13 +111,12 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::Wa
                 Signal::ReposChanged => {
                     // The git scan is slow; run it on the background pool and
                     // only touch the entity with the finished rows.
-                    let (rows, roots) = cx
+                    let snap = cx
                         .background_executor()
                         .spawn(async { data::rescan() })
                         .await;
                     let applied = this.update(cx, |app, cx| {
-                        app.rows = rows;
-                        app.roots = roots;
+                        app.apply_snapshot(snap);
                         // New/changed repos → refresh the semantic index (cheap
                         // when unchanged; a no-op unless AI is ready) and host
                         // enrichment (skips repos still within the cache TTL).

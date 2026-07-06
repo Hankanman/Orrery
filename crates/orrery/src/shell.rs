@@ -12,6 +12,7 @@ use gpui::{
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
+use orrery_core::attention::{AttentionItem, AttentionKind, Severity};
 use orrery_core::model::AppConfig;
 
 use crate::card::card;
@@ -48,8 +49,9 @@ pub enum RepoFilter {
     Ahead,
     Starred,
     Stale,
-    /// Repos that want a look: uncommitted, or ahead/behind upstream. Toolbar-
-    /// only (not a chip), driven by the "Attention" button.
+    /// Repos with at least one attention item (`orrery_core::attention`) —
+    /// dirty/unpushed, review requests, prunable branches, agent sessions, ….
+    /// Toolbar-only (not a chip), driven by the "Attention" button.
     Attention,
 }
 
@@ -92,8 +94,14 @@ impl RepoFilter {
         }
     }
 
-    /// Does `row` pass this filter?
-    fn matches(self, r: &Row) -> bool {
+    /// Does `row` pass this filter? `attention` is the app's per-repo severity
+    /// lookup (`OrreryApp::attention_by_repo`) — only the Attention filter
+    /// consults it.
+    fn matches(
+        self,
+        r: &Row,
+        attention: &std::collections::HashMap<SharedString, Severity>,
+    ) -> bool {
         use orrery_core::model::Activity;
         match self {
             RepoFilter::All => true,
@@ -103,7 +111,7 @@ impl RepoFilter {
             RepoFilter::Ahead => r.ahead > 0,
             RepoFilter::Starred => r.favorite,
             RepoFilter::Stale => r.activity == Activity::Stale,
-            RepoFilter::Attention => r.dirty > 0 || r.ahead > 0 || r.behind > 0,
+            RepoFilter::Attention => attention.contains_key(&r.id),
         }
     }
 }
@@ -211,11 +219,24 @@ pub struct OrreryApp {
     pub view: View,
     pub rows: Vec<Row>,
     pub roots: usize,
+    /// The raw core snapshot behind `rows` — the attention model's local-git
+    /// input (host/slug/git facts the flat `Row` doesn't carry). Updated in
+    /// lockstep with `rows` via [`Self::apply_snapshot`].
+    pub repos: Vec<orrery_core::model::Repo>,
     pub theme: Rc<Theme>,
     pub config: AppConfig,
     /// Current attention glance lines (PRs/reviews/CI) from the background
-    /// poller — drives the Inbox nav badge. Empty until the first poll lands.
+    /// poller — the Inbox nav badge's fallback until the inbox itself loads.
+    /// Empty until the first poll lands.
     pub attention: Vec<String>,
+    /// The ranked "needs you" list from `orrery_core::attention::compute`
+    /// (Urgent first). Recomputed on each source update — rescan, inbox load,
+    /// cleanup scan, agents poll — never per frame.
+    pub attention_items: Vec<AttentionItem>,
+    /// Highest severity per local repo id, derived from `attention_items` in
+    /// [`Self::recompute_attention`] — the grid Attention filter + card-dot
+    /// lookup.
+    pub attention_by_repo: std::collections::HashMap<SharedString, Severity>,
     /// The modal layered over the active view, if any (drawer/palette/dialog).
     pub overlay: Option<Overlay>,
     /// Async-loaded git data for the open drawer (branches/commits/worktrees).
@@ -335,6 +356,69 @@ fn recent_summaries(id: &str, limit: usize) -> Vec<String> {
 }
 
 impl OrreryApp {
+    /// Install a fresh fleet snapshot (rows + raw repos + root count) and
+    /// recompute the attention model from it. Every path that reloads `rows`
+    /// goes through here, so the attention surfaces (nav badges, grid filter,
+    /// card dots) never go stale relative to the grid.
+    pub fn apply_snapshot(&mut self, snap: crate::data::Snapshot) {
+        self.rows = snap.rows;
+        self.roots = snap.roots;
+        self.repos = snap.repos;
+        self.recompute_attention();
+    }
+
+    /// Recompute the ranked attention list (and the per-repo severity lookup)
+    /// from what the app already holds. Pure and cheap — runs on the
+    /// foreground after each source update; no I/O or polling happens here.
+    ///
+    /// Freshness follows source freshness: local git facts refresh with every
+    /// (re)scan, inbox facts with each Inbox load, prunable counts with each
+    /// Cleanup scan, agent sessions with the agents poll — and facts from a
+    /// lazy view are simply absent until it has loaded. CI facts stay empty
+    /// for now: there's no central CI poll yet (`inbox::github_ci` is fetched
+    /// per-drawer), so `CiFailing` items arrive with a later #183 workstream.
+    pub fn recompute_attention(&mut self) {
+        use orrery_core::attention::{self, AgentFact, PrunableFact};
+        let inbox: &[orrery_core::inbox::InboxItem] = match &self.inbox {
+            crate::views::inbox::InboxState::Ready(d) => &d.raw,
+            _ => &[],
+        };
+        let prunable: Vec<PrunableFact> = match &self.cleanup {
+            crate::views::cleanup::CleanupState::Ready(repos) => repos
+                .iter()
+                .map(|r| PrunableFact {
+                    repo_id: r.id.to_string(),
+                    count: r.branches.len() as u32,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        // Only live sessions are detectable (the /proc scan can't see one that
+        // already exited), so every agent fact is `running: true` for now.
+        let agents: Vec<AgentFact> = match &self.agents {
+            crate::views::agents::AgentsState::Ready(rows) => rows
+                .iter()
+                .map(|a| AgentFact {
+                    repo_id: a.repo.to_string(),
+                    program: a.program(),
+                    running: true,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.attention_items = attention::compute(&self.repos, inbox, &[], &prunable, &agents);
+        // Items are severity-sorted (Urgent first), so a repo's first
+        // occurrence is its highest severity.
+        self.attention_by_repo.clear();
+        for item in &self.attention_items {
+            if let Some(id) = &item.repo.id {
+                self.attention_by_repo
+                    .entry(SharedString::from(id.clone()))
+                    .or_insert(item.severity);
+            }
+        }
+    }
+
     /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
     /// async git load.
     pub fn open_drawer(&mut self, repo: SharedString, window: &mut Window, cx: &mut Context<Self>) {
@@ -693,15 +777,18 @@ impl OrreryApp {
             let _ = this.update(cx, |this, cx| {
                 this.inbox = match items {
                     Ok(i) => InboxState::Ready(InboxData {
-                        items: i.into_iter().map(inbox_row).collect(),
+                        items: i.iter().cloned().map(inbox_row).collect(),
                         notifications: notes
                             .unwrap_or_default()
                             .into_iter()
                             .map(notice_row)
                             .collect(),
+                        raw: i,
                     }),
                     Err(e) => InboxState::Error(e.into()),
                 };
+                // Fresh inbox facts → refresh the attention surfaces.
+                this.recompute_attention();
                 cx.notify();
             });
         })
@@ -1420,7 +1507,7 @@ impl OrreryApp {
             .into_owned();
         let url = clone_url.to_string();
         cx.spawn(async move |this, cx| {
-            let (result, (rows, roots)) = cx
+            let (result, snap) = cx
                 .background_executor()
                 .spawn(async move {
                     let result = if std::path::Path::new(&dest).exists() {
@@ -1433,8 +1520,7 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 use crate::toast::ToastKind;
-                this.rows = rows;
-                this.roots = roots;
+                this.apply_snapshot(snap);
                 this.explore_cloning.remove(&slug);
                 match result {
                     Ok(()) => {
@@ -1482,6 +1568,8 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.cleanup = CleanupState::Ready(result);
+                // Fresh prunable counts → refresh the attention surfaces.
+                this.recompute_attention();
                 cx.notify();
             });
         })
@@ -1519,6 +1607,9 @@ impl OrreryApp {
                 let changed = active != this.active_agents;
                 this.active_agents = active;
                 this.agents = AgentsState::Ready(result);
+                // Fresh agent facts → refresh the attention surfaces (cheap;
+                // the notify below only fires when something visible changed).
+                this.recompute_attention();
                 if changed || this.view == View::Agents {
                     cx.notify();
                 }
@@ -1614,6 +1705,8 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.cleanup = crate::views::cleanup::CleanupState::Ready(result);
+                // Pruning changed the prunable counts → refresh attention.
+                this.recompute_attention();
                 cx.notify();
             });
         })
@@ -1629,13 +1722,12 @@ impl OrreryApp {
         // come through here, so routine fs events never churn the watches.
         self.watcher.rearm();
         cx.spawn(async move |this, cx| {
-            let (rows, roots) = cx
+            let snap = cx
                 .background_executor()
                 .spawn(async { crate::data::rescan() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.rows = rows;
-                this.roots = roots;
+                this.apply_snapshot(snap);
                 this.enrich_hosts(cx);
                 this.load_activity(cx);
                 // Refresh which repos have a live agent, so Mission Control shows
@@ -1683,7 +1775,7 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// Toggle the "Attention" filter (repos that are dirty / ahead / behind).
+    /// Toggle the "Attention" filter (repos with attention items).
     pub fn toggle_attention(&mut self, cx: &mut Context<Self>) {
         self.grid.filter = if self.grid.filter == RepoFilter::Attention {
             RepoFilter::All
@@ -1693,12 +1785,9 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// How many repos currently want attention (dirty / ahead / behind).
+    /// How many repos currently have at least one attention item.
     fn attention_count(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|r| RepoFilter::Attention.matches(r))
-            .count()
+        self.attention_by_repo.len()
     }
 
     /// Show/hide the contribution graph.
@@ -1718,13 +1807,12 @@ impl OrreryApp {
             if updated == 0 {
                 return;
             }
-            let (rows, roots) = cx
+            let snap = cx
                 .background_executor()
                 .spawn(async { crate::data::load(crate::data::now_unix()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.rows = rows;
-                this.roots = roots;
+                this.apply_snapshot(snap);
                 cx.notify();
             });
         })
@@ -1841,13 +1929,12 @@ impl OrreryApp {
             if updated == 0 {
                 return;
             }
-            let (rows, roots) = cx
+            let snap = cx
                 .background_executor()
                 .spawn(async { crate::data::load(crate::data::now_unix()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.rows = rows;
-                this.roots = roots;
+                this.apply_snapshot(snap);
                 cx.notify();
             });
         })
@@ -1861,7 +1948,7 @@ impl OrreryApp {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| self.grid.filter.matches(r))
+            .filter(|(_, r)| self.grid.filter.matches(r, &self.attention_by_repo))
             .filter(|(_, r)| self.grid.root.as_ref().is_none_or(|root| &r.root == root))
             .filter(|(_, r)| {
                 self.grid
@@ -1884,6 +1971,17 @@ impl OrreryApp {
                     .cmp(&self.rows[b].name.to_lowercase())
             }),
         }
+        // The Attention filter ranks the most urgent repos first; the sort is
+        // stable, so the active sort still orders repos within each severity
+        // tier.
+        if self.grid.filter == RepoFilter::Attention {
+            v.sort_by_key(|&i| {
+                self.attention_by_repo
+                    .get(&self.rows[i].id)
+                    .copied()
+                    .unwrap_or(Severity::Info)
+            });
+        }
         v
     }
 
@@ -1902,13 +2000,12 @@ impl OrreryApp {
                 return;
             }
             // Rebuild rows from the enriched cache, off the UI thread.
-            let (rows, roots) = cx
+            let snap = cx
                 .background_executor()
                 .spawn(async { crate::data::load(crate::data::now_unix()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.rows = rows;
-                this.roots = roots;
+                this.apply_snapshot(snap);
                 cx.notify();
             });
         })
@@ -1917,6 +2014,59 @@ impl OrreryApp {
 }
 
 impl OrreryApp {
+    /// Mission Control's nav badge: (count, any-urgent) over the items that
+    /// need action — Urgent + Attention severities. Info items are ambient
+    /// state and don't badge.
+    fn grid_badge(&self) -> (usize, bool) {
+        let mut n = 0;
+        let mut urgent = false;
+        for item in &self.attention_items {
+            match item.severity {
+                Severity::Urgent => {
+                    n += 1;
+                    urgent = true;
+                }
+                Severity::Attention => n += 1,
+                Severity::Info => {}
+            }
+        }
+        (n, urgent)
+    }
+
+    /// The Inbox nav badge: (count, any-urgent) over the inbox-derived
+    /// attention items (review requests + your open PRs) once the inbox has
+    /// loaded. Until then it falls back to the platform notifier's glance
+    /// count — the poll already running from launch — so the badge is live
+    /// before the Inbox view is ever opened.
+    fn inbox_badge(&self) -> (usize, bool) {
+        if !matches!(self.inbox, crate::views::inbox::InboxState::Ready(_)) {
+            return (self.attention.len(), false);
+        }
+        let mut n = 0;
+        let mut urgent = false;
+        for item in &self.attention_items {
+            match item.kind {
+                AttentionKind::ReviewRequested => {
+                    n += 1;
+                    urgent = true;
+                }
+                AttentionKind::PrAssigned => n += 1,
+                _ => {}
+            }
+        }
+        (n, urgent)
+    }
+
+    /// The card indicator flags for `rows[idx]`: live agent session + urgent
+    /// attention. Cheap map lookups — fine inside the `uniform_list` closures.
+    fn indicators(&self, idx: usize) -> crate::card::Indicators {
+        let id = &self.rows[idx].id;
+        crate::card::Indicators {
+            agent: self.active_agents.contains(id),
+            urgent: self.attention_by_repo.get(id).copied() == Some(Severity::Urgent),
+        }
+    }
+
     fn header(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -2060,11 +2210,16 @@ impl OrreryApp {
             if active {
                 item = item.bg(rgb(t.accent_wash));
             }
-            // The Inbox carries a count badge for items awaiting attention.
-            if view == View::Inbox && !self.attention.is_empty() {
-                item = item
-                    .child(div().flex_1())
-                    .child(badge(self.attention.len(), t));
+            // Attention-model count chips: Mission Control carries the total
+            // urgent+attention items; the Inbox its inbox-derived items. A
+            // zero count renders nothing (no empty-chip layout shift).
+            let (n, urgent) = match view {
+                View::Grid => self.grid_badge(),
+                View::Inbox => self.inbox_badge(),
+                _ => (0, false),
+            };
+            if n > 0 {
+                item = item.child(div().flex_1()).child(badge(n, urgent, t));
             }
             nav = nav.child(item);
         }
@@ -2846,7 +3001,7 @@ impl OrreryApp {
                                 &entity,
                                 &ide,
                                 &agent,
-                                app.active_agents.contains(&app.rows[abs].id),
+                                app.indicators(abs),
                             )
                             .into_any_element()
                         })
@@ -2874,8 +3029,8 @@ impl OrreryApp {
                             let mut cells: Vec<gpui::AnyElement> = visible[start..end]
                                 .iter()
                                 .map(|&i| {
-                                    let active = app.active_agents.contains(&app.rows[i].id);
-                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent, active)
+                                    let ind = app.indicators(i);
+                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent, ind)
                                         .into_any_element()
                                 })
                                 .collect();
@@ -3153,8 +3308,14 @@ fn sidebar_filter_item(
     item
 }
 
-/// A small count pill for the sidebar (e.g. Inbox attention items).
-fn badge(n: usize, t: &Theme) -> impl IntoElement {
+/// A small count pill for the sidebar nav. Urgent counts get the danger
+/// tint; everything else stays a neutral chip.
+fn badge(n: usize, urgent: bool, t: &Theme) -> impl IntoElement {
+    let (bg, fg) = if urgent {
+        (t.danger_badge, t.behind)
+    } else {
+        (t.button_bg, t.fg2)
+    };
     div()
         .flex()
         .items_center()
@@ -3163,10 +3324,10 @@ fn badge(n: usize, t: &Theme) -> impl IntoElement {
         .px(px(5.))
         .py(px(1.))
         .rounded(px(t.r_xs))
-        .bg(rgb(t.accent_badge))
+        .bg(rgb(bg))
         .font_family("monospace")
         .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.accent_bright))
+        .text_color(rgb(fg))
         .child(SharedString::from(n.to_string()))
 }
 

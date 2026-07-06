@@ -280,6 +280,25 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
         .collect()
 }
 
+/// A loaded fleet: render-ready rows, the distinct-root count, and the raw
+/// core repos. The raw snapshot rides along because the attention model
+/// (`orrery_core::attention::compute`) needs host/slug/git facts the flat
+/// [`Row`] doesn't carry; it's kept on `OrreryApp` in lockstep with `rows`.
+pub struct Snapshot {
+    pub rows: Vec<Row>,
+    pub roots: usize,
+    pub repos: Vec<model::Repo>,
+}
+
+fn snapshot(repos: Vec<model::Repo>, now: i64) -> Snapshot {
+    let roots = count_roots(&repos);
+    Snapshot {
+        rows: to_rows(repos.clone(), now),
+        roots,
+        repos,
+    }
+}
+
 /// Current Unix time in seconds (for relative ages); 0 if the clock is before
 /// the epoch.
 pub fn now_unix() -> i64 {
@@ -299,22 +318,21 @@ fn count_roots(repos: &[model::Repo]) -> usize {
 
 /// Load real repos from the shipping SQLite cache. Returns the rows plus the
 /// number of distinct scanned roots (for the header's "N roots · M repos").
-pub fn load(now: i64) -> (Vec<Row>, usize) {
+pub fn load(now: i64) -> Snapshot {
     let mut repos = cache::load_repos();
     // Overlay persisted host enrichment (stars/visibility/release) + AI summaries
     // so the launch paint — and reloads after an enrich/summarize pass — show
     // them without a rescan.
     cache::apply_host_info(&mut repos);
     cache::apply_summaries(&mut repos);
-    let n_roots = count_roots(&repos);
-    (to_rows(repos, now), n_roots)
+    snapshot(repos, now)
 }
 
 /// Re-scan the configured roots from disk (git-heavy — call off the UI thread),
 /// refresh the cache, and return render-ready rows + root count. Mirrors the
 /// Tauri `scan_repos` command: the filesystem watcher triggers this so the grid
 /// reflects on-disk changes live.
-pub fn rescan() -> (Vec<Row>, usize) {
+pub fn rescan() -> Snapshot {
     let now = now_unix();
     let cfg = config::load();
     let favorites = cache::favorites();
@@ -325,8 +343,7 @@ pub fn rescan() -> (Vec<Row>, usize) {
     cache::apply_host_info(&mut repos);
     cache::apply_summaries(&mut repos);
     let _ = cache::store_repos(&repos);
-    let n_roots = count_roots(&repos);
-    (to_rows(repos, now), n_roots)
+    snapshot(repos, now)
 }
 
 #[cfg(test)]

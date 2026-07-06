@@ -34,6 +34,21 @@ pub(crate) fn lang_mark(language: &str, t: &Theme) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// Per-repo live indicator flags, computed by the caller from `OrreryApp`
+/// state the card can't reach: a running agent session in the repo, and an
+/// urgent attention item (`orrery_core::attention::Severity::Urgent`).
+#[derive(Clone, Copy, Default)]
+pub struct Indicators {
+    pub agent: bool,
+    pub urgent: bool,
+}
+
+/// The urgent-attention mark: a small flat dot in the danger token, shown
+/// with the git status indicators when the repo has an Urgent item.
+fn urgent_dot(t: &Theme) -> impl IntoElement {
+    div().w(px(8.)).h(px(8.)).rounded_full().bg(rgb(t.behind))
+}
+
 /// One status segment: a lucide icon + label, both in `color`.
 fn seg(icon_name: &str, label: SharedString, color: u32) -> impl IntoElement {
     div()
@@ -89,7 +104,7 @@ pub fn card(
     app: &Entity<OrreryApp>,
     ide_cmd: &str,
     agent_cmd: &str,
-    active: bool,
+    ind: Indicators,
 ) -> impl IntoElement {
     // ── head: language mark + name, and the (clickable) favorite star ──────
     let fav_star = {
@@ -136,7 +151,7 @@ pub fn card(
                 .child(lang_mark(&row.language, t))
                 .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
                 // Live agent session running in this repo.
-                .children(active.then(|| lucide("square-terminal", 13., t.clean))),
+                .children(ind.agent.then(|| lucide("square-terminal", 13., t.clean))),
         )
         .child(fav_star);
 
@@ -168,8 +183,12 @@ pub fn card(
         .gap(px(13.))
         .mt(px(12.))
         .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .child(seg("git-branch", row.branch.clone(), t.fg2));
+        .text_size(px(t.text_data_sm));
+    // Urgent attention (failing CI / review request) leads the status row.
+    if ind.urgent {
+        status = status.child(urgent_dot(t));
+    }
+    status = status.child(seg("git-branch", row.branch.clone(), t.fg2));
     if row.ahead > 0 || row.behind > 0 {
         let color = if row.behind > 0 { t.behind } else { t.clean };
         status = status.child(
@@ -352,7 +371,7 @@ pub(crate) fn list_item(
     app: &Entity<OrreryApp>,
     ide_cmd: &str,
     agent_cmd: &str,
-    active: bool,
+    ind: Indicators,
 ) -> impl IntoElement {
     let fav_star = {
         let app = app.clone();
@@ -419,7 +438,7 @@ pub(crate) fn list_item(
                     ),
             )
             // Live agent session running in this repo.
-            .children(active.then(|| lucide("square-terminal", 13., t.clean)))
+            .children(ind.agent.then(|| lucide("square-terminal", 13., t.clean)))
     };
 
     // Status segments (branch / ahead-behind / dirty / stars / age).
@@ -430,8 +449,12 @@ pub(crate) fn list_item(
         .gap(px(12.))
         .flex_none()
         .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .child(seg("git-branch", row.branch.clone(), t.fg2));
+        .text_size(px(t.text_data_sm));
+    // Urgent attention (failing CI / review request) leads the status row.
+    if ind.urgent {
+        status = status.child(urgent_dot(t));
+    }
+    status = status.child(seg("git-branch", row.branch.clone(), t.fg2));
     if row.ahead > 0 || row.behind > 0 {
         let color = if row.behind > 0 { t.behind } else { t.clean };
         status = status.child(

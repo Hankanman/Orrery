@@ -29,6 +29,7 @@ pub struct Theme {
     pub accent_bright: u32, // --orr-accent-bright (primary + white 22%)
     pub accent_wash: u32,   // --orr-accent-wash (primary 12% over page) — active nav bg
     pub accent_badge: u32,  // accent 20% over page — nav count badge bg
+    pub danger_badge: u32,  // danger 20% over page — urgent nav badge bg
     pub star: u32,
     pub ai: u32,
     pub clean: u32,
@@ -79,6 +80,9 @@ impl Theme {
             accent_bright: 0x64e3f3,
             accent_wash: 0x102730,
             accent_badge: 0x133742,
+            // danger (--orr-behind #ff6b6b) 20% over page; static — the danger
+            // hue doesn't follow the system accent.
+            danger_badge: over_page((0xff, 0x6b, 0x6b), 0.20),
             star: 0xffc24b,
             ai: 0xa78bfa,
             clean: 0x3dd68c,

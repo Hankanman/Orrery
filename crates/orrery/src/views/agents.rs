@@ -51,6 +51,20 @@ pub struct AgentRow {
     pub started_unix: i64,
 }
 
+impl AgentRow {
+    /// The agent program's display label — the command line's first token,
+    /// basename only ("/usr/bin/claude --resume" → "claude"). Feeds the
+    /// attention model's `AgentFact::program`.
+    pub fn program(&self) -> String {
+        self.command
+            .split_whitespace()
+            .next()
+            .map(|tok| tok.rsplit('/').next().unwrap_or(tok))
+            .unwrap_or("agent")
+            .to_string()
+    }
+}
+
 /// Agent CLI basenames to match: the curated list plus whatever the user's
 /// configured agent command resolves to (so a custom agent is detected too).
 pub fn programs(agent_command: &str) -> Vec<String> {
@@ -316,6 +330,20 @@ mod tests {
             agent_program("/usr/bin/ghostty -e goose").as_deref(),
             Some("goose")
         );
+    }
+
+    #[test]
+    fn program_label_is_first_token_basename() {
+        let row = |command: &str| AgentRow {
+            pid: 1,
+            repo: "/r".into(),
+            name: "r".into(),
+            command: command.to_string().into(),
+            started_unix: 0,
+        };
+        assert_eq!(row("/usr/bin/claude --resume").program(), "claude");
+        assert_eq!(row("aider").program(), "aider");
+        assert_eq!(row("").program(), "agent");
     }
 
     #[test]

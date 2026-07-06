@@ -25,6 +25,10 @@ pub enum InboxState {
 pub struct InboxData {
     pub items: Vec<InboxRow>,
     pub notifications: Vec<NoticeRow>,
+    /// The raw core items behind `items` — kept for the attention model
+    /// (`orrery_core::attention::compute`), which needs the host/slug facts
+    /// the render rows flatten away.
+    pub raw: Vec<inbox::InboxItem>,
 }
 
 /// A render-ready attention item (PR / review request / assigned issue).
