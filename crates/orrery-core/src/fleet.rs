@@ -179,6 +179,27 @@ pub fn pull_op() -> impl Fn(&str) -> Outcome + Sync {
     }
 }
 
+/// Fleet prune, delegating to `git_ops::prune_branches` (merged /
+/// upstream-gone local branches only — never HEAD, main, or master; see
+/// `git_ops::prunable`). Repos with nothing prunable are skips, so the report
+/// says exactly which repos were touched. Branch deletion is irreversible —
+/// callers must gate this behind an explicit confirm (the #173 pattern).
+pub fn prune_op() -> impl Fn(&str) -> Outcome + Sync {
+    |path| match git_ops::prune_branches(path) {
+        Ok(names) if names.is_empty() => Outcome::Skipped("nothing prunable".into()),
+        Ok(names) => Outcome::Ok(format!(
+            "pruned {} {}",
+            names.len(),
+            if names.len() == 1 {
+                "branch"
+            } else {
+                "branches"
+            }
+        )),
+        Err(e) => Outcome::Failed(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +361,95 @@ mod tests {
             .unwrap();
         let path = dir.path().to_string_lossy().into_owned();
         (dir, path)
+    }
+
+    /// Grow `path`'s history by one commit and return the *previous* tip, so
+    /// branches created at it are strictly merged into the default branch.
+    fn advance_head(path: &str) -> git2::Oid {
+        let repo = git2::Repository::open(path).unwrap();
+        let first = repo.head().unwrap().peel_to_commit().unwrap();
+        std::fs::write(std::path::Path::new(path).join("b.txt"), "two").unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("b.txt")).unwrap();
+        idx.write().unwrap();
+        let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&first])
+            .unwrap();
+        first.id()
+    }
+
+    /// Create local branches at commit `at` (behind HEAD ⇒ merged ⇒ prunable).
+    fn branch_at(path: &str, at: git2::Oid, names: &[&str]) {
+        let repo = git2::Repository::open(path).unwrap();
+        let commit = repo.find_commit(at).unwrap();
+        for name in names {
+            repo.branch(name, &commit, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn prune_op_deletes_merged_branches_and_summarises() {
+        let (_d, path) = init_repo();
+        let first = advance_head(&path);
+        branch_at(&path, first, &["old-a", "old-b"]);
+
+        let out = prune_op()(&path);
+        assert_eq!(out, Outcome::Ok("pruned 2 branches".into()));
+        // The branches are actually gone…
+        let repo = git2::Repository::open(&path).unwrap();
+        assert!(repo.find_branch("old-a", git2::BranchType::Local).is_err());
+        assert!(repo.find_branch("old-b", git2::BranchType::Local).is_err());
+        // …and a second pass has nothing left to do.
+        assert_eq!(
+            prune_op()(&path),
+            Outcome::Skipped("nothing prunable".into())
+        );
+    }
+
+    #[test]
+    fn prune_op_singular_summary_and_skip_on_clean_repo() {
+        let (_d, path) = init_repo();
+        let first = advance_head(&path);
+        branch_at(&path, first, &["only"]);
+        assert_eq!(prune_op()(&path), Outcome::Ok("pruned 1 branch".into()));
+
+        // A repo with no stale branches is a skip, not a failure.
+        let (_d2, clean) = init_repo();
+        assert_eq!(
+            prune_op()(&clean),
+            Outcome::Skipped("nothing prunable".into())
+        );
+    }
+
+    #[test]
+    fn prune_op_fails_on_non_repo_and_fleet_run_keeps_order() {
+        let (_a, with_stale) = init_repo();
+        let first = advance_head(&with_stale);
+        branch_at(&with_stale, first, &["stale"]);
+        let (_b, clean) = init_repo();
+        let missing = "/nonexistent/not-a-repo".to_string();
+
+        let repos = vec![with_stale.clone(), clean.clone(), missing];
+        let cancel = AtomicBool::new(false);
+        let report = run(&repos, 2, &cancel, |_| {}, prune_op());
+        assert_eq!(
+            report.results[0].outcome,
+            Outcome::Ok("pruned 1 branch".into())
+        );
+        assert_eq!(
+            report.results[1].outcome,
+            Outcome::Skipped("nothing prunable".into())
+        );
+        assert!(matches!(&report.results[2].outcome, Outcome::Failed(_)));
+        assert_eq!(
+            (
+                report.ok_count(),
+                report.skipped_count(),
+                report.failed_count()
+            ),
+            (1, 1, 1)
+        );
     }
 
     #[test]

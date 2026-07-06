@@ -71,11 +71,24 @@ pub fn code_hit(h: orrery_core::search::SearchHit) -> CodeHit {
     }
 }
 
-/// A standing command (not tied to a repo).
+/// A standing command (not tied to a single repo). The fleet verbs (#184)
+/// drive the same run/selection plumbing as the fleet bar (`fleet.rs`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PaletteAction {
     Rescan,
     Settings,
+    /// Bulk fetch across every repo — no selection needed.
+    FetchAll,
+    /// Bulk pull across every repo with behind > 0 — no selection needed.
+    PullBehind,
+    /// Bulk fetch across the current selection (listed only when one exists).
+    FetchSelected,
+    /// Bulk pull across the current selection (listed only when one exists).
+    PullSelected,
+    /// Replace the selection with the repos with uncommitted changes.
+    SelectDirty,
+    /// Replace the selection with the repos behind their upstream.
+    SelectBehind,
 }
 
 impl PaletteAction {
@@ -83,6 +96,12 @@ impl PaletteAction {
         match self {
             PaletteAction::Rescan => "Rescan repositories",
             PaletteAction::Settings => "Open settings",
+            PaletteAction::FetchAll => "Fetch all repositories",
+            PaletteAction::PullBehind => "Pull all repositories behind upstream",
+            PaletteAction::FetchSelected => "Fetch selected repositories",
+            PaletteAction::PullSelected => "Pull selected repositories",
+            PaletteAction::SelectDirty => "Select dirty repositories",
+            PaletteAction::SelectBehind => "Select repositories behind upstream",
         }
     }
 
@@ -90,6 +109,9 @@ impl PaletteAction {
         match self {
             PaletteAction::Rescan => "refresh-cw",
             PaletteAction::Settings => "settings",
+            PaletteAction::FetchAll | PaletteAction::FetchSelected => "refresh-cw",
+            PaletteAction::PullBehind | PaletteAction::PullSelected => "cloud-download",
+            PaletteAction::SelectDirty | PaletteAction::SelectBehind => "circle-check",
         }
     }
 }
@@ -110,7 +132,24 @@ pub enum PaletteItem {
     Code(usize),
 }
 
-const ACTIONS: [PaletteAction; 2] = [PaletteAction::Rescan, PaletteAction::Settings];
+/// The standing commands offered for the current app state. The
+/// selection-scoped fleet verbs only list while a selection exists — with
+/// none they'd be dead rows.
+fn actions(has_selection: bool) -> Vec<PaletteAction> {
+    let mut out = vec![
+        PaletteAction::Rescan,
+        PaletteAction::Settings,
+        PaletteAction::FetchAll,
+        PaletteAction::PullBehind,
+        PaletteAction::SelectDirty,
+        PaletteAction::SelectBehind,
+    ];
+    if has_selection {
+        out.push(PaletteAction::FetchSelected);
+        out.push(PaletteAction::PullSelected);
+    }
+    out
+}
 
 /// How strongly a repo's name matches `q` (already lowercased): 0 exact (name,
 /// slug, or the slug's repo tail equals), 1 prefix, 2 substring (incl. path),
@@ -134,9 +173,10 @@ pub fn name_rank(name: &str, slug: &str, path: &str, q: &str) -> Option<u8> {
     }
 }
 
-/// Build the filtered result list for `query`: actions, name-matching repos
-/// (exact/prefix first, then substring), semantic recall hits the name pass
-/// missed (deduped, similarity-ranked, with snippets), then code-search hits.
+/// Build the filtered result list for `query`: actions (selection-scoped
+/// fleet verbs only when `has_selection`), name-matching repos (exact/prefix
+/// first, then substring), semantic recall hits the name pass missed
+/// (deduped, similarity-ranked, with snippets), then code-search hits.
 /// Must be deterministic — the executor rebuilds it to resolve the selected
 /// index. With AI off `semantic` is always empty and this reduces to the
 /// name-only palette.
@@ -145,13 +185,14 @@ pub fn items(
     code: &[CodeHit],
     semantic: &[SemanticHit],
     query: &str,
+    has_selection: bool,
 ) -> Vec<PaletteItem> {
     use std::collections::HashSet;
     let q = query.trim().to_lowercase();
     let mut out = Vec::new();
     let mut shown: HashSet<usize> = HashSet::new();
 
-    for a in ACTIONS {
+    for a in actions(has_selection) {
         if q.is_empty() || a.label().to_lowercase().contains(&q) {
             out.push(PaletteItem::Action(a));
         }
@@ -442,7 +483,7 @@ mod tests {
             row("/2", "alphabet", "o/alphabet"),   // prefix
             row("/3", "alpha", "o/alpha"),         // exact
         ];
-        let out = items(&rows, &[], &[], "alpha");
+        let out = items(&rows, &[], &[], "alpha", false);
         assert_eq!(repo_order(&out), vec![2, 1, 0]);
         // No actions match "alpha".
         assert!(!out.iter().any(|i| matches!(i, PaletteItem::Action(_))));
@@ -458,13 +499,13 @@ mod tests {
         // Semantic ranked beta-then-alpha; alpha already matched by name, so
         // only beta surfaces as a recall row — after the name match.
         let semantic = vec![hit("/b"), hit("/a")];
-        let out = items(&rows, &[], &semantic, "alpha");
+        let out = items(&rows, &[], &semantic, "alpha", false);
         assert_eq!(repo_order(&out), vec![0, 1]);
         assert!(matches!(out[0], PaletteItem::Repo(0)));
         assert!(matches!(out[1], PaletteItem::Recall { row: 1, hit: 0 }));
 
         // A semantic hit whose repo vanished from the grid is skipped.
-        let out = items(&rows, &[], &[hit("/gone")], "alpha");
+        let out = items(&rows, &[], &[hit("/gone")], "alpha", false);
         assert_eq!(repo_order(&out), vec![0]);
     }
 
@@ -473,24 +514,55 @@ mod tests {
         // AI off → `semantic` is empty; empty query lists everything in grid
         // order, and a query filters by substring.
         let rows = vec![row("/a", "alpha", "o/alpha"), row("/b", "beta", "o/beta")];
-        let out = items(&rows, &[], &[], "");
+        let out = items(&rows, &[], &[], "", false);
         assert_eq!(repo_order(&out), vec![0, 1]);
         assert_eq!(
             out.iter()
                 .filter(|i| matches!(i, PaletteItem::Action(_)))
                 .count(),
-            2
+            actions(false).len()
         );
-        let out = items(&rows, &[], &[], "bet");
+        let out = items(&rows, &[], &[], "bet", false);
         assert_eq!(repo_order(&out), vec![1]);
         assert!(!out.iter().any(|i| matches!(i, PaletteItem::Recall { .. })));
+    }
+
+    #[test]
+    fn selection_scoped_fleet_verbs_gate_on_a_selection() {
+        let rows = vec![row("/a", "alpha", "o/alpha")];
+        let listed = |has_selection: bool, action: PaletteAction| {
+            items(&rows, &[], &[], "", has_selection)
+                .iter()
+                .any(|i| matches!(i, PaletteItem::Action(a) if *a == action))
+        };
+        // No selection → the fleet-wide verbs list, the selection-scoped don't.
+        assert!(listed(false, PaletteAction::FetchAll));
+        assert!(listed(false, PaletteAction::PullBehind));
+        assert!(listed(false, PaletteAction::SelectDirty));
+        assert!(listed(false, PaletteAction::SelectBehind));
+        assert!(!listed(false, PaletteAction::FetchSelected));
+        assert!(!listed(false, PaletteAction::PullSelected));
+        // With a selection, the selection-scoped verbs appear too.
+        assert!(listed(true, PaletteAction::FetchSelected));
+        assert!(listed(true, PaletteAction::PullSelected));
+
+        // And the query filters them like any action.
+        let out = items(&rows, &[], &[], "pull all", true);
+        assert!(
+            out.iter()
+                .any(|i| matches!(i, PaletteItem::Action(PaletteAction::PullBehind)))
+        );
+        assert!(
+            !out.iter()
+                .any(|i| matches!(i, PaletteItem::Action(PaletteAction::PullSelected)))
+        );
     }
 
     #[test]
     fn items_ignores_semantic_when_query_is_empty() {
         // A stale recall list must not leak into the empty-query view.
         let rows = vec![row("/a", "alpha", "o/alpha")];
-        let out = items(&rows, &[], &[hit("/a")], "");
+        let out = items(&rows, &[], &[hit("/a")], "", false);
         assert!(out.iter().all(|i| !matches!(i, PaletteItem::Recall { .. })));
     }
 }

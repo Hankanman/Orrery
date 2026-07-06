@@ -132,6 +132,9 @@ pub struct CiFact {
     /// "success" | "failure" | "pending" | "none". Only "failure" raises
     /// attention.
     pub state: String,
+    /// The run's web page, when the CI source offered one — becomes the
+    /// item's `detail` so surfaces can route to the failing run.
+    pub url: Option<String>,
 }
 
 /// Prunable-branch count for a local repo (from `git_ops::prunable`).
@@ -233,7 +236,7 @@ pub fn compute(
                 remote_ref(repos, &c.remote_host, &c.slug),
                 AttentionKind::CiFailing,
                 "CI failing on the default branch".to_string(),
-                None,
+                c.url.clone(),
             ));
         }
     }
@@ -418,6 +421,7 @@ mod tests {
             remote_host: "github.com".into(),
             slug: "o/test".into(),
             state: "success".into(),
+            url: None,
         }];
         assert!(compute(&repos, &[], &ci, &[], &[]).is_empty());
     }
@@ -464,6 +468,7 @@ mod tests {
             remote_host: "github.com".into(),
             slug: "o/test".into(),
             state: state.into(),
+            url: Some("https://github.com/o/test/actions/runs/9".into()),
         };
         for quiet in ["success", "pending", "none"] {
             assert!(
@@ -475,8 +480,13 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, AttentionKind::CiFailing);
         assert_eq!(items[0].severity, Severity::Urgent);
-        // Linked to the local repo via the (host, slug) compound key.
+        // Linked to the local repo via the (host, slug) compound key, with
+        // the failing run's URL carried as the routing detail.
         assert_eq!(items[0].repo.id.as_deref(), Some("/a"));
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("https://github.com/o/test/actions/runs/9")
+        );
     }
 
     #[test]
@@ -491,6 +501,7 @@ mod tests {
                 remote_host: "gitlab.acme.io".into(),
                 slug: "o/test".into(),
                 state: "failure".into(),
+                url: None,
             }],
             &[],
             &[],
@@ -649,6 +660,7 @@ mod tests {
             remote_host: "github.com".into(),
             slug: "o/alpha".into(),
             state: "failure".into(),
+            url: None,
         }];
         let items = compute(&[a, b], &[], &ci, &[], &[]);
         let got: Vec<(AttentionKind, &str)> = items

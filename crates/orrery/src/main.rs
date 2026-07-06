@@ -118,6 +118,12 @@ fn main() {
                             config,
                             attention: Vec::new(),
                             polled_inbox: None,
+                            // Seed CI states from the cache so a failing
+                            // default branch shows on the first attention
+                            // pass, before the CI pass first runs (offline
+                            // included). The pass refreshes them after.
+                            ci_states: orrery_core::cache::all_ci_states(),
+                            ci_last_error: None,
                             attention_items: Vec::new(),
                             attention_by_repo: Default::default(),
                             attention_seen: None,
@@ -146,6 +152,8 @@ fn main() {
                             selected: Default::default(),
                             fleet_run: None,
                             fleet_seq: 0,
+                            fleet_prune: None,
+                            fleet_prune_seq: 0,
                             toasts: Vec::new(),
                             toast_seq: 0,
                             grid: Default::default(),
@@ -173,6 +181,7 @@ fn main() {
                         this.recompute_attention();
                         this.ai_startup(cx);
                         this.enrich_hosts(cx);
+                        this.refresh_ci(cx);
                         this.load_activity(cx);
                     });
                     // Focus the app root so key bindings (Esc) dispatch to it.

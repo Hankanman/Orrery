@@ -37,9 +37,6 @@ const TOAST_W: f32 = 340.;
 pub enum ToastKind {
     Success,
     Error,
-    // Not constructed yet — here for the bulk-ops / commit-flow / attention
-    // workstreams (#182/#184) that share this surface.
-    #[allow(dead_code)]
     Info,
     Progress,
 }
