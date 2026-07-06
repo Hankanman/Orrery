@@ -19,6 +19,7 @@ use crate::card::card;
 use crate::data::Row;
 use crate::icon::lucide;
 use crate::theme::Theme;
+use crate::toast::ToastKind;
 
 /// Grid row height without / with AI summary lines (the launcher row is the
 /// bottom of the card, so the row must be tall enough not to clip it).
@@ -1282,6 +1283,169 @@ impl OrreryApp {
                     n.resume = Some(text.into());
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Drawer Changes tab: push the current branch (setting the upstream when
+    /// there is none — see `git_ops::push`). Sync-but-network git work, so it
+    /// runs on the background executor; progress and the outcome flow through
+    /// one keyed toast ("Pushing…" → Pushed / Push failed).
+    pub fn drawer_push(&mut self, cx: &mut Context<Self>) {
+        if self.drawer.push_busy {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
+        self.drawer.push_busy = true;
+        let key = format!("push:{repo}");
+        self.upsert_toast(
+            key.clone(),
+            ToastKind::Progress,
+            format!("Pushing {name}…"),
+            None,
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let id = repo.to_string();
+            let result = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::push(&id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo {
+                    this.drawer.push_busy = false;
+                }
+                match result {
+                    Ok(msg) => {
+                        if this.drawer.repo == repo {
+                            this.drawer.committed = false;
+                        }
+                        this.upsert_toast(key, ToastKind::Success, "Pushed", Some(msg.into()), cx);
+                    }
+                    Err(e) => {
+                        this.upsert_toast(key, ToastKind::Error, "Push failed", Some(e.into()), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drawer Changes tab: open a GitHub PR for the current branch — push
+    /// first (ensuring the branch exists upstream), draft a title/body from
+    /// the commit range (AI when `aiReady`, else the latest subject + commit
+    /// list — the button works either way), then create the PR. Progress and
+    /// the outcome flow through one keyed toast; the success toast links to
+    /// the PR, as does a "View PR" affordance in the drawer.
+    pub fn drawer_open_pr(&mut self, cx: &mut Context<Self>) {
+        if self.drawer.pr_busy {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        let Some(row) = self.rows.iter().find(|r| r.id == repo) else {
+            return;
+        };
+        let slug = row.slug.to_string();
+        let head = row.branch.to_string();
+        let Some(base) = self.drawer.default_branch.as_ref().map(|b| b.to_string()) else {
+            return;
+        };
+        if head == base {
+            return;
+        }
+        let ai_ready = self.services.ai_ready;
+        self.drawer.pr_busy = true;
+        let key = format!("pr:{repo}");
+        self.upsert_toast(
+            key.clone(),
+            ToastKind::Progress,
+            "Opening PR…",
+            Some(format!("{head} → {base}").into()),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            // 1. Ensure the branch is pushed (also sets the upstream if new).
+            let id = repo.to_string();
+            let pushed = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::push(&id) })
+                .await;
+            if let Err(e) = pushed {
+                let _ = this.update(cx, |this, cx| {
+                    if this.drawer.repo == repo {
+                        this.drawer.pr_busy = false;
+                    }
+                    this.upsert_toast(key, ToastKind::Error, "Push failed", Some(e.into()), cx);
+                    cx.notify();
+                });
+                return;
+            }
+            // 2. The branch's commit range, for drafting the title/body.
+            let (id, base2) = (repo.to_string(), base.clone());
+            let commits: Vec<String> = cx
+                .background_executor()
+                .spawn(async move {
+                    orrery_core::git_ops::commits_ahead_of(&id, &base2, 30)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| c.summary)
+                        .collect()
+                })
+                .await;
+            // 3. Title/body: AI-drafted when available, else the fallback —
+            //    only the drafting is aiReady-gated, never the button.
+            let drafted = if ai_ready && !commits.is_empty() {
+                let (h, c) = (head.clone(), commits.clone());
+                crate::task::run(async move { orrery_core::ai::pr_description(&h, &c).await })
+                    .await
+                    .ok()
+                    .and_then(|d| orrery_core::ai::split_pr_draft(&d))
+            } else {
+                None
+            };
+            let (title, body) =
+                drafted.unwrap_or_else(|| orrery_core::ai::fallback_pr_draft(&head, &commits));
+            // 4. Create the PR (network → the shared tokio runtime).
+            let (s, h, b) = (slug.clone(), head.clone(), base.clone());
+            let (t2, b2) = (title.clone(), body.clone());
+            let result = crate::task::run(async move {
+                let token =
+                    orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
+                orrery_core::forge::create_pr(&s, &h, &b, &t2, &b2, &token).await
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo {
+                    this.drawer.pr_busy = false;
+                }
+                match result {
+                    Ok(url) => {
+                        if this.drawer.repo == repo {
+                            this.drawer.pr_url = Some(url.clone().into());
+                        }
+                        this.upsert_toast_link(
+                            key,
+                            ToastKind::Success,
+                            "PR opened",
+                            Some(title.into()),
+                            url.into(),
+                            cx,
+                        );
+                    }
+                    Err(e) => {
+                        this.upsert_toast(
+                            key,
+                            ToastKind::Error,
+                            "Open PR failed",
+                            Some(e.into()),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -3218,6 +3382,7 @@ impl OrreryApp {
                         &cmds.0,
                         &cmds.1,
                         self.services.ai_ready,
+                        self.services.github_authed,
                     )
                     .into_any_element(),
                 )

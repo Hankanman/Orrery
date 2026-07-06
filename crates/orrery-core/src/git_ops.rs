@@ -313,6 +313,14 @@ pub fn stash(path: &str) -> Result<OpOutcome, String> {
     Ok(OpOutcome::Done("stashed".into()))
 }
 
+/// The repo's default branch name (`origin/HEAD`, else a local main/master) —
+/// the base branch for "Open PR" and the merged checks.
+pub fn default_branch(path: &str) -> Option<String> {
+    Repository::open(path)
+        .ok()
+        .and_then(|r| default_branch_name(&r))
+}
+
 /// The default branch name, preferring `origin/HEAD`, then a local main/master.
 fn default_branch_name(repo: &Repository) -> Option<String> {
     if let Ok(r) = repo.find_reference("refs/remotes/origin/HEAD") {
@@ -501,6 +509,41 @@ pub fn log_since_sha(path: &str, since_sha: &str, max: usize) -> Result<Vec<Comm
         }
         if out.len() >= max {
             break;
+        }
+    }
+    Ok(out)
+}
+
+/// Commits on HEAD that aren't reachable from `base` (a local branch name,
+/// with `origin/<base>` also hidden when present), newest first, capped at
+/// `max` — the commit range a PR from the current branch would contain. If
+/// `base` can't be resolved at all, returns recent HEAD commits (up to `max`)
+/// so the caller still gets something to describe.
+pub fn commits_ahead_of(path: &str, base: &str, max: usize) -> Result<Vec<CommitInfo>, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let mut walk = repo.revwalk().map_err(|e| e.to_string())?;
+    walk.push_head().map_err(|e| e.to_string())?;
+    if let Some(oid) = repo
+        .find_branch(base, BranchType::Local)
+        .ok()
+        .and_then(|b| b.get().target())
+    {
+        let _ = walk.hide(oid);
+    }
+    if let Ok(r) = repo.find_reference(&format!("refs/remotes/origin/{base}")) {
+        if let Some(oid) = r.target() {
+            let _ = walk.hide(oid);
+        }
+    }
+    let mut out = Vec::new();
+    for oid in walk.flatten().take(max) {
+        if let Ok(commit) = repo.find_commit(oid) {
+            out.push(CommitInfo {
+                id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
+                summary: commit.summary().unwrap_or("").to_string(),
+                author: commit.author().name().unwrap_or("").to_string(),
+                time_unix: commit.time().seconds(),
+            });
         }
     }
     Ok(out)
@@ -808,6 +851,105 @@ pub fn commit(path: &str, message: &str) -> Result<String, String> {
         .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(|e| e.to_string())?;
     Ok(oid.to_string()[..7.min(oid.to_string().len())].to_string())
+}
+
+/// Push the current branch to its upstream remote; with no upstream, push to
+/// `origin` and set the branch's upstream (`git push --set-upstream origin
+/// <branch>` semantics — `branch.<name>.remote` + `branch.<name>.merge` in
+/// config). Auth reuses [`remote_callbacks`] exactly as fetch/pull do (SSH
+/// agent for ssh remotes, the git credential helper for HTTPS). Never forces:
+/// a non-fast-forward rejection surfaces as a clear error. Returns a short
+/// human-readable outcome for the success toast.
+pub fn push(path: &str) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let head = repo.head().map_err(|e| e.to_string())?;
+    if !head.is_branch() {
+        return Err("HEAD is detached — check out a branch before pushing".into());
+    }
+    let branch = head
+        .shorthand()
+        .map(String::from)
+        .ok_or("HEAD has no branch name")?;
+
+    // Upstream remote when configured (branch.<name>.remote), else origin.
+    let refname = format!("refs/heads/{branch}");
+    let upstream_remote = repo
+        .branch_upstream_remote(&refname)
+        .ok()
+        .and_then(|b| b.as_str().map(String::from));
+    let has_upstream = upstream_remote.is_some();
+    let remote_name = upstream_remote.unwrap_or_else(|| "origin".to_string());
+    let mut remote = repo
+        .find_remote(&remote_name)
+        .map_err(|_| format!("no '{remote_name}' remote to push to"))?;
+
+    // Push to the upstream's merge ref when tracking is configured (it can
+    // differ from the local name), else mirror the local branch name.
+    let dst = repo
+        .config()
+        .ok()
+        .and_then(|c| c.get_string(&format!("branch.{branch}.merge")).ok())
+        .unwrap_or_else(|| refname.clone());
+    let refspec = format!("{refname}:{dst}");
+
+    // Per-ref rejections (e.g. remote-side non-fast-forward) arrive through the
+    // push_update_reference callback, not as a push() error — capture them.
+    let rejection: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let mut cb = remote_callbacks();
+    let rejected = rejection.clone();
+    cb.push_update_reference(move |_ref, status| {
+        if let Some(msg) = status {
+            *rejected.lock().unwrap() = Some(msg.to_string());
+        }
+        Ok(())
+    });
+    let mut opts = git2::PushOptions::new();
+    opts.remote_callbacks(cb);
+    remote
+        .push(&[refspec.as_str()], Some(&mut opts))
+        .map_err(|e| push_error(&e))?;
+    if let Some(msg) = rejection.lock().unwrap().take() {
+        return Err(push_rejection(&msg));
+    }
+
+    if !has_upstream {
+        // `--set-upstream` semantics, straight into config (works even before
+        // the remote-tracking ref exists locally).
+        let mut config = repo.config().map_err(|e| e.to_string())?;
+        config
+            .set_str(&format!("branch.{branch}.remote"), &remote_name)
+            .map_err(|e| e.to_string())?;
+        config
+            .set_str(&format!("branch.{branch}.merge"), &refname)
+            .map_err(|e| e.to_string())?;
+        return Ok(format!("{branch} → {remote_name}/{branch} (upstream set)"));
+    }
+    Ok(format!("{branch} → {remote_name}"))
+}
+
+/// A clear message for a push failure: auth problems and non-fast-forward
+/// rejections get actionable phrasing instead of raw libgit2 text.
+fn push_error(e: &git2::Error) -> String {
+    let msg = e.message().to_string();
+    if msg.contains("authentication")
+        || msg.contains("credentials")
+        || e.class() == git2::ErrorClass::Ssh
+    {
+        return format!(
+            "authentication failed — check your SSH agent or git credential helper ({msg})"
+        );
+    }
+    if msg.contains("non-fastforwardable") || msg.contains("non-fast-forward") {
+        return push_rejection(&msg);
+    }
+    msg
+}
+
+/// The non-fast-forward rejection message (Orrery never force-pushes).
+fn push_rejection(detail: &str) -> String {
+    format!(
+        "push rejected (non-fast-forward) — pull or rebase first; Orrery never forces ({detail})"
+    )
 }
 
 #[cfg(test)]
@@ -1131,6 +1273,139 @@ mod tests {
         let untracked = file_diff(&path, "new.txt", false).unwrap();
         assert!(untracked.contains("+untracked line"), "got: {untracked}");
         assert!(file_diff(&path, "new.txt", true).unwrap().is_empty());
+    }
+
+    /// Add `origin` pointing at a fresh bare repo (a local-path remote needs no
+    /// auth, so push is exercised end-to-end). Returns the bare repo's tempdir.
+    fn add_bare_origin(path: &str) -> tempfile::TempDir {
+        let bare_dir = tempfile::tempdir().unwrap();
+        Repository::init_bare(bare_dir.path()).unwrap();
+        let repo = Repository::open(path).unwrap();
+        repo.remote("origin", &bare_dir.path().to_string_lossy())
+            .unwrap();
+        bare_dir
+    }
+
+    /// Commit all of the working tree with `msg`; returns the new commit id.
+    fn commit_file(path: &str, file: &str, content: &str, msg: &str) -> git2::Oid {
+        fs::write(std::path::Path::new(path).join(file), content).unwrap();
+        stage_paths(path, &[file.into()]).unwrap();
+        commit(path, msg).unwrap();
+        Repository::open(path)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap()
+    }
+
+    #[test]
+    fn push_sets_upstream_then_pushes_plain() {
+        let (_dir, path) = init_repo();
+        let _bare = add_bare_origin(&path);
+
+        // First push: no upstream yet → set-upstream semantics.
+        let msg = push(&path).unwrap();
+        assert!(msg.contains("upstream set"), "got: {msg}");
+        let repo = Repository::open(&path).unwrap();
+        let branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+        let cfg = repo.config().unwrap();
+        assert_eq!(
+            cfg.get_string(&format!("branch.{branch_name}.remote"))
+                .unwrap(),
+            "origin"
+        );
+        assert_eq!(
+            cfg.get_string(&format!("branch.{branch_name}.merge"))
+                .unwrap(),
+            format!("refs/heads/{branch_name}")
+        );
+
+        // Second push (with a new commit): plain push to the upstream.
+        commit_file(&path, "a.txt", "a", "add a");
+        let msg = push(&path).unwrap();
+        assert!(!msg.contains("upstream set"), "got: {msg}");
+
+        // The remote actually has the commits.
+        let bare = Repository::open(_bare.path()).unwrap();
+        let tip = bare
+            .find_reference(&format!("refs/heads/{branch_name}"))
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        assert_eq!(tip.summary(), Some("add a"));
+    }
+
+    #[test]
+    fn push_rejects_non_fast_forward_without_forcing() {
+        let (_dir, path) = init_repo();
+        let _bare = add_bare_origin(&path);
+        let base = Repository::open(&path)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
+        commit_file(&path, "a.txt", "a", "add a");
+        push(&path).unwrap();
+
+        // Rewind the local branch behind the remote, then diverge.
+        {
+            let repo = Repository::open(&path).unwrap();
+            let refname = repo.head().unwrap().name().unwrap().to_string();
+            repo.find_reference(&refname)
+                .unwrap()
+                .set_target(base, "test: rewind")
+                .unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+                .unwrap();
+        }
+        commit_file(&path, "b.txt", "b", "diverging commit");
+
+        let err = push(&path).unwrap_err();
+        assert!(err.contains("non-fast-forward"), "got: {err}");
+        // The remote kept the original tip — nothing was forced.
+        let repo = Repository::open(&path).unwrap();
+        let branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+        let bare = Repository::open(_bare.path()).unwrap();
+        let tip = bare
+            .find_reference(&format!("refs/heads/{branch_name}"))
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        assert_eq!(tip.summary(), Some("add a"));
+    }
+
+    #[test]
+    fn push_refuses_detached_head() {
+        let (_dir, path) = init_repo();
+        let _bare = add_bare_origin(&path);
+        let repo = Repository::open(&path).unwrap();
+        let oid = repo.head().unwrap().target().unwrap();
+        repo.set_head_detached(oid).unwrap();
+        assert!(push(&path).unwrap_err().contains("detached"));
+    }
+
+    #[test]
+    fn commits_ahead_of_lists_only_branch_commits() {
+        let (_dir, path) = init_repo();
+        let default = {
+            let repo = Repository::open(&path).unwrap();
+            let default = repo.head().unwrap().shorthand().unwrap().to_string();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.branch("feature", &head, false).unwrap();
+            default
+        };
+        switch_branch(&path, "feature").unwrap();
+        commit_file(&path, "f1.txt", "1", "feat: one");
+        commit_file(&path, "f2.txt", "2", "feat: two");
+
+        let ahead = commits_ahead_of(&path, &default, 10).unwrap();
+        let subjects: Vec<&str> = ahead.iter().map(|c| c.summary.as_str()).collect();
+        assert_eq!(subjects, vec!["feat: two", "feat: one"]);
+        // On the default branch itself, nothing is ahead.
+        switch_branch(&path, &default).unwrap();
+        assert!(commits_ahead_of(&path, &default, 10).unwrap().is_empty());
     }
 
     #[test]

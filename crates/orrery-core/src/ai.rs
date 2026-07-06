@@ -352,6 +352,48 @@ changes. No preamble.\n\nCommits:\n{}\n\nChangelog:",
     )
 }
 
+/// Prompt to draft a pull-request title + body from a branch's commit range.
+/// The first output line is the title; the rest (after a blank line) is the
+/// markdown body — [`split_pr_draft`] parses that shape back apart.
+pub fn pr_prompt(branch: &str, commits: &[String]) -> String {
+    format!(
+        "Draft a pull request for branch \"{branch}\" from these commits (newest first). \
+Output the PR title on the FIRST line (imperative, under 72 chars, no quotes), then a blank \
+line, then a concise markdown body summarizing the changes as bullet points. No preamble, \
+no code fences.\n\nCommits:\n{}\n\nPull request:",
+        commits.join("\n")
+    )
+}
+
+/// Split an AI PR draft into (title, body): first non-empty line is the
+/// title, the rest is the body. `None` when there's no usable title.
+pub fn split_pr_draft(text: &str) -> Option<(String, String)> {
+    let mut lines = text.trim().lines();
+    let title = lines.next()?.trim().trim_matches('"').to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    Some((title, body))
+}
+
+/// Non-AI PR draft from a commit range (newest first): the latest commit's
+/// subject as the title, the commit list as the body. Works with an empty
+/// range too, so "Open PR" never depends on AI being reachable.
+pub fn fallback_pr_draft(branch: &str, commits: &[String]) -> (String, String) {
+    let title = commits
+        .first()
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| branch.to_string());
+    let body = commits
+        .iter()
+        .map(|c| format!("- {c}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (title, body)
+}
+
 /// Prompt to catch the user up on what changed in a repo since they last looked.
 pub fn resume_prompt(repo_name: &str, commits: &[String]) -> String {
     format!(
@@ -386,6 +428,13 @@ pub async fn changelog(commits: &[String]) -> Result<String, String> {
 /// A 2–3 sentence catch-up on what changed in a repo since the last look.
 pub async fn resume(repo_name: &str, commits: &[String]) -> Result<String, String> {
     generate_with_model(&resume_prompt(repo_name, commits)).await
+}
+
+/// Draft a PR title + body from a branch's commit range (first line = title —
+/// see [`pr_prompt`] / [`split_pr_draft`]). Callers fall back to
+/// [`fallback_pr_draft`] when AI is unavailable (the `aiReady` contract).
+pub async fn pr_description(branch: &str, commits: &[String]) -> Result<String, String> {
+    generate_with_model(&pr_prompt(branch, commits)).await
 }
 
 /// Prompt for a short daily briefing across recently-active repos.
@@ -471,6 +520,38 @@ mod tests {
         assert!(p.contains("Rust"));
         assert!(p.contains("7 uncommitted"));
         assert!(p.contains("branch main"));
+    }
+
+    #[test]
+    fn pr_prompt_and_draft_split_round_trip() {
+        let commits = vec!["feat: two".to_string(), "feat: one".to_string()];
+        let p = pr_prompt("feat/x", &commits);
+        assert!(p.contains("feat/x"));
+        assert!(p.contains("feat: two"));
+        assert!(p.contains("FIRST line"));
+
+        // A well-formed draft splits into title + body.
+        let (title, body) = split_pr_draft("feat: add x\n\n- one\n- two").unwrap();
+        assert_eq!(title, "feat: add x");
+        assert_eq!(body, "- one\n- two");
+        // Title-only drafts still work; empty drafts don't.
+        assert_eq!(
+            split_pr_draft("\"feat: quoted\"").unwrap(),
+            ("feat: quoted".to_string(), String::new())
+        );
+        assert!(split_pr_draft("   \n").is_none());
+    }
+
+    #[test]
+    fn fallback_pr_draft_uses_latest_subject_and_lists_commits() {
+        let commits = vec!["feat: two".to_string(), "feat: one".to_string()];
+        let (title, body) = fallback_pr_draft("feat/x", &commits);
+        assert_eq!(title, "feat: two");
+        assert_eq!(body, "- feat: two\n- feat: one");
+        // No commits (shouldn't happen, but): the branch name still titles it.
+        let (title, body) = fallback_pr_draft("feat/x", &[]);
+        assert_eq!(title, "feat/x");
+        assert!(body.is_empty());
     }
 
     #[test]

@@ -167,6 +167,18 @@ pub struct DrawerData {
     pub commit_input: Option<Entity<gpui_component::input::InputState>>,
     /// The new-worktree name field (Overview), created when the drawer opens.
     pub worktree_input: Option<Entity<gpui_component::input::InputState>>,
+    /// The repo's default branch (origin/HEAD else main/master), loaded with
+    /// the Overview — the base for "Open PR" and its visibility check.
+    pub default_branch: Option<SharedString>,
+    /// A commit landed in this drawer session — keeps Push offered even while
+    /// the grid row's ahead count is stale (no upstream / pre-rescan).
+    pub committed: bool,
+    /// A push kicked off from this drawer is still running.
+    pub push_busy: bool,
+    /// An "Open PR" flow kicked off from this drawer is still running.
+    pub pr_busy: bool,
+    /// The PR created from this drawer, for the "View PR" affordance.
+    pub pr_url: Option<SharedString>,
 }
 
 impl DrawerData {
@@ -183,15 +195,17 @@ type Loaded = (
     Vec<git_ops::BranchInfo>,
     Vec<git_ops::CommitInfo>,
     Vec<git_ops::WorktreeInfo>,
+    Option<String>,
 );
 
-/// Read branches + recent log + worktrees for `id` (all git-heavy — runs on the
-/// background pool).
+/// Read branches + recent log + worktrees + the default branch for `id` (all
+/// git-heavy — runs on the background pool).
 fn read_overview(id: &str) -> Loaded {
     (
         git_ops::branches(id).unwrap_or_default(),
         git_ops::recent_log(id, LOG_LIMIT).unwrap_or_default(),
         git_ops::worktrees(id).unwrap_or_default(),
+        git_ops::default_branch(id),
     )
 }
 
@@ -204,7 +218,7 @@ fn store_overview(
     loaded: Loaded,
     now: i64,
 ) {
-    let (branches, commits, worktrees) = loaded;
+    let (branches, commits, worktrees, default_branch) = loaded;
     let _ = this.update(cx, |this, cx| {
         if &this.drawer.repo != repo {
             return;
@@ -212,6 +226,7 @@ fn store_overview(
         this.drawer.branches = Some(branches.into_iter().map(branch_row).collect());
         this.drawer.commits = Some(commits.into_iter().map(|c| commit_row(c, now)).collect());
         this.drawer.worktrees = Some(worktrees.into_iter().map(worktree_row).collect());
+        this.drawer.default_branch = default_branch.map(Into::into);
         cx.notify();
     });
 }
@@ -451,6 +466,8 @@ fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp
             }
             if result.is_ok() {
                 this.drawer.commit_suggestion = None;
+                // Offer Push even while the grid row's ahead count is stale.
+                this.drawer.committed = true;
             }
             store_changes(this, list, cx);
         });
@@ -724,6 +741,7 @@ pub fn drawer(
     ide_cmd: &str,
     agent_cmd: &str,
     ai_ready: bool,
+    github_authed: bool,
 ) -> impl IntoElement {
     // Scrim: click anywhere outside the panel to dismiss.
     let backdrop = {
@@ -751,7 +769,7 @@ pub fn drawer(
         .border_color(rgb(t.border))
         .child(header(row, t, app))
         .child(tab_bar(tab, t, app, data.repo.clone(), github_slug(row)))
-        .child(body(row, tab, t, data, app, ai_ready))
+        .child(body(row, tab, t, data, app, ai_ready, github_authed))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
     div()
@@ -926,6 +944,7 @@ fn tab_bar(
     bar
 }
 
+#[allow(clippy::too_many_arguments)]
 fn body(
     row: &Row,
     tab: DrawerTab,
@@ -933,12 +952,15 @@ fn body(
     data: &DrawerData,
     app: &Entity<OrreryApp>,
     ai_ready: bool,
+    github_authed: bool,
 ) -> impl IntoElement {
     let content = match tab {
         DrawerTab::Overview => overview(row, t, data, app).into_any_element(),
         DrawerTab::Readme => readme_view(data, t).into_any_element(),
         DrawerTab::Pr => pr_view(row, data, t, app).into_any_element(),
-        DrawerTab::Changes => changes_view(row, data, t, app, ai_ready).into_any_element(),
+        DrawerTab::Changes => {
+            changes_view(row, data, t, app, ai_ready, github_authed).into_any_element()
+        }
         DrawerTab::Notes => notes_view(row, data, t, app, ai_ready).into_any_element(),
     };
     div()
@@ -1276,14 +1298,16 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
     s
 }
 
-/// Changes tab: a commit composer acting on the index, the Unstaged/Staged
-/// file lists with per-file stage/unstage, then the selected file's diff.
+/// Changes tab: a commit composer acting on the index, a push / open-PR row
+/// closing the commit → push → PR loop, the Unstaged/Staged file lists with
+/// per-file stage/unstage, then the selected file's diff.
 fn changes_view(
     row: &Row,
     data: &DrawerData,
     t: &Theme,
     app: &Entity<OrreryApp>,
     ai_ready: bool,
+    github_authed: bool,
 ) -> impl IntoElement {
     let mut col = div().flex().flex_col().gap(px(12.));
     let has_staged = data
@@ -1372,6 +1396,78 @@ fn changes_view(
                     },
                 ))),
         );
+    }
+
+    // Push / Open PR — the last mile after committing. Push shows when there's
+    // something to push (ahead, or a commit made in this drawer session while
+    // the row's ahead count may be stale). Open PR shows only when it can work:
+    // a GitHub remote, a GitHub token, a known default branch, and the current
+    // branch isn't it — hidden otherwise, never broken (the aiReady philosophy;
+    // only the AI *drafting* inside the flow is gated on aiReady).
+    let show_push = row.ahead > 0 || data.committed;
+    let show_pr = github_authed
+        && github_slug(row).is_some()
+        && data
+            .default_branch
+            .as_ref()
+            .is_some_and(|d| *d != row.branch);
+    if show_push || show_pr || data.pr_url.is_some() {
+        let mut sync = div().flex().flex_row().items_center().gap(px(6.));
+        if show_push {
+            if data.push_busy {
+                sync = sync.child(disabled_btn("Pushing…", t));
+            } else {
+                let app6 = app.clone();
+                sync = sync.child(pr_btn(
+                    SharedString::from("push"),
+                    "Push",
+                    t,
+                    move |cx: &mut gpui::App| {
+                        app6.update(cx, |this, cx| this.drawer_push(cx));
+                    },
+                ));
+            }
+        }
+        if show_pr {
+            if data.pr_busy {
+                sync = sync.child(disabled_btn("Opening PR…", t));
+            } else {
+                let app7 = app.clone();
+                sync = sync.child(pr_btn(
+                    SharedString::from("open-pr"),
+                    "Open PR",
+                    t,
+                    move |cx: &mut gpui::App| {
+                        app7.update(cx, |this, cx| this.drawer_open_pr(cx));
+                    },
+                ));
+            }
+        }
+        if let Some(url) = &data.pr_url {
+            let url = url.clone();
+            sync = sync.child(
+                div()
+                    .id("view-pr")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(t.r_sm))
+                    .font_family(MONO)
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg1))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(t.surface_hover)))
+                    .child(lucide("external-link", 12., t.fg2))
+                    .child(SharedString::from("View PR"))
+                    .on_click(move |_ev, _win, _cx| {
+                        let _ = launch::open(&url);
+                    }),
+            );
+        }
+        col = col.child(sync);
     }
 
     // Unstaged / Staged file lists, then the selected file's diff.

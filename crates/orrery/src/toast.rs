@@ -73,6 +73,9 @@ pub struct Toast {
     pub title: SharedString,
     pub detail: Option<SharedString>,
     pub key: Option<SharedString>,
+    /// A link the toast opens when clicked (e.g. a freshly created PR's URL);
+    /// clicking still dismisses it afterwards.
+    pub url: Option<SharedString>,
 }
 
 impl OrreryApp {
@@ -86,7 +89,7 @@ impl OrreryApp {
         detail: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> u64 {
-        self.insert_toast(None, kind, title.into(), detail, cx)
+        self.insert_toast(None, kind, title.into(), detail, None, cx)
     }
 
     /// Show or update the toast owned by `key` — the in-flight-operation
@@ -102,7 +105,21 @@ impl OrreryApp {
         detail: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> u64 {
-        self.insert_toast(Some(key.into()), kind, title.into(), detail, cx)
+        self.insert_toast(Some(key.into()), kind, title.into(), detail, None, cx)
+    }
+
+    /// Like [`Self::upsert_toast`] but the resolved toast is a link: clicking
+    /// it opens `url` (then dismisses). Used by "PR opened" to jump to the PR.
+    pub fn upsert_toast_link(
+        &mut self,
+        key: impl Into<SharedString>,
+        kind: ToastKind,
+        title: impl Into<SharedString>,
+        detail: Option<SharedString>,
+        url: SharedString,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        self.insert_toast(Some(key.into()), kind, title.into(), detail, Some(url), cx)
     }
 
     fn insert_toast(
@@ -111,6 +128,7 @@ impl OrreryApp {
         kind: ToastKind,
         title: SharedString,
         detail: Option<SharedString>,
+        url: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> u64 {
         self.toast_seq += 1;
@@ -121,6 +139,7 @@ impl OrreryApp {
             title,
             detail,
             key: key.clone(),
+            url,
         };
         let slot = key.and_then(|k| self.toasts.iter().position(|x| x.key.as_ref() == Some(&k)));
         match slot {
@@ -188,10 +207,12 @@ impl OrreryApp {
 }
 
 /// One flat toast card: leading semantic icon, title + optional detail, on the
-/// surface token with an elevation border. Clicking anywhere dismisses it.
+/// surface token with an elevation border. Clicking anywhere dismisses it —
+/// and first opens the toast's link when it carries one.
 fn toast_card(toast: &Toast, t: &Theme, cx: &mut Context<OrreryApp>) -> impl IntoElement {
     let (icon, color) = toast.kind.style(t);
     let id = toast.id;
+    let url = toast.url.clone();
     let hov = t.surface_hover;
     let mut text = div()
         .flex()
@@ -214,7 +235,7 @@ fn toast_card(toast: &Toast, t: &Theme, cx: &mut Context<OrreryApp>) -> impl Int
                 .child(detail.clone()),
         );
     }
-    div()
+    let mut card = div()
         .id(SharedString::from(format!("toast-{id}")))
         .flex()
         .flex_row()
@@ -227,7 +248,16 @@ fn toast_card(toast: &Toast, t: &Theme, cx: &mut Context<OrreryApp>) -> impl Int
         .border_color(rgb(t.border_strong))
         .cursor_pointer()
         .hover(move |s| s.bg(rgb(hov)))
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss_toast(id, cx)))
+        .on_click(cx.listener(move |this, _ev, _w, cx| {
+            if let Some(url) = &url {
+                let _ = orrery_core::launch::open(url);
+            }
+            this.dismiss_toast(id, cx);
+        }))
         .child(lucide(icon, 16., color))
-        .child(text)
+        .child(text);
+    if toast.url.is_some() {
+        card = card.child(lucide("external-link", 13., t.fg3));
+    }
+    card
 }
