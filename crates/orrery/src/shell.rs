@@ -312,6 +312,13 @@ pub struct OrreryApp {
     pub fleet_run: Option<crate::fleet::FleetRun>,
     /// Monotonic fleet-run id source — guards stale progress events.
     pub fleet_seq: u64,
+    /// The pending bulk-prune confirm (the fleet bar's confirm strip), if any.
+    /// Dropped on selection changes / Esc / Cancel / a run starting, so a
+    /// stale plan can never execute (see `fleet.rs`).
+    pub fleet_prune: Option<crate::fleet::PrunePlan>,
+    /// Bumped each time a prune scan starts, so a stale scan result from a
+    /// cancelled/superseded confirm can't resurrect the strip.
+    pub fleet_prune_seq: u64,
     /// Active toasts, oldest first (rendered bottom-right by
     /// `toast::toast_layer`; see `toast.rs` for the lifecycle).
     pub toasts: Vec<crate::toast::Toast>,
@@ -824,9 +831,13 @@ impl OrreryApp {
     /// The current palette result list (actions + repos + code hits).
     fn palette_items(&self, cx: &Context<Self>) -> Vec<crate::palette::PaletteItem> {
         match &self.overlay {
-            Some(Overlay::Palette(d)) => {
-                crate::palette::items(&self.rows, &d.code, &d.semantic, &d.query.read(cx).value())
-            }
+            Some(Overlay::Palette(d)) => crate::palette::items(
+                &self.rows,
+                &d.code,
+                &d.semantic,
+                &d.query.read(cx).value(),
+                !self.selected.is_empty(),
+            ),
             _ => Vec::new(),
         }
     }
@@ -1032,6 +1043,42 @@ impl OrreryApp {
         match item {
             PaletteItem::Action(PaletteAction::Rescan) => self.rescan(cx),
             PaletteItem::Action(PaletteAction::Settings) => self.view = View::Settings,
+            // Fleet verbs (#184) — the same run plumbing as the fleet bar
+            // (`fleet.rs`); one bulk run at a time is enforced there.
+            PaletteItem::Action(PaletteAction::FetchAll) => {
+                let repos: Vec<String> = self.rows.iter().map(|r| r.id.to_string()).collect();
+                self.run_fleet_repos(crate::fleet::FleetOp::Fetch, repos, cx);
+            }
+            PaletteItem::Action(PaletteAction::PullBehind) => {
+                let repos: Vec<String> = self
+                    .rows
+                    .iter()
+                    .filter(|r| r.behind > 0)
+                    .map(|r| r.id.to_string())
+                    .collect();
+                if repos.is_empty() {
+                    self.push_toast(
+                        crate::toast::ToastKind::Info,
+                        "Nothing behind",
+                        Some("Every repo is up to date with its upstream.".into()),
+                        cx,
+                    );
+                } else {
+                    self.run_fleet_repos(crate::fleet::FleetOp::Pull, repos, cx);
+                }
+            }
+            PaletteItem::Action(PaletteAction::FetchSelected) => {
+                self.run_fleet(crate::fleet::FleetOp::Fetch, cx)
+            }
+            PaletteItem::Action(PaletteAction::PullSelected) => {
+                self.run_fleet(crate::fleet::FleetOp::Pull, cx)
+            }
+            PaletteItem::Action(PaletteAction::SelectDirty) => {
+                self.select_where(|r| r.dirty > 0, "dirty", cx)
+            }
+            PaletteItem::Action(PaletteAction::SelectBehind) => {
+                self.select_where(|r| r.behind > 0, "behind their upstream", cx)
+            }
             PaletteItem::Repo(i) | PaletteItem::Recall { row: i, .. } => {
                 if let Some(r) = self.rows.get(i) {
                     let _ = orrery_core::launch::launch(&self.config.ide_command, &r.id);
@@ -3895,6 +3942,10 @@ impl Render for OrreryApp {
                     this.close_overlay();
                     window.focus(&this.focus, cx);
                     cx.notify();
+                } else if this.fleet_prune.is_some() {
+                    // A pending prune confirm dismisses first, keeping the
+                    // selection — a second Esc clears that.
+                    this.cancel_fleet_prune(cx);
                 } else if !this.selected.is_empty() {
                     // No overlay to dismiss — Esc clears the fleet selection.
                     this.clear_selection(cx);
@@ -3956,7 +4007,13 @@ impl OrreryApp {
             }
             Some(Overlay::Palette(data)) => {
                 let query = data.query.read(cx).value();
-                let items = crate::palette::items(&self.rows, &data.code, &data.semantic, &query);
+                let items = crate::palette::items(
+                    &self.rows,
+                    &data.code,
+                    &data.semantic,
+                    &query,
+                    !self.selected.is_empty(),
+                );
                 Some(
                     crate::palette::render(data, &items, &self.rows, t, &cx.entity())
                         .into_any_element(),

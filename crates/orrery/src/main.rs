@@ -146,6 +146,8 @@ fn main() {
                             selected: Default::default(),
                             fleet_run: None,
                             fleet_seq: 0,
+                            fleet_prune: None,
+                            fleet_prune_seq: 0,
                             toasts: Vec::new(),
                             toast_seq: 0,
                             grid: Default::default(),
