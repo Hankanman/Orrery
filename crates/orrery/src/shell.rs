@@ -19,6 +19,7 @@ use crate::card::card;
 use crate::data::Row;
 use crate::icon::lucide;
 use crate::theme::Theme;
+use crate::toast::ToastKind;
 
 /// Grid row height without / with AI summary lines (the launcher row is the
 /// bottom of the card, so the row must be tall enough not to clip it).
@@ -229,6 +230,12 @@ pub struct OrreryApp {
     /// poller — the Inbox nav badge's fallback until the inbox itself loads.
     /// Empty until the first poll lands.
     pub attention: Vec<String>,
+    /// The raw inbox facts from the background attention poll — the attention
+    /// model's host input until the Inbox view loads its own (fresher) copy.
+    /// `None` until the first poll lands, which is how
+    /// [`Self::recompute_attention`] tells "no host facts yet" from "inbox
+    /// genuinely empty".
+    pub polled_inbox: Option<Vec<orrery_core::inbox::InboxItem>>,
     /// The ranked "needs you" list from `orrery_core::attention::compute`
     /// (Urgent first). Recomputed on each source update — rescan, inbox load,
     /// cleanup scan, agents poll — never per frame.
@@ -237,6 +244,15 @@ pub struct OrreryApp {
     /// [`Self::recompute_attention`] — the grid Attention filter + card-dot
     /// lookup.
     pub attention_by_repo: std::collections::HashMap<SharedString, Severity>,
+    /// Keys of the urgent attention items already surfaced as desktop
+    /// notifications, so an item notifies once per appearance, not per
+    /// recompute. `None` until the first recompute with host facts, which
+    /// seeds it from the persisted snapshot (so a restart doesn't re-notify
+    /// everything still pending).
+    pub attention_seen: Option<std::collections::HashSet<String>>,
+    /// The attention summary last pushed to the tray — recomputes skip the
+    /// (cross-thread) tray round-trip when nothing changed.
+    pub tray_attention: orrery_platform::tray::TrayAttention,
     /// The modal layered over the active view, if any (drawer/palette/dialog).
     pub overlay: Option<Overlay>,
     /// Async-loaded git data for the open drawer (branches/commits/worktrees).
@@ -260,6 +276,12 @@ pub struct OrreryApp {
     pub active_agents: std::collections::HashSet<SharedString>,
     /// Whether the Agents-view poll loop is running (guards against duplicates).
     pub agents_polling: bool,
+    /// Worktree path whose Agents "Remove worktree" button is armed, awaiting a
+    /// confirming second click (the cleanup-confirm pattern).
+    pub agents_confirm: Option<SharedString>,
+    /// Bumped each time a worktree-remove confirm is armed, so a stale revert
+    /// timer from an earlier arm can't clear a newer one.
+    pub agents_confirm_gen: u64,
     /// Slugs currently being cloned from the Explore view.
     pub explore_cloning: std::collections::HashSet<SharedString>,
     /// Explore clone failures keyed by slug, shown on the card; cleared on retry.
@@ -273,6 +295,10 @@ pub struct OrreryApp {
     pub services: Services,
     /// Whether the system tray came up — gates close-to-tray.
     pub tray_active: bool,
+    /// Handle to the live tray (when it came up) — the attention summary is
+    /// pushed through it after each [`Self::recompute_attention`]. Updates are
+    /// a short synchronous round-trip to the tray thread.
+    pub tray: Option<orrery_platform::tray::TrayHandle>,
     /// Handle to the fs-watcher thread — re-armed when repos/roots are added at
     /// runtime (Settings save, New Project, Explore clone) so new paths get
     /// live change events without a restart.
@@ -364,6 +390,60 @@ fn recent_summaries(id: &str, limit: usize) -> Vec<String> {
         .collect()
 }
 
+/// Cache-meta key persisting the urgent-item keys already notified, so a
+/// restart doesn't re-notify everything still pending. Distinct from the
+/// platform notifier's `attention_seen` (whose keys are its own format).
+const ATTENTION_SEEN_KEY: &str = "attention_urgent_seen";
+
+/// Stable identity of an attention item for notification dedupe: kind + the
+/// most specific repo key + summary. The same fact rendered from either inbox
+/// source (background poll / Inbox view) produces the same key.
+fn attention_key(item: &AttentionItem) -> String {
+    let repo = item.repo.id.as_ref().cloned().unwrap_or_else(|| {
+        format!(
+            "{}/{}",
+            item.repo.remote_host.as_deref().unwrap_or(""),
+            item.repo.slug.as_deref().unwrap_or(&item.repo.name),
+        )
+    });
+    format!("{:?}|{repo}|{}", item.kind, item.summary)
+}
+
+/// Does config allow desktop-notifying this urgent kind? Layered under the
+/// `notify_enabled` + `notify_attention` master switches; the pre-existing
+/// per-kind toggles keep their meaning now that these kinds notify from the
+/// model instead of the platform poller.
+fn urgent_kind_enabled(cfg: &AppConfig, kind: AttentionKind) -> bool {
+    match kind {
+        AttentionKind::ReviewRequested => cfg.notify_review_requested,
+        AttentionKind::CiFailing => cfg.notify_ci_failure,
+        _ => true,
+    }
+}
+
+/// Max attention items surfaced in the tray menu.
+const TRAY_TOP: usize = 3;
+
+/// Fold the ranked attention list into the tray's compact summary: actionable
+/// counts (Urgent + Attention — Info is ambient and stays off the tray) and
+/// the top few lines. `items` is already severity-sorted, so the top lines
+/// are the most urgent.
+fn tray_summary(items: &[AttentionItem]) -> orrery_platform::tray::TrayAttention {
+    let mut summary = orrery_platform::tray::TrayAttention::default();
+    for item in items.iter().filter(|i| i.severity != Severity::Info) {
+        summary.total += 1;
+        if item.severity == Severity::Urgent {
+            summary.urgent += 1;
+        }
+        if summary.top.len() < TRAY_TOP {
+            summary
+                .top
+                .push(format!("{} · {}", item.repo.name, item.summary));
+        }
+    }
+    summary
+}
+
 impl OrreryApp {
     /// Install a fresh fleet snapshot (rows + raw repos + root count) and
     /// recompute the attention model from it. Every path that reloads `rows`
@@ -377,20 +457,28 @@ impl OrreryApp {
     }
 
     /// Recompute the ranked attention list (and the per-repo severity lookup)
-    /// from what the app already holds. Pure and cheap — runs on the
-    /// foreground after each source update; no I/O or polling happens here.
+    /// from what the app already holds, then route it downstream: push the
+    /// summary to the tray (if it changed) and desktop-notify urgent items
+    /// that newly appeared. Cheap and foreground-safe — runs after each
+    /// source update; no polling happens here (the notification send is a
+    /// detached fire-and-forget task, and the tray push is a short
+    /// cross-thread round-trip skipped when unchanged).
     ///
     /// Freshness follows source freshness: local git facts refresh with every
-    /// (re)scan, inbox facts with each Inbox load, prunable counts with each
-    /// Cleanup scan, agent sessions with the agents poll — and facts from a
-    /// lazy view are simply absent until it has loaded. CI facts stay empty
-    /// for now: there's no central CI poll yet (`inbox::github_ci` is fetched
+    /// (re)scan, inbox facts with each attention poll (and each Inbox load,
+    /// which is fresher while it lasts), prunable counts with each Cleanup
+    /// scan, agent sessions with the agents poll — and facts from a lazy view
+    /// are simply absent until it has loaded. CI facts stay empty for now:
+    /// there's no central CI poll yet (`inbox::github_ci` is fetched
     /// per-drawer), so `CiFailing` items arrive with a later #183 workstream.
     pub fn recompute_attention(&mut self) {
         use orrery_core::attention::{self, AgentFact, PrunableFact};
+        // Prefer the Inbox view's facts (they're the freshest the moment it
+        // loads); fall back to the background poll's so the model — and the
+        // tray/notifications behind it — works with the window never touched.
         let inbox: &[orrery_core::inbox::InboxItem] = match &self.inbox {
             crate::views::inbox::InboxState::Ready(d) => &d.raw,
-            _ => &[],
+            _ => self.polled_inbox.as_deref().unwrap_or(&[]),
         };
         let prunable: Vec<PrunableFact> = match &self.cleanup {
             crate::views::cleanup::CleanupState::Ready(repos) => repos
@@ -403,18 +491,30 @@ impl OrreryApp {
             _ => Vec::new(),
         };
         // Only live sessions are detectable (the /proc scan can't see one that
-        // already exited), so every agent fact is `running: true` for now.
-        let agents: Vec<AgentFact> = match &self.agents {
-            crate::views::agents::AgentsState::Ready(rows) => rows
-                .iter()
-                .map(|a| AgentFact {
-                    repo_id: a.repo.to_string(),
-                    program: a.program(),
-                    running: true,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        // already exited), so every agent fact is `running: true` for now. A
+        // live dispatched-worktree session counts against its *origin* repo —
+        // the worktree itself isn't a scanned repo.
+        let agents: Vec<AgentFact> =
+            match &self.agents {
+                crate::views::agents::AgentsState::Ready(data) => {
+                    data.sessions
+                        .iter()
+                        .map(|a| AgentFact {
+                            repo_id: a.repo.to_string(),
+                            program: a.program(),
+                            running: true,
+                        })
+                        .chain(data.dispatched.iter().filter(|d| d.pid.is_some()).map(|d| {
+                            AgentFact {
+                                repo_id: d.origin.to_string(),
+                                program: d.program.to_string(),
+                                running: true,
+                            }
+                        }))
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
         self.attention_items = attention::compute(&self.repos, inbox, &[], &prunable, &agents);
         // Items are severity-sorted (Urgent first), so a repo's first
         // occurrence is its highest severity.
@@ -426,6 +526,78 @@ impl OrreryApp {
                     .or_insert(item.severity);
             }
         }
+        self.push_tray_attention();
+        self.notify_fresh_urgent();
+    }
+
+    /// Mirror the attention model onto the tray: actionable counts + the top
+    /// items. Skips the cross-thread update when the summary hasn't changed.
+    fn push_tray_attention(&mut self) {
+        let summary = tray_summary(&self.attention_items);
+        if summary == self.tray_attention {
+            return;
+        }
+        if let Some(tray) = &self.tray {
+            tray.set_attention(summary.clone());
+        }
+        self.tray_attention = summary;
+    }
+
+    /// Desktop-notify urgent attention items that newly appeared in this
+    /// recompute, once per appearance: the key-set of already-surfaced items
+    /// is kept on the app (and persisted, so a restart doesn't re-notify
+    /// what's still pending — the same trick as the platform notifier's poll
+    /// dedupe).
+    fn notify_fresh_urgent(&mut self) {
+        use std::collections::HashSet;
+        // Every urgent kind today derives from host inbox facts (review
+        // requests; CI facts aren't wired yet). Until an inbox source has
+        // produced — the background poll or the Inbox view — an empty urgent
+        // set means "not loaded yet", not "all clear": diffing against it
+        // would first persist an empty snapshot, then re-notify every
+        // still-pending item on the next poll of every launch. Revisit this
+        // gate when CI facts (a non-inbox urgent source) land.
+        let inbox_loaded = self.polled_inbox.is_some()
+            || matches!(self.inbox, crate::views::inbox::InboxState::Ready(_));
+        if !inbox_loaded {
+            return;
+        }
+        let current: HashSet<String> = self
+            .attention_items
+            .iter()
+            .filter(|i| i.severity == Severity::Urgent)
+            .map(attention_key)
+            .collect();
+        // First recompute with facts this session → seed from the persisted
+        // snapshot, so only items that appeared since the last run notify.
+        // No snapshot at all (first-ever run) → baseline silently, like the
+        // platform notifier's first poll.
+        let prev = self.attention_seen.take().or_else(|| {
+            orrery_core::cache::get_meta(ATTENTION_SEEN_KEY)
+                .and_then(|s| serde_json::from_str(&s).ok())
+        });
+        if let Some(prev) = &prev
+            && self.config.notify_enabled
+            && self.config.notify_attention
+        {
+            for item in self.attention_items.iter().filter(|i| {
+                i.severity == Severity::Urgent
+                    && urgent_kind_enabled(&self.config, i.kind)
+                    && !prev.contains(&attention_key(i))
+            }) {
+                let title = item.repo.name.clone();
+                let body = item.summary.clone();
+                crate::task::spawn_detached(async move {
+                    let _ = orrery_platform::notify::send(&title, &body).await;
+                });
+            }
+        }
+        if prev.as_ref() != Some(&current)
+            && let Ok(blob) = serde_json::to_string(&current)
+        {
+            orrery_core::cache::set_meta(ATTENTION_SEEN_KEY, &blob);
+        }
+        self.attention_seen = Some(current);
     }
 
     /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
@@ -439,6 +611,11 @@ impl OrreryApp {
         // The new-worktree field lives in Overview, shown immediately on open.
         self.drawer.worktree_input = Some(cx.new(|cx| {
             gpui_component::input::InputState::new(window, cx).placeholder("new-worktree-name")
+        }));
+        // The dispatch task-prompt field (Overview's "Dispatch agent" section) —
+        // created here because InputState needs the Window.
+        self.drawer.dispatch_input = Some(cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx).placeholder("Task for the agent…")
         }));
         crate::drawer::load_overview(repo, cx);
         cx.notify();
@@ -1444,6 +1621,169 @@ impl OrreryApp {
         .detach();
     }
 
+    /// Drawer Changes tab: push the current branch (setting the upstream when
+    /// there is none — see `git_ops::push`). Sync-but-network git work, so it
+    /// runs on the background executor; progress and the outcome flow through
+    /// one keyed toast ("Pushing…" → Pushed / Push failed).
+    pub fn drawer_push(&mut self, cx: &mut Context<Self>) {
+        if self.drawer.push_busy {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
+        self.drawer.push_busy = true;
+        let key = format!("push:{repo}");
+        self.upsert_toast(
+            key.clone(),
+            ToastKind::Progress,
+            format!("Pushing {name}…"),
+            None,
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let id = repo.to_string();
+            let result = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::push(&id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo {
+                    this.drawer.push_busy = false;
+                }
+                match result {
+                    Ok(msg) => {
+                        if this.drawer.repo == repo {
+                            this.drawer.committed = false;
+                        }
+                        this.upsert_toast(key, ToastKind::Success, "Pushed", Some(msg.into()), cx);
+                    }
+                    Err(e) => {
+                        this.upsert_toast(key, ToastKind::Error, "Push failed", Some(e.into()), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drawer Changes tab: open a GitHub PR for the current branch — push
+    /// first (ensuring the branch exists upstream), draft a title/body from
+    /// the commit range (AI when `aiReady`, else the latest subject + commit
+    /// list — the button works either way), then create the PR. Progress and
+    /// the outcome flow through one keyed toast; the success toast links to
+    /// the PR, as does a "View PR" affordance in the drawer.
+    pub fn drawer_open_pr(&mut self, cx: &mut Context<Self>) {
+        if self.drawer.pr_busy {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        let Some(row) = self.rows.iter().find(|r| r.id == repo) else {
+            return;
+        };
+        let slug = row.slug.to_string();
+        let head = row.branch.to_string();
+        let Some(base) = self.drawer.default_branch.as_ref().map(|b| b.to_string()) else {
+            return;
+        };
+        if head == base {
+            return;
+        }
+        let ai_ready = self.services.ai_ready;
+        self.drawer.pr_busy = true;
+        let key = format!("pr:{repo}");
+        self.upsert_toast(
+            key.clone(),
+            ToastKind::Progress,
+            "Opening PR…",
+            Some(format!("{head} → {base}").into()),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            // 1. Ensure the branch is pushed (also sets the upstream if new).
+            let id = repo.to_string();
+            let pushed = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::push(&id) })
+                .await;
+            if let Err(e) = pushed {
+                let _ = this.update(cx, |this, cx| {
+                    if this.drawer.repo == repo {
+                        this.drawer.pr_busy = false;
+                    }
+                    this.upsert_toast(key, ToastKind::Error, "Push failed", Some(e.into()), cx);
+                    cx.notify();
+                });
+                return;
+            }
+            // 2. The branch's commit range, for drafting the title/body.
+            let (id, base2) = (repo.to_string(), base.clone());
+            let commits: Vec<String> = cx
+                .background_executor()
+                .spawn(async move {
+                    orrery_core::git_ops::commits_ahead_of(&id, &base2, 30)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| c.summary)
+                        .collect()
+                })
+                .await;
+            // 3. Title/body: AI-drafted when available, else the fallback —
+            //    only the drafting is aiReady-gated, never the button.
+            let drafted = if ai_ready && !commits.is_empty() {
+                let (h, c) = (head.clone(), commits.clone());
+                crate::task::run(async move { orrery_core::ai::pr_description(&h, &c).await })
+                    .await
+                    .ok()
+                    .and_then(|d| orrery_core::ai::split_pr_draft(&d))
+            } else {
+                None
+            };
+            let (title, body) =
+                drafted.unwrap_or_else(|| orrery_core::ai::fallback_pr_draft(&head, &commits));
+            // 4. Create the PR (network → the shared tokio runtime).
+            let (s, h, b) = (slug.clone(), head.clone(), base.clone());
+            let (t2, b2) = (title.clone(), body.clone());
+            let result = crate::task::run(async move {
+                let token =
+                    orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
+                orrery_core::forge::create_pr(&s, &h, &b, &t2, &b2, &token).await
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo {
+                    this.drawer.pr_busy = false;
+                }
+                match result {
+                    Ok(url) => {
+                        if this.drawer.repo == repo {
+                            this.drawer.pr_url = Some(url.clone().into());
+                        }
+                        this.upsert_toast_link(
+                            key,
+                            ToastKind::Success,
+                            "PR opened",
+                            Some(title.into()),
+                            url.into(),
+                            cx,
+                        );
+                    }
+                    Err(e) => {
+                        this.upsert_toast(
+                            key,
+                            ToastKind::Error,
+                            "Open PR failed",
+                            Some(e.into()),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// One-shot at launch: if AI is enabled and reachable, mark it ready and
     /// kick off the semantic index (so Ctrl+K works without opening Settings).
     pub fn ai_startup(&mut self, cx: &mut Context<Self>) {
@@ -1554,6 +1894,7 @@ impl OrreryApp {
         let mut draft = s.draft.clone();
         draft.ide_command = s.ide.read(cx).value().to_string();
         draft.agent_command = s.agent.read(cx).value().to_string();
+        draft.agent_dispatch_args = s.agent_dispatch.read(cx).value().to_string();
         draft.ollama_host = s.ollama_host.read(cx).value().to_string();
         draft.ai_model = s.ai_model.read(cx).value().to_string();
         draft.embed_model = s.embed_model.read(cx).value().to_string();
@@ -1762,8 +2103,20 @@ impl OrreryApp {
                 .spawn(async move { crate::views::agents::scan(&rows, &agent_command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let active: std::collections::HashSet<SharedString> =
-                    result.iter().map(|a| a.repo.clone()).collect();
+                // Card indicator: repos with a live session, including the
+                // origin repo of any live dispatched-worktree session.
+                let active: std::collections::HashSet<SharedString> = result
+                    .sessions
+                    .iter()
+                    .map(|a| a.repo.clone())
+                    .chain(
+                        result
+                            .dispatched
+                            .iter()
+                            .filter(|d| d.pid.is_some())
+                            .map(|d| d.origin.clone()),
+                    )
+                    .collect();
                 let changed = active != this.active_agents;
                 this.active_agents = active;
                 this.agents = AgentsState::Ready(result);
@@ -1816,6 +2169,224 @@ impl OrreryApp {
                 .spawn(async move { orrery_platform::agents::terminate(pid) })
                 .await;
             let _ = this.update(cx, |this, cx| this.scan_agents(false, cx));
+        })
+        .detach();
+    }
+
+    /// Toggle the drawer's "fresh worktree" dispatch option.
+    pub fn toggle_dispatch_fresh(&mut self, cx: &mut Context<Self>) {
+        self.drawer.dispatch_fresh = !self.drawer.dispatch_fresh;
+        cx.notify();
+    }
+
+    /// Dispatch a coding agent onto `repo` with a task `prompt` (#185). Plain
+    /// dispatch launches `agent_command` + `agent_dispatch_args` in the repo
+    /// directory, exactly like the drawer's Agent button plus the prompt as an
+    /// argument. With `fresh`, a branch `agent/<slug>-<rand>` and a worktree
+    /// under the app data dir are created first (sync git — background
+    /// executor), the pairing is recorded in the cache, and the agent starts in
+    /// the worktree. Success/failure lands as a toast either way.
+    pub fn dispatch_agent(
+        &mut self,
+        repo: SharedString,
+        prompt: String,
+        fresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::toast::ToastKind;
+        let cmd = self.config.agent_command.clone();
+        let args = self.config.agent_dispatch_args.clone();
+
+        if !fresh {
+            match orrery_core::launch::spawn_with_prompt(&cmd, &args, &repo, &prompt) {
+                Ok(_) => {
+                    self.push_toast(
+                        ToastKind::Success,
+                        "Agent dispatched",
+                        Some(repo.clone()),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    self.push_toast(ToastKind::Error, "Dispatch failed", Some(e.into()), cx);
+                }
+            }
+            return;
+        }
+
+        let names = orrery_core::dispatch::names(&prompt);
+        let Some(dest) = orrery_core::dispatch::worktree_dest(&repo, &names.worktree) else {
+            self.push_toast(
+                ToastKind::Error,
+                "Dispatch failed",
+                Some("no data directory for worktrees".into()),
+                cx,
+            );
+            return;
+        };
+        let toast_key = SharedString::from(format!("dispatch:{repo}"));
+        self.upsert_toast(
+            toast_key.clone(),
+            ToastKind::Progress,
+            format!("Creating worktree on {}…", names.branch),
+            Some(repo.clone()),
+            cx,
+        );
+
+        let branch = names.branch.clone();
+        let id = repo.to_string();
+        let now = crate::data::now_unix();
+        cx.spawn(async move |this, cx| {
+            // Worktree add is sync libgit2 work — keep it off the UI thread.
+            let (id2, name, branch2, prompt2, dest2) = (
+                id.clone(),
+                names.worktree.clone(),
+                names.branch.clone(),
+                prompt.clone(),
+                dest.to_string_lossy().into_owned(),
+            );
+            let created: Result<String, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    if let Some(parent) = std::path::Path::new(&dest2).parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let wt_path = orrery_core::git_ops::add_worktree_on_branch(
+                        &id2, &name, &branch2, &dest2,
+                    )?;
+                    orrery_core::cache::record_agent_worktree(
+                        &orrery_core::cache::AgentWorktree {
+                            worktree_path: wt_path.clone(),
+                            repo_id: id2,
+                            branch: branch2,
+                            worktree_name: name,
+                            prompt: prompt2,
+                            created_at: now,
+                        },
+                    )?;
+                    Ok(wt_path)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                use crate::toast::ToastKind;
+                match created {
+                    Ok(wt_path) => {
+                        let launched = orrery_core::launch::spawn_with_prompt(
+                            &this.config.agent_command,
+                            &this.config.agent_dispatch_args,
+                            &wt_path,
+                            &prompt,
+                        );
+                        match launched {
+                            Ok(_) => this.upsert_toast(
+                                toast_key,
+                                ToastKind::Success,
+                                "Agent dispatched on fresh worktree",
+                                Some(branch.into()),
+                                cx,
+                            ),
+                            Err(e) => this.upsert_toast(
+                                toast_key,
+                                ToastKind::Error,
+                                "Worktree created, but the agent failed to launch",
+                                Some(e.into()),
+                                cx,
+                            ),
+                        };
+                        // Show the new worktree in the open drawer's Overview
+                        // and the Agents view without waiting for the poll.
+                        if this.drawer.repo == repo {
+                            crate::drawer::load_overview(repo.clone(), cx);
+                        }
+                        this.scan_agents(false, cx);
+                    }
+                    Err(e) => {
+                        this.upsert_toast(
+                            toast_key,
+                            ToastKind::Error,
+                            "Dispatch failed",
+                            Some(e.into()),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// First click on a dispatched worktree's "Remove worktree" button: arm the
+    /// two-stage confirm (same pattern as [`Self::arm_prune`]).
+    pub fn arm_worktree_remove(&mut self, path: SharedString, cx: &mut Context<Self>) {
+        self.agents_confirm = Some(path);
+        self.agents_confirm_gen += 1;
+        let generation = self.agents_confirm_gen;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.agents_confirm_gen == generation && this.agents_confirm.take().is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Remove a dispatched agent worktree: refused (with a toast) while it has
+    /// uncommitted changes, otherwise unlink it from the origin repo, delete
+    /// its directory (it lives under our data dir), and forget the pairing.
+    /// The `agent/…` branch is kept — it holds the agent's commits. Only
+    /// reached via the two-stage confirm ([`Self::arm_worktree_remove`]).
+    pub fn remove_dispatch_worktree(
+        &mut self,
+        path: SharedString,
+        origin: SharedString,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.agents_confirm = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (p, o, n) = (path.to_string(), origin.to_string(), name.to_string());
+            let result: Result<(), String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let dirty = !orrery_core::git_ops::changes(&p)
+                        .map_err(|e| format!("can't inspect worktree: {e}"))?
+                        .is_empty();
+                    if dirty {
+                        return Err("the worktree has uncommitted changes".into());
+                    }
+                    orrery_core::git_ops::remove_worktree(&o, &n)?;
+                    // Unlinking leaves the files; this worktree is ours (under
+                    // the app data dir), so clean up the directory too.
+                    std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
+                    orrery_core::cache::remove_agent_worktree(&p)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                use crate::toast::ToastKind;
+                match result {
+                    Ok(()) => this.push_toast(
+                        ToastKind::Success,
+                        "Worktree removed",
+                        Some(path.clone()),
+                        cx,
+                    ),
+                    Err(e) => this.push_toast(
+                        ToastKind::Error,
+                        "Worktree not removed",
+                        Some(e.into()),
+                        cx,
+                    ),
+                };
+                this.scan_agents(false, cx);
+            });
         })
         .detach();
     }
@@ -2729,11 +3300,15 @@ impl OrreryApp {
     fn agents_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::views::agents::AgentsState;
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        let total = if let AgentsState::Ready(rows) = &self.agents {
-            for r in rows {
+        let total = if let AgentsState::Ready(data) = &self.agents {
+            for r in &data.sessions {
                 *counts.entry(r.name.as_ref()).or_default() += 1;
             }
-            rows.len()
+            // Dispatched worktrees file under their origin repo's name.
+            for d in &data.dispatched {
+                *counts.entry(d.origin_name.as_ref()).or_default() += 1;
+            }
+            data.sessions.len() + data.dispatched.len()
         } else {
             0
         };
@@ -2951,6 +3526,7 @@ impl OrreryApp {
             View::Agents => crate::views::agents::render(
                 &self.agents,
                 self.view_filter.as_deref(),
+                self.agents_confirm.as_deref(),
                 t,
                 &cx.entity(),
             )
@@ -3373,6 +3949,7 @@ impl OrreryApp {
                         &cmds.0,
                         &cmds.1,
                         self.services.ai_ready,
+                        self.services.github_authed,
                     )
                     .into_any_element(),
                 )
@@ -3555,4 +4132,75 @@ fn placeholder(view: View, t: &Theme) -> impl IntoElement {
                 .text_color(rgb(t.fg3))
                 .child("Phase 2 scaffold"),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orrery_core::attention::RepoRef;
+
+    fn item(kind: AttentionKind, name: &str, id: Option<&str>) -> AttentionItem {
+        AttentionItem {
+            repo: RepoRef {
+                id: id.map(str::to_string),
+                remote_host: Some("github.com".into()),
+                slug: Some(format!("o/{name}")),
+                name: name.into(),
+            },
+            kind,
+            severity: kind.severity(),
+            summary: format!("{kind:?} in {name}"),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn tray_summary_counts_actionable_and_caps_top_lines() {
+        // 2 urgent + 2 attention + 1 info → total 4, urgent 2, top capped at 3
+        // (severity-ordered, like the model's output).
+        let items = vec![
+            item(AttentionKind::CiFailing, "a", Some("/a")),
+            item(AttentionKind::ReviewRequested, "b", None),
+            item(AttentionKind::DirtyWorktree, "c", Some("/c")),
+            item(AttentionKind::Ahead, "d", Some("/d")),
+            item(AttentionKind::PrunableBranches, "e", Some("/e")),
+        ];
+        let s = tray_summary(&items);
+        assert_eq!((s.total, s.urgent), (4, 2));
+        assert_eq!(
+            s.top,
+            vec![
+                "a · CiFailing in a",
+                "b · ReviewRequested in b",
+                "c · DirtyWorktree in c",
+            ]
+        );
+
+        let quiet = tray_summary(&[item(AttentionKind::AgentRunning, "x", Some("/x"))]);
+        assert_eq!(quiet, orrery_platform::tray::TrayAttention::default());
+    }
+
+    #[test]
+    fn attention_key_is_stable_and_repo_specific() {
+        let a = item(AttentionKind::ReviewRequested, "a", Some("/a"));
+        assert_eq!(attention_key(&a), attention_key(&a.clone()));
+        // Same fact, different repo → different key. Local id wins; host+slug
+        // is the fallback so unlinked host facts stay distinct across hosts.
+        assert_ne!(
+            attention_key(&a),
+            attention_key(&item(AttentionKind::ReviewRequested, "a", Some("/b")))
+        );
+        let unlinked = item(AttentionKind::ReviewRequested, "a", None);
+        assert!(attention_key(&unlinked).contains("github.com/o/a"));
+    }
+
+    #[test]
+    fn urgent_kind_toggles_keep_their_meaning() {
+        let mut cfg = AppConfig::default();
+        assert!(urgent_kind_enabled(&cfg, AttentionKind::ReviewRequested));
+        cfg.notify_review_requested = false;
+        assert!(!urgent_kind_enabled(&cfg, AttentionKind::ReviewRequested));
+        cfg.notify_ci_failure = false;
+        assert!(!urgent_kind_enabled(&cfg, AttentionKind::CiFailing));
+    }
 }

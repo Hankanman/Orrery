@@ -1,8 +1,13 @@
 //! Background attention poll. Asks GitHub what needs your attention — new PRs,
-//! review requests, CI alerts — and returns the current glance lines plus the
-//! *newly-appeared* items to notify (deduped against the previous poll, filtered
-//! by the per-type opt-in toggles). UI-agnostic: callers surface the glance (a
-//! tray, a nav badge) and fire notifications however they like.
+//! review requests, CI alerts — and returns the current glance lines, the raw
+//! inbox facts (the attention model's host input, so the app has them without
+//! the Inbox view ever opening), and the *newly-appeared* items to notify
+//! (deduped against the previous poll, filtered by the per-type opt-in
+//! toggles). Review requests are gathered but never notified from here: they
+//! are `Urgent` in `orrery_core::attention`, and the app notifies new urgent
+//! items itself after each recompute — notifying here too would double-fire
+//! for the same fact. UI-agnostic: callers surface the glance (a tray, a nav
+//! badge) and fire notifications however they like.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -19,10 +24,11 @@ const POLL_SECS: u64 = 180;
 /// Run the attention poller forever on its own thread + async runtime. On each
 /// tick (immediately, then every `POLL_SECS`) it polls GitHub, fires a desktop
 /// notification for every newly-appeared item via [`crate::notify`], and calls
-/// `on_glance` with the current glance lines so the caller can paint a tray or a
-/// nav badge. Owns all threading + the runtime, so callers stay synchronous and
-/// UI-agnostic. No-ops (the thread exits) if a runtime can't be built.
-pub fn watch(on_glance: impl Fn(Vec<String>) + Send + 'static) {
+/// `on_glance` with the current glance lines + the raw inbox facts so the
+/// caller can paint a tray or a nav badge and feed its attention model. Owns
+/// all threading + the runtime, so callers stay synchronous and UI-agnostic.
+/// No-ops (the thread exits) if a runtime can't be built.
+pub fn watch(on_glance: impl Fn(Vec<String>, Vec<inbox::InboxItem>) + Send + 'static) {
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -33,7 +39,7 @@ pub fn watch(on_glance: impl Fn(Vec<String>) + Send + 'static) {
         rt.block_on(async move {
             loop {
                 let result = poll(&config::load()).await;
-                on_glance(result.lines);
+                on_glance(result.lines, result.inbox);
                 for notice in &result.fresh {
                     let _ = crate::notify::send(&notice.title, &notice.body).await;
                 }
@@ -66,6 +72,9 @@ pub struct PollResult {
     pub lines: Vec<String>,
     /// Items new since the previous poll and enabled by config — to notify.
     pub fresh: Vec<Notice>,
+    /// The raw inbox facts behind the glance — the attention model's host
+    /// input, kept fresh by this poll even when the Inbox view never loads.
+    pub inbox: Vec<inbox::InboxItem>,
 }
 
 /// Run one attention poll: gather current items, update the dedupe snapshot, and
@@ -73,7 +82,7 @@ pub struct PollResult {
 /// (no snapshot yet) `fresh` is empty — otherwise the whole inbox would notify
 /// at once on launch.
 pub async fn poll(cfg: &AppConfig) -> PollResult {
-    let items = collect().await;
+    let (items, inbox) = collect().await;
     let lines: Vec<String> = items.iter().map(|a| a.label.clone()).collect();
 
     let prev: Option<HashSet<String>> =
@@ -99,13 +108,21 @@ pub async fn poll(cfg: &AppConfig) -> PollResult {
         cache::set_meta(SEEN_KEY, &blob);
     }
 
-    PollResult { lines, fresh }
+    PollResult {
+        lines,
+        fresh,
+        inbox,
+    }
 }
 
 fn type_enabled(cfg: &AppConfig, kind: &str) -> bool {
     match kind {
         "pr" => cfg.notify_new_pr,
-        "review" => cfg.notify_review_requested,
+        // Review requests notify through the attention model (they're Urgent
+        // there and the app dedupes + fires after each recompute); notifying
+        // from this poll too would double-fire for the same fact. They still
+        // feed the glance lines and the seen-set above.
+        "review" => false,
         "ci" => cfg.notify_ci_failure,
         _ => false,
     }
@@ -116,16 +133,18 @@ fn short_repo(repo: &str) -> &str {
     repo.rsplit('/').next().unwrap_or(repo)
 }
 
-/// Gather attention items from GitHub. Returns empty (rather than erroring) when
-/// there's no token or a source fails — a degraded poll just shows less.
-async fn collect() -> Vec<Attention> {
+/// Gather attention items from GitHub, plus the raw inbox facts they came
+/// from. Returns empty (rather than erroring) when there's no token or a
+/// source fails — a degraded poll just shows less.
+async fn collect() -> (Vec<Attention>, Vec<inbox::InboxItem>) {
     let mut out = Vec::new();
+    let mut raw = Vec::new();
     if oauth::github_token().is_none() {
-        return out;
+        return (out, raw);
     }
 
     if let Ok(items) = inbox::github_inbox().await {
-        for it in items {
+        for it in &items {
             let short = short_repo(&it.repo);
             match it.kind.as_str() {
                 "pr" => out.push(Attention {
@@ -145,6 +164,7 @@ async fn collect() -> Vec<Attention> {
                 _ => {} // assigned issues aren't an attention-notification type
             }
         }
+        raw = items;
     }
 
     // CheckSuite notifications are GitHub's CI alerts (it notifies on your own
@@ -163,16 +183,29 @@ async fn collect() -> Vec<Attention> {
         }
     }
 
-    out
+    (out, raw)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::short_repo;
+    use super::{short_repo, type_enabled};
+    use orrery_core::model::AppConfig;
 
     #[test]
     fn short_repo_takes_trailing_segment() {
         assert_eq!(short_repo("Hankanman/Orrery"), "Orrery");
         assert_eq!(short_repo("Orrery"), "Orrery");
+    }
+
+    #[test]
+    fn reviews_never_notify_from_the_poll() {
+        // Review requests are Urgent in the attention model; the app notifies
+        // them after each recompute. The poll must not double-fire, whatever
+        // the (still-honored-by-the-model) per-type toggle says.
+        let cfg = AppConfig::default();
+        assert!(cfg.notify_review_requested);
+        assert!(!type_enabled(&cfg, "review"));
+        assert!(type_enabled(&cfg, "pr"));
+        assert!(type_enabled(&cfg, "ci"));
     }
 }

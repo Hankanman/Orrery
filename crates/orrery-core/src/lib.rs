@@ -10,6 +10,7 @@ pub mod ai;
 pub mod attention;
 pub mod cache;
 pub mod config;
+pub mod dispatch;
 pub mod enrich;
 pub mod fleet;
 pub mod forge;

@@ -59,7 +59,14 @@ pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, text TEXT NOT NULL DEFAULT '', last_seen_sha TEXT NOT NULL DEFAULT '', last_seen_unix INTEGER NOT NULL DEFAULT 0);
-         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS agent_worktrees (
+             worktree_path TEXT PRIMARY KEY,
+             repo_id TEXT NOT NULL,
+             branch TEXT NOT NULL,
+             worktree_name TEXT NOT NULL,
+             prompt TEXT NOT NULL,
+             created_at INTEGER NOT NULL);",
     )?;
     conn.execute_batch(HOST_CACHE_DDL)?;
     conn.execute_batch(EMBEDDINGS_DDL)?;
@@ -454,6 +461,96 @@ pub fn set_seen(id: &str, sha: &str, unix: i64) -> Result<(), String> {
     set_seen_on(&conn, id, sha, unix).map_err(|e| e.to_string())
 }
 
+// ── Dispatched agent worktrees (#185) ──────────────────────────────────────
+// The worktree-path ↔ origin-repo pairing for agents dispatched onto a fresh
+// worktree, so the Agents view (and later outcome handling) can find them —
+// the worktrees live under the app data dir, outside any scanned root.
+
+/// One recorded agent-worktree dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentWorktree {
+    /// Absolute path of the worktree's working directory (primary key).
+    pub worktree_path: String,
+    /// The origin repo's id (absolute path).
+    pub repo_id: String,
+    /// The branch the agent works on (`agent/<slug>-<rand>`).
+    pub branch: String,
+    /// The git worktree name in the origin repo (needed to prune it).
+    pub worktree_name: String,
+    /// The task prompt the agent was dispatched with.
+    pub prompt: String,
+    /// Unix time of the dispatch.
+    pub created_at: i64,
+}
+
+fn record_agent_worktree_on(conn: &Connection, wt: &AgentWorktree) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO agent_worktrees
+         (worktree_path, repo_id, branch, worktree_name, prompt, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            wt.worktree_path,
+            wt.repo_id,
+            wt.branch,
+            wt.worktree_name,
+            wt.prompt,
+            wt.created_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn agent_worktrees_on(conn: &Connection) -> Vec<AgentWorktree> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT worktree_path, repo_id, branch, worktree_name, prompt, created_at
+         FROM agent_worktrees ORDER BY created_at DESC",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok(AgentWorktree {
+            worktree_path: r.get(0)?,
+            repo_id: r.get(1)?,
+            branch: r.get(2)?,
+            worktree_name: r.get(3)?,
+            prompt: r.get(4)?,
+            created_at: r.get(5)?,
+        })
+    });
+    match rows {
+        Ok(iter) => iter.flatten().collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn remove_agent_worktree_on(conn: &Connection, worktree_path: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM agent_worktrees WHERE worktree_path = ?1",
+        [worktree_path],
+    )?;
+    Ok(())
+}
+
+/// Record a dispatched agent worktree (upserts on the worktree path).
+pub fn record_agent_worktree(wt: &AgentWorktree) -> Result<(), String> {
+    let conn = open()?;
+    record_agent_worktree_on(&conn, wt).map_err(|e| e.to_string())
+}
+
+/// All recorded agent-worktree dispatches, newest first.
+pub fn agent_worktrees() -> Vec<AgentWorktree> {
+    match open() {
+        Ok(conn) => agent_worktrees_on(&conn),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Forget a dispatched worktree (after it's removed on disk).
+pub fn remove_agent_worktree(worktree_path: &str) -> Result<(), String> {
+    let conn = open()?;
+    remove_agent_worktree_on(&conn, worktree_path).map_err(|e| e.to_string())
+}
+
 fn clear_ai_on(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
     let summaries = conn.execute("DELETE FROM ai_cache", [])?;
     let embeddings = conn.execute("DELETE FROM embeddings", [])?;
@@ -526,6 +623,50 @@ mod tests {
         // An empty seen sha reads back as None (no cursor yet).
         set_seen_on(&conn, "/b", "", 0).unwrap();
         assert_eq!(seen_sha_on(&conn, "/b"), None);
+    }
+
+    #[test]
+    fn agent_worktrees_record_list_remove() {
+        let conn = mem();
+        assert!(agent_worktrees_on(&conn).is_empty());
+
+        let a = AgentWorktree {
+            worktree_path: "/data/worktrees/repo-agent-x-1111".into(),
+            repo_id: "/dev/repo".into(),
+            branch: "agent/x-1111".into(),
+            worktree_name: "agent-x-1111".into(),
+            prompt: "fix x".into(),
+            created_at: 100,
+        };
+        let b = AgentWorktree {
+            worktree_path: "/data/worktrees/repo-agent-y-2222".into(),
+            repo_id: "/dev/repo".into(),
+            branch: "agent/y-2222".into(),
+            worktree_name: "agent-y-2222".into(),
+            prompt: "do y".into(),
+            created_at: 200,
+        };
+        record_agent_worktree_on(&conn, &a).unwrap();
+        record_agent_worktree_on(&conn, &b).unwrap();
+
+        // Newest first, full pairing round-trips.
+        let listed = agent_worktrees_on(&conn);
+        assert_eq!(listed, vec![b.clone(), a.clone()]);
+
+        // Re-recording the same path replaces rather than duplicates.
+        let a2 = AgentWorktree {
+            prompt: "fix x, again".into(),
+            ..a.clone()
+        };
+        record_agent_worktree_on(&conn, &a2).unwrap();
+        let listed = agent_worktrees_on(&conn);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].prompt, "fix x, again");
+
+        remove_agent_worktree_on(&conn, &a.worktree_path).unwrap();
+        assert_eq!(agent_worktrees_on(&conn), vec![b]);
+        // Removing an unknown path is a no-op, not an error.
+        remove_agent_worktree_on(&conn, "/nope").unwrap();
     }
 
     #[test]
