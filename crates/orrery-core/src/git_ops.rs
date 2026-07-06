@@ -203,6 +203,13 @@ pub enum OpOutcome {
     Skipped(String),
 }
 
+/// Skip reason: local history diverged from upstream (a pull would not be a
+/// fast-forward). Named so `fleet::pull_op` can match it exactly.
+pub const SKIP_DIVERGED: &str = "diverged";
+/// Skip reason: uncommitted changes in the working tree. Named so
+/// `fleet::pull_op` can match it exactly.
+pub const SKIP_DIRTY: &str = "uncommitted changes";
+
 /// Fast-forward-only pull: fetch `origin`, then advance HEAD to its upstream
 /// iff that's a clean fast-forward on a clean tree. Diverged/dirty/no-upstream
 /// are reported as skips, not errors, so a fleet pull is safe by default.
@@ -248,13 +255,13 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
         .graph_ahead_behind(local_oid, up_oid)
         .map_err(|e| e.to_string())?;
     if ahead > 0 {
-        return Ok(OpOutcome::Skipped("diverged".into()));
+        return Ok(OpOutcome::Skipped(SKIP_DIVERGED.into()));
     }
     if behind == 0 {
         return Ok(OpOutcome::Done("up to date".into()));
     }
     if status_of(&repo).dirty > 0 {
-        return Ok(OpOutcome::Skipped("uncommitted changes".into()));
+        return Ok(OpOutcome::Skipped(SKIP_DIRTY.into()));
     }
     let refname = format!("refs/heads/{branch}");
     repo.find_reference(&refname)
@@ -301,7 +308,7 @@ fn default_branch_name(repo: &Repository) -> Option<String> {
 pub fn checkout_default(path: &str) -> Result<OpOutcome, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     if status_of(&repo).dirty > 0 {
-        return Ok(OpOutcome::Skipped("uncommitted changes".into()));
+        return Ok(OpOutcome::Skipped(SKIP_DIRTY.into()));
     }
     let branch = default_branch_name(&repo).ok_or("no default branch")?;
     let on_default = repo
