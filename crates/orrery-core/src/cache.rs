@@ -53,6 +53,21 @@ const EMBEDDINGS_DDL: &str = "CREATE TABLE IF NOT EXISTS embeddings (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (host, slug, source, chunk_ix));";
 
+/// `ci_cache` DDL — the central CI-status pass's store (#183): the latest
+/// default-branch CI state per remote, keyed (host domain, slug) like
+/// `host_cache` per the #159 lesson. `url` is the failing/latest run's web
+/// page when the API offered one. Adding this table needed no CACHE_SCHEMA
+/// bump (nothing existing changed shape — `CREATE TABLE IF NOT EXISTS`
+/// covers old databases), but it's in [`migrate`]'s drop list so future
+/// shape changes clear it with the rest.
+const CI_CACHE_DDL: &str = "CREATE TABLE IF NOT EXISTS ci_cache (
+    host TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    state TEXT NOT NULL,
+    url TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (host, slug));";
+
 pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
@@ -70,6 +85,7 @@ pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     conn.execute_batch(HOST_CACHE_DDL)?;
     conn.execute_batch(EMBEDDINGS_DDL)?;
+    conn.execute_batch(CI_CACHE_DDL)?;
     migrate(conn)
 }
 
@@ -90,8 +106,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if current != Some(CACHE_SCHEMA) {
         conn.execute("DROP TABLE IF EXISTS host_cache", [])?;
         conn.execute("DROP TABLE IF EXISTS embeddings", [])?;
+        conn.execute("DROP TABLE IF EXISTS ci_cache", [])?;
         conn.execute_batch(HOST_CACHE_DDL)?;
         conn.execute_batch(EMBEDDINGS_DDL)?;
+        conn.execute_batch(CI_CACHE_DDL)?;
         // The dropped vectors must re-embed; stale signatures would skip them.
         conn.execute("DELETE FROM meta WHERE key LIKE 'embed_sig:%'", [])?;
         conn.execute(
@@ -320,6 +338,98 @@ fn store_host_info_on(conn: &Connection, host: &str, slug: &str, info: &HostInfo
 pub fn store_host_info(host: &str, slug: &str, info: &HostInfo, now: i64) {
     if let Ok(conn) = open() {
         store_host_info_on(&conn, host, slug, info, now);
+    }
+}
+
+/// One cached CI result: the shared four-state vocabulary from `inbox`
+/// ("success" | "failure" | "pending" | "none"), plus the run's web URL when
+/// the API offered one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CiEntry {
+    pub state: String,
+    pub url: Option<String>,
+    pub updated_at: i64,
+}
+
+pub(crate) fn store_ci_state_on(
+    conn: &Connection,
+    host: &str,
+    slug: &str,
+    state: &str,
+    url: Option<&str>,
+    now: i64,
+) {
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO ci_cache (host, slug, state, url, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![host, slug, state, url, now],
+    );
+}
+
+pub(crate) fn fresh_ci_keys_on(
+    conn: &Connection,
+    max_age_secs: i64,
+    now: i64,
+) -> HashSet<(String, String)> {
+    let Ok(mut stmt) = conn.prepare("SELECT host, slug, updated_at FROM ci_cache") else {
+        return HashSet::new();
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    match rows {
+        Ok(iter) => iter
+            .flatten()
+            .filter(|(_, _, at)| now.saturating_sub(*at) <= max_age_secs)
+            .map(|(host, slug, _)| (host, slug))
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// (host domain, slug) pairs whose cached CI state is still within
+/// `max_age_secs` — the CI pass skips these (the `fresh_host_keys` pattern).
+pub fn fresh_ci_keys(max_age_secs: i64, now: i64) -> HashSet<(String, String)> {
+    match open() {
+        Ok(conn) => fresh_ci_keys_on(&conn, max_age_secs, now),
+        Err(_) => HashSet::new(),
+    }
+}
+
+pub(crate) fn all_ci_states_on(conn: &Connection) -> HashMap<(String, String), CiEntry> {
+    let mut map = HashMap::new();
+    let Ok(mut stmt) = conn.prepare("SELECT host, slug, state, url, updated_at FROM ci_cache")
+    else {
+        return map;
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+            CiEntry {
+                state: row.get(2)?,
+                url: row.get(3)?,
+                updated_at: row.get(4)?,
+            },
+        ))
+    });
+    if let Ok(rows) = rows {
+        for (key, entry) in rows.flatten() {
+            map.insert(key, entry);
+        }
+    }
+    map
+}
+
+/// Every cached CI state, keyed (host domain, slug) — the app's `CiFact`
+/// source and the drawer's Overview CI line. One query; stale entries are
+/// included (last known state beats no state — the pass refreshes them).
+pub fn all_ci_states() -> HashMap<(String, String), CiEntry> {
+    match open() {
+        Ok(conn) => all_ci_states_on(&conn),
+        Err(_) => HashMap::new(),
     }
 }
 
@@ -696,6 +806,7 @@ mod tests {
             [],
         )
         .unwrap();
+        store_ci_state_on(&conn, "github.com", "o/test", "failure", None, 1_000);
         // Simulate an older schema, then migrate.
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', '1')",
@@ -703,7 +814,7 @@ mod tests {
         )
         .unwrap();
         migrate(&conn).unwrap();
-        for table in ["host_cache", "embeddings"] {
+        for table in ["host_cache", "embeddings", "ci_cache"] {
             let rows: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
@@ -772,6 +883,49 @@ mod tests {
             .query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn ci_state_roundtrips_and_overwrites() {
+        let conn = mem();
+        assert!(all_ci_states_on(&conn).is_empty());
+        store_ci_state_on(
+            &conn,
+            "github.com",
+            "o/test",
+            "failure",
+            Some("https://github.com/o/test/actions/runs/1"),
+            1_000,
+        );
+        store_ci_state_on(&conn, "github.com", "o/other", "success", None, 1_000);
+        let states = all_ci_states_on(&conn);
+        assert_eq!(states.len(), 2);
+        let entry = &states[&("github.com".to_string(), "o/test".to_string())];
+        assert_eq!(entry.state, "failure");
+        assert_eq!(
+            entry.url.as_deref(),
+            Some("https://github.com/o/test/actions/runs/1")
+        );
+        assert_eq!(entry.updated_at, 1_000);
+
+        // A later write replaces (one row per key), including clearing the URL.
+        store_ci_state_on(&conn, "github.com", "o/test", "success", None, 2_000);
+        let states = all_ci_states_on(&conn);
+        assert_eq!(states.len(), 2);
+        let entry = &states[&("github.com".to_string(), "o/test".to_string())];
+        assert_eq!(entry.state, "success");
+        assert_eq!(entry.url, None);
+        assert_eq!(entry.updated_at, 2_000);
+    }
+
+    #[test]
+    fn fresh_ci_keys_filters_by_ttl() {
+        let conn = mem();
+        store_ci_state_on(&conn, "github.com", "o/fresh", "success", None, 1_000);
+        store_ci_state_on(&conn, "github.com", "o/stale", "success", None, 100);
+        let fresh = fresh_ci_keys_on(&conn, 300, 1_200);
+        assert!(fresh.contains(&("github.com".to_string(), "o/fresh".to_string())));
+        assert!(!fresh.contains(&("github.com".to_string(), "o/stale".to_string())));
     }
 
     #[test]
