@@ -1,5 +1,6 @@
 //! Cleanup view — the branch janitor: prunable (merged / upstream-gone) branches
-//! across all repos, grouped by repo, with bulk delete. Sync git, loaded off the
+//! across all repos, grouped by repo, with bulk delete behind a two-stage
+//! confirm (deleting branches is irreversible). Sync git, loaded off the
 //! UI thread when the nav item is selected. Never touches the current/default
 //! branch (the core `prunable` already excludes those).
 
@@ -64,6 +65,7 @@ fn passes(why: &str, filter: Option<&str>) -> bool {
 pub fn render(
     state: &CleanupState,
     filter: Option<&str>,
+    confirm: Option<&str>,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -83,7 +85,8 @@ pub fn render(
             } else {
                 let mut col = div().flex().flex_col().gap(px(12.));
                 for r in shown {
-                    col = col.child(repo_card(r, filter, t, app));
+                    let armed = confirm == Some(r.id.as_ref());
+                    col = col.child(repo_card(r, filter, armed, t, app));
                 }
                 col.into_any_element()
             }
@@ -102,6 +105,7 @@ pub fn render(
 fn repo_card(
     r: &CleanupRepo,
     filter: Option<&str>,
+    armed: bool,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -120,7 +124,7 @@ fn repo_card(
                 .child(r.name.clone()),
         )
         .child(div().flex_1())
-        .child(prune_button(r.id.clone(), n, t, app));
+        .child(prune_button(r.id.clone(), n, armed, t, app));
 
     let mut card = div()
         .flex()
@@ -160,29 +164,51 @@ fn repo_card(
     card
 }
 
+/// The per-repo prune button. Two-stage: the first click arms a confirm (the
+/// button flips to a danger-styled "Confirm prune {n}?"), the second actually
+/// deletes — branch deletion is irreversible. The armed state reverts on a
+/// timeout or when another repo's button is armed (see `OrreryApp::arm_prune`).
 fn prune_button(
     id: SharedString,
     n: usize,
+    armed: bool,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
     let app = app.clone();
-    div()
+    let label = if armed {
+        format!("Confirm prune {n}?")
+    } else {
+        format!("Prune {n}")
+    };
+    let btn = div()
         .id(SharedString::from(format!("prune-{id}")))
         .px(px(12.))
         .py(px(6.))
         .rounded(px(t.r_sm))
         .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
         .font_family("monospace")
         .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
-        .child(SharedString::from(format!("Prune {n}")))
+        .cursor_pointer();
+    let btn = if armed {
+        btn.border_1()
+            .border_color(rgb(t.behind))
+            .text_color(rgb(t.behind))
+    } else {
+        btn.border_1()
+            .border_color(rgb(t.border))
+            .text_color(rgb(t.fg1))
+            .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
+    };
+    btn.child(SharedString::from(label))
         .on_click(move |_ev, _win, cx| {
             let id = id.clone();
-            app.update(cx, |this, cx| this.prune_repo(id, cx));
+            app.update(cx, |this, cx| {
+                if armed {
+                    this.prune_repo(id, cx)
+                } else {
+                    this.arm_prune(id, cx)
+                }
+            });
         })
 }

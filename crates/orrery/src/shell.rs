@@ -226,6 +226,12 @@ pub struct OrreryApp {
     pub feed: crate::views::feed::FeedState,
     pub explore: crate::views::explore::ExploreState,
     pub cleanup: crate::views::cleanup::CleanupState,
+    /// Repo id whose Cleanup "Prune" button is armed, awaiting a confirming
+    /// second click before the (irreversible) bulk branch delete runs.
+    pub cleanup_confirm: Option<SharedString>,
+    /// Bumped each time a confirm is armed, so a stale revert timer from an
+    /// earlier arm can't clear a newer one.
+    pub cleanup_confirm_gen: u64,
     /// Agents view state (lazy; detected agent sessions on the machine).
     pub agents: crate::views::agents::AgentsState,
     /// Repo ids (paths) with a live agent session — drives the card indicator.
@@ -1413,6 +1419,7 @@ impl OrreryApp {
     pub fn load_cleanup(&mut self, cx: &mut Context<Self>) {
         use crate::views::cleanup::CleanupState;
         self.cleanup = CleanupState::Loading;
+        self.cleanup_confirm = None;
         cx.notify();
         let rows = self.rows.clone();
         cx.spawn(async move |this, cx| {
@@ -1509,8 +1516,35 @@ impl OrreryApp {
         .detach();
     }
 
+    /// First click on a Cleanup "Prune" button: arm a two-stage confirm for that
+    /// repo (the button flips to "Confirm prune {n}?"). Deleting branches is
+    /// irreversible, so it only runs on the confirming second click. The armed
+    /// state reverts after a few seconds, and arming another repo's button
+    /// replaces it.
+    pub fn arm_prune(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        self.cleanup_confirm = Some(id);
+        self.cleanup_confirm_gen += 1;
+        let generation = self.cleanup_confirm_gen;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            // Revert only if this timer's arm is still the active one.
+            let _ = this.update(cx, |this, cx| {
+                if this.cleanup_confirm_gen == generation && this.cleanup_confirm.take().is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Prune the given repo's stale branches, then refresh the Cleanup list.
+    /// Only reached via the two-stage confirm in the Cleanup view (`arm_prune`).
     pub fn prune_repo(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        self.cleanup_confirm = None;
+        cx.notify();
         let path = id.to_string();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -2525,6 +2559,7 @@ impl OrreryApp {
             View::Janitor => crate::views::cleanup::render(
                 &self.cleanup,
                 self.view_filter.as_deref(),
+                self.cleanup_confirm.as_deref(),
                 t,
                 &cx.entity(),
             )

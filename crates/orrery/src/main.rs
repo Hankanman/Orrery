@@ -117,6 +117,8 @@ fn main() {
                             feed: Default::default(),
                             explore: Default::default(),
                             cleanup: Default::default(),
+                            cleanup_confirm: None,
+                            cleanup_confirm_gen: 0,
                             agents: Default::default(),
                             active_agents: Default::default(),
                             agents_polling: false,
