@@ -121,6 +121,7 @@ fn main() {
                             active_agents: Default::default(),
                             agents_polling: false,
                             explore_cloning: Default::default(),
+                            explore_errors: Default::default(),
                             settings: None,
                             devtools: None,
                             services: Default::default(),

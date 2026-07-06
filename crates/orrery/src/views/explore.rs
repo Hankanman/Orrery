@@ -2,7 +2,7 @@
 //! the first configured workspace root (they appear in Mission Control on the
 //! next scan). Loaded lazily over the network when the nav item is selected.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -55,10 +55,16 @@ pub fn star_row(r: inbox::RemoteRepo) -> StarRow {
     }
 }
 
+/// Per-slug clone status owned by the shell, threaded into each card.
+pub struct CloneStatus<'a> {
+    pub cloned: &'a HashSet<SharedString>,
+    pub cloning: &'a HashSet<SharedString>,
+    pub errors: &'a HashMap<SharedString, SharedString>,
+}
+
 pub fn render(
     state: &ExploreState,
-    cloned: &HashSet<SharedString>,
-    cloning: &HashSet<SharedString>,
+    status: CloneStatus,
     filter: Option<&str>,
     root: Option<&str>,
     t: &Theme,
@@ -92,8 +98,9 @@ pub fn render(
                 for r in shown {
                     col = col.child(star_card(
                         r,
-                        cloned.contains(&r.slug),
-                        cloning.contains(&r.slug),
+                        status.cloned.contains(&r.slug),
+                        status.cloning.contains(&r.slug),
+                        status.errors.get(&r.slug),
                         t,
                         app,
                     ));
@@ -116,6 +123,7 @@ fn star_card(
     r: &StarRow,
     is_cloned: bool,
     is_cloning: bool,
+    error: Option<&SharedString>,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -173,7 +181,19 @@ fn star_card(
         meta = meta.child(div().text_color(rgb(t.fg2)).child(r.language.clone()));
     }
     meta = meta.child(SharedString::from(format!("★ {}", r.stars)));
-    card.child(meta)
+    card = card.child(meta);
+    // A failed clone (network drop, lost access, …) surfaces here; the button
+    // is back to "Clone" so a retry clears it.
+    if let Some(e) = error {
+        card = card.child(
+            div()
+                .font_family("monospace")
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.behind))
+                .child(e.clone()),
+        );
+    }
+    card
 }
 
 fn clone_button(
