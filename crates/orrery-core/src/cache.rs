@@ -20,24 +20,38 @@ fn db_path() -> Option<PathBuf> {
 // Bump when a cached payload's shape changes so stale rows are dropped rather
 // than silently deserialized with defaulted fields. v2 added HostInfo.private —
 // older rows lack the key and would otherwise read back as `private: false`,
-// making private repos look public until the 6h TTL lapsed.
-const CACHE_SCHEMA: i64 = 2;
+// making private repos look public until the 6h TTL lapsed. v3 keys host_cache
+// by (host, slug) instead of slug alone, so two repos with the same
+// "owner/repo" slug on different hosts (e.g. github.com + a self-hosted
+// GitLab) no longer share one cached row.
+const CACHE_SCHEMA: i64 = 3;
+
+/// `host_cache` DDL, shared by [`init`] and [`migrate`] (which drops and
+/// recreates the table on a schema bump — it's just a cache).
+const HOST_CACHE_DDL: &str = "CREATE TABLE IF NOT EXISTS host_cache (
+    host TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    data TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (host, slug));";
 
 fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS host_cache (slug TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS embeddings (id TEXT PRIMARY KEY, vec TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, text TEXT NOT NULL DEFAULT '', last_seen_sha TEXT NOT NULL DEFAULT '', last_seen_unix INTEGER NOT NULL DEFAULT 0);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
+    conn.execute_batch(HOST_CACHE_DDL)?;
     migrate(conn)
 }
 
 /// Drop schema-sensitive cached payloads when CACHE_SCHEMA changes. Only
 /// host enrichment is version-sensitive today; favorites/AI cache are untouched.
+/// The table is dropped (not just emptied) because its shape can change between
+/// versions — v3 changed the primary key from `slug` to `(host, slug)`.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let current: Option<i64> = conn
         .query_row(
@@ -48,7 +62,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok());
     if current != Some(CACHE_SCHEMA) {
-        conn.execute("DELETE FROM host_cache", [])?;
+        conn.execute("DROP TABLE IF EXISTS host_cache", [])?;
+        conn.execute_batch(HOST_CACHE_DDL)?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', ?1)",
             [CACHE_SCHEMA.to_string()],
@@ -157,14 +172,15 @@ pub fn load_repos() -> Vec<Repo> {
     }
 }
 
-/// Cached host enrichment for a slug, if newer than `max_age_secs`.
-pub fn cached_host_info(slug: &str, max_age_secs: i64, now: i64) -> Option<HostInfo> {
+/// Cached host enrichment for a (host domain, slug) pair, if newer than
+/// `max_age_secs`.
+pub fn cached_host_info(host: &str, slug: &str, max_age_secs: i64, now: i64) -> Option<HostInfo> {
     let conn = open().ok()?;
     let mut stmt = conn
-        .prepare("SELECT data, fetched_at FROM host_cache WHERE slug = ?1")
+        .prepare("SELECT data, fetched_at FROM host_cache WHERE host = ?1 AND slug = ?2")
         .ok()?;
     let (json, fetched_at): (String, i64) = stmt
-        .query_row([slug], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_row([host, slug], |row| Ok((row.get(0)?, row.get(1)?)))
         .ok()?;
     if now.saturating_sub(fetched_at) > max_age_secs {
         return None;
@@ -172,54 +188,65 @@ pub fn cached_host_info(slug: &str, max_age_secs: i64, now: i64) -> Option<HostI
     serde_json::from_str(&json).ok()
 }
 
-fn fresh_host_slugs_on(conn: &Connection, max_age_secs: i64, now: i64) -> HashSet<String> {
-    let Ok(mut stmt) = conn.prepare("SELECT slug, fetched_at FROM host_cache") else {
+fn fresh_host_keys_on(conn: &Connection, max_age_secs: i64, now: i64) -> HashSet<(String, String)> {
+    let Ok(mut stmt) = conn.prepare("SELECT host, slug, fetched_at FROM host_cache") else {
         return HashSet::new();
     };
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
     });
     match rows {
         Ok(iter) => iter
             .flatten()
-            .filter(|(_, fetched_at)| now.saturating_sub(*fetched_at) <= max_age_secs)
-            .map(|(slug, _)| slug)
+            .filter(|(_, _, fetched_at)| now.saturating_sub(*fetched_at) <= max_age_secs)
+            .map(|(host, slug, _)| (host, slug))
             .collect(),
         Err(_) => HashSet::new(),
     }
 }
 
-/// Slugs whose cached host enrichment is still within `max_age_secs` — the
-/// enrich pass skips these so a rescan within the TTL costs no host-API calls.
-/// One query, unlike calling [`cached_host_info`] per repo.
-pub fn fresh_host_slugs(max_age_secs: i64, now: i64) -> HashSet<String> {
+/// (host domain, slug) pairs whose cached host enrichment is still within
+/// `max_age_secs` — the enrich pass skips these so a rescan within the TTL
+/// costs no host-API calls. One query, unlike calling [`cached_host_info`]
+/// per repo. Keyed per host so the same slug on two hosts is tracked
+/// independently.
+pub fn fresh_host_keys(max_age_secs: i64, now: i64) -> HashSet<(String, String)> {
     match open() {
-        Ok(conn) => fresh_host_slugs_on(&conn, max_age_secs, now),
+        Ok(conn) => fresh_host_keys_on(&conn, max_age_secs, now),
         Err(_) => HashSet::new(),
     }
 }
 
-fn all_host_info_on(conn: &Connection) -> HashMap<String, HostInfo> {
+fn all_host_info_on(conn: &Connection) -> HashMap<(String, String), HostInfo> {
     let mut map = HashMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT slug, data FROM host_cache") else {
+    let Ok(mut stmt) = conn.prepare("SELECT host, slug, data FROM host_cache") else {
         return map;
     };
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     });
     if let Ok(rows) = rows {
-        for (slug, json) in rows.flatten() {
+        for (host, slug, json) in rows.flatten() {
             if let Ok(info) = serde_json::from_str::<HostInfo>(&json) {
-                map.insert(slug, info);
+                map.insert((host, slug), info);
             }
         }
     }
     map
 }
 
-/// Overlay persisted host enrichment onto repos (by slug). Freshly-scanned
-/// repos start with empty host fields, so this restores cached
-/// visibility/stars/etc. on launch — no network re-fetch required.
+/// Overlay persisted host enrichment onto repos (by remote host domain + slug,
+/// matching how the enrich pass stores it). Freshly-scanned repos start with
+/// empty host fields, so this restores cached visibility/stars/etc. on launch —
+/// no network re-fetch required.
 fn apply_host_info_on(conn: &Connection, repos: &mut [Repo]) {
     let cache = all_host_info_on(conn);
     if cache.is_empty() {
@@ -229,7 +256,8 @@ fn apply_host_info_on(conn: &Connection, repos: &mut [Repo]) {
         let Some(slug) = r.slug.as_deref() else {
             continue;
         };
-        if let Some(info) = cache.get(slug) {
+        let host = r.remote_host.as_deref().unwrap_or_default();
+        if let Some(info) = cache.get(&(host.to_string(), slug.to_string())) {
             r.stars = info.stars;
             r.topics = info.topics.clone();
             r.open_issues = info.open_issues;
@@ -246,19 +274,19 @@ pub fn apply_host_info(repos: &mut [Repo]) {
     }
 }
 
-fn store_host_info_on(conn: &Connection, slug: &str, info: &HostInfo, now: i64) {
+fn store_host_info_on(conn: &Connection, host: &str, slug: &str, info: &HostInfo, now: i64) {
     if let Ok(json) = serde_json::to_string(info) {
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO host_cache (slug, data, fetched_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![slug, json, now],
+            "INSERT OR REPLACE INTO host_cache (host, slug, data, fetched_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![host, slug, json, now],
         );
     }
 }
 
-/// Persist host enrichment for a slug.
-pub fn store_host_info(slug: &str, info: &HostInfo, now: i64) {
+/// Persist host enrichment for a (host domain, slug) pair.
+pub fn store_host_info(host: &str, slug: &str, info: &HostInfo, now: i64) {
     if let Ok(conn) = open() {
-        store_host_info_on(&conn, slug, info, now);
+        store_host_info_on(&conn, host, slug, info, now);
     }
 }
 
@@ -525,7 +553,7 @@ mod tests {
     #[test]
     fn schema_bump_clears_host_cache() {
         let conn = mem(); // init() sets cache_schema to the current version
-        store_host_info_on(&conn, "o/test", &HostInfo::default(), 1_000);
+        store_host_info_on(&conn, "github.com", "o/test", &HostInfo::default(), 1_000);
         // Simulate an older schema, then migrate.
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', '1')",
@@ -538,12 +566,33 @@ mod tests {
             .unwrap();
         assert_eq!(rows, 0, "stale host_cache should be cleared on schema bump");
         // Re-running is a no-op now that the version matches.
-        store_host_info_on(&conn, "o/test", &HostInfo::default(), 1_000);
+        store_host_info_on(&conn, "github.com", "o/test", &HostInfo::default(), 1_000);
         migrate(&conn).unwrap();
         let rows: i64 = conn
             .query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1, "matching schema must not clear the cache");
+    }
+
+    #[test]
+    fn migrate_recreates_host_cache_from_pre_v3_shape() {
+        // A v2 database has host_cache keyed by slug alone; migrate must be able
+        // to drop that shape and recreate the (host, slug)-keyed table.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE host_cache (slug TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('cache_schema', '2');
+             INSERT INTO host_cache (slug, data, fetched_at) VALUES ('o/test', '{}', 1);",
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        // The new shape accepts (host, slug) rows and starts empty.
+        store_host_info_on(&conn, "github.com", "o/test", &HostInfo::default(), 1_000);
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]
@@ -556,9 +605,13 @@ mod tests {
             latest_release: Some("v1.2.3".into()),
             private: true,
         };
-        store_host_info_on(&conn, "o/test", &info, 1_000);
+        store_host_info_on(&conn, "github.com", "o/test", &info, 1_000);
 
-        let mut repos = vec![sample("/a")]; // slug "o/test", host fields empty
+        // slug "o/test" on github.com, host fields empty
+        let mut repos = vec![Repo {
+            remote_host: Some("github.com".into()),
+            ..sample("/a")
+        }];
         apply_host_info_on(&conn, &mut repos);
         assert!(repos[0].private);
         assert_eq!(repos[0].stars, 42);
@@ -567,11 +620,47 @@ mod tests {
         // A repo with no cached slug is left untouched.
         let mut other = vec![Repo {
             slug: Some("o/none".into()),
+            remote_host: Some("github.com".into()),
             ..sample("/b")
         }];
         apply_host_info_on(&conn, &mut other);
         assert!(!other[0].private);
         assert_eq!(other[0].stars, 0);
+    }
+
+    #[test]
+    fn host_cache_keys_by_host_and_slug() {
+        // Regression for #159: the same "owner/repo" slug on two hosts (public
+        // GitHub + private self-hosted GitLab) must not share one cached row.
+        let conn = mem();
+        let public = HostInfo {
+            stars: 42,
+            private: false,
+            ..HostInfo::default()
+        };
+        let private = HostInfo {
+            stars: 0,
+            private: true,
+            ..HostInfo::default()
+        };
+        store_host_info_on(&conn, "github.com", "o/test", &public, 1_000);
+        store_host_info_on(&conn, "gitlab.acme.io", "o/test", &private, 1_000);
+
+        let mut repos = vec![
+            Repo {
+                remote_host: Some("github.com".into()),
+                ..sample("/a")
+            },
+            Repo {
+                remote_host: Some("gitlab.acme.io".into()),
+                ..sample("/b")
+            },
+        ];
+        apply_host_info_on(&conn, &mut repos);
+        assert!(!repos[0].private, "github repo must stay public");
+        assert_eq!(repos[0].stars, 42);
+        assert!(repos[1].private, "self-hosted repo must stay private");
+        assert_eq!(repos[1].stars, 0);
     }
 
     #[test]
@@ -604,14 +693,26 @@ mod tests {
     }
 
     #[test]
-    fn fresh_host_slugs_filters_by_ttl() {
+    fn fresh_host_keys_filters_by_ttl() {
         let conn = mem();
-        store_host_info_on(&conn, "o/fresh", &HostInfo::default(), 1_000);
-        store_host_info_on(&conn, "o/stale", &HostInfo::default(), 100);
+        store_host_info_on(&conn, "github.com", "o/fresh", &HostInfo::default(), 1_000);
+        store_host_info_on(&conn, "github.com", "o/stale", &HostInfo::default(), 100);
+        // Same slug as "o/fresh" but on another host — freshness is per host.
+        store_host_info_on(
+            &conn,
+            "gitlab.acme.io",
+            "o/fresh",
+            &HostInfo::default(),
+            100,
+        );
         // now=1_500, ttl=600 → "fresh" (age 500) kept, "stale" (age 1_400) dropped.
-        let fresh = fresh_host_slugs_on(&conn, 600, 1_500);
-        assert!(fresh.contains("o/fresh"));
-        assert!(!fresh.contains("o/stale"));
+        let fresh = fresh_host_keys_on(&conn, 600, 1_500);
+        assert!(fresh.contains(&("github.com".into(), "o/fresh".into())));
+        assert!(!fresh.contains(&("github.com".into(), "o/stale".into())));
+        assert!(
+            !fresh.contains(&("gitlab.acme.io".into(), "o/fresh".into())),
+            "a fresh slug on one host must not mark the other host fresh"
+        );
     }
 
     #[test]
