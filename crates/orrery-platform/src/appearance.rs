@@ -175,21 +175,30 @@ async fn read_appearance(proxy: &SettingsProxy<'_>) -> Appearance {
     }
 }
 
+/// The portal-less degrade path: colours from `kdeglobals` alone. Without the
+/// portal there's no colour-scheme preference to read, but accent/window/view
+/// colours can still be recovered.
+fn kdeglobals_appearance() -> Appearance {
+    let kde = read_kdeglobals();
+    Appearance {
+        color_scheme: None,
+        accent: kde.accent,
+        window_bg: kde.window_bg,
+        window_fg: kde.window_fg,
+        base_bg: kde.base_bg,
+    }
+}
+
 /// One-shot async read of the current desktop appearance.
 pub async fn read() -> Appearance {
+    // No session bus or no Settings portal on it — still try kdeglobals so
+    // colours work without the portal. (Individual portal reads failing is
+    // handled inside `read_appearance`, which merges kdeglobals per-field.)
     let Ok(conn) = Connection::session().await else {
-        // No session bus — still try kdeglobals so colours work offline-of-bus.
-        let kde = read_kdeglobals();
-        return Appearance {
-            accent: kde.accent,
-            window_bg: kde.window_bg,
-            window_fg: kde.window_fg,
-            base_bg: kde.base_bg,
-            ..Default::default()
-        };
+        return kdeglobals_appearance();
     };
     let Ok(proxy) = SettingsProxy::new(&conn).await else {
-        return Appearance::default();
+        return kdeglobals_appearance();
     };
     read_appearance(&proxy).await
 }
@@ -199,7 +208,8 @@ pub async fn read() -> Appearance {
 pub fn read_blocking() -> Appearance {
     match tokio::runtime::Builder::new_current_thread().build() {
         Ok(rt) => rt.block_on(read()),
-        Err(_) => Appearance::default(),
+        // Can't drive the async portal read — kdeglobals needs no runtime.
+        Err(_) => kdeglobals_appearance(),
     }
 }
 

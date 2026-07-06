@@ -2,12 +2,10 @@
 //! listing/switching/pruning, worktrees, recent log, and the working diff.
 //! All synchronous; callers run them off the UI thread.
 
-use std::collections::{HashMap, HashSet};
-
 use git2::{
     BranchType, Cred, CredentialType, DiffOptions, FetchOptions, RemoteCallbacks, Repository,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::model::GitStatus;
 
@@ -497,110 +495,6 @@ pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
     Ok(out)
 }
 
-/// One day's commit count, keyed by epoch day in the author's local timezone
-/// (i.e. `floor((commit_time + tz_offset) / 86400)`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DayCount {
-    pub day: i64,
-    pub count: u32,
-}
-
-/// Daily commit counts across `paths` for commits on/after `since_day` (epoch
-/// days), counting only commits authored by the user. If no git identity can be
-/// resolved, counts all commits so the graph is never mysteriously empty.
-/// Walks each repo's HEAD line in commit-time order, stopping once it passes the
-/// window. Aggregated by author-local day so the calendar matches when the user
-/// actually worked.
-pub fn contributions(paths: &[String], since_day: i64) -> Vec<DayCount> {
-    // "The user" = global git identity plus each repo's configured user.email,
-    // lower-cased. Repos cloned but never committed to thus contribute 0.
-    let mut emails: HashSet<String> = HashSet::new();
-    if let Ok(email) = git2::Config::open_default().and_then(|c| c.get_string("user.email")) {
-        emails.insert(email.to_lowercase());
-    }
-    for path in paths {
-        if let Ok(email) = Repository::open(path)
-            .and_then(|r| r.config())
-            .and_then(|c| c.get_string("user.email"))
-        {
-            emails.insert(email.to_lowercase());
-        }
-    }
-    // Walking commit objects is the expensive part; repos are independent, so
-    // fan out across cores. A shared work index hands each worker the next repo,
-    // so heavy repos (deep histories) don't pile up behind each other.
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(paths.len().max(1));
-    let partials = std::sync::Mutex::new(Vec::<HashMap<i64, u32>>::new());
-    let next = AtomicUsize::new(0);
-
-    std::thread::scope(|scope| {
-        let emails = &emails;
-        let partials = &partials;
-        let next = &next;
-        for _ in 0..threads {
-            scope.spawn(move || {
-                let mut local: HashMap<i64, u32> = HashMap::new();
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(path) = paths.get(i) else { break };
-                    let Ok(repo) = Repository::open(path) else {
-                        continue;
-                    };
-                    let Ok(mut walk) = repo.revwalk() else {
-                        continue;
-                    };
-                    if walk.set_sorting(git2::Sort::TIME).is_err() || walk.push_head().is_err() {
-                        continue;
-                    }
-                    for oid in walk.flatten() {
-                        let Ok(commit) = repo.find_commit(oid) else {
-                            continue;
-                        };
-                        let author = commit.author();
-                        let when = author.when();
-                        let day = (when.seconds() + i64::from(when.offset_minutes()) * 60)
-                            .div_euclid(86_400);
-                        if day < since_day {
-                            break; // TIME order: everything after this is older still.
-                        }
-                        let mine = emails.is_empty()
-                            || author
-                                .email()
-                                .map(|e| emails.contains(&e.to_lowercase()))
-                                .unwrap_or(false);
-                        if mine {
-                            *local.entry(day).or_insert(0) += 1;
-                        }
-                    }
-                }
-                partials
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(local);
-            });
-        }
-    });
-
-    let mut counts: HashMap<i64, u32> = HashMap::new();
-    for partial in partials.into_inner().unwrap_or_else(|e| e.into_inner()) {
-        for (day, c) in partial {
-            *counts.entry(day).or_insert(0) += c;
-        }
-    }
-
-    let mut out: Vec<DayCount> = counts
-        .into_iter()
-        .map(|(day, count)| DayCount { day, count })
-        .collect();
-    out.sort_by_key(|d| d.day);
-    out
-}
-
 /// Clone `url` into `dest` (full destination path). Returns the working dir.
 pub fn clone(url: &str, dest: &str) -> Result<String, String> {
     let mut fo = FetchOptions::new();
@@ -978,74 +872,5 @@ mod tests {
             staged_diff(&path).unwrap().is_empty(),
             "nothing staged after commit"
         );
-    }
-
-    #[test]
-    fn contributions_count_the_users_commit_within_window() {
-        let (_dir, path) = init_repo();
-        let today = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
-            / 86_400;
-        let paths = vec![path];
-
-        // The single init commit (authored as the repo's user.email) counts once,
-        // landing within the trailing window.
-        let graph = contributions(&paths, today - 7);
-        assert_eq!(graph.iter().map(|d| d.count).sum::<u32>(), 1);
-        assert!(graph.iter().all(|d| d.day >= today - 7));
-
-        // A window that starts in the future excludes everything.
-        assert!(contributions(&paths, today + 7).is_empty());
-    }
-
-    /// Opt-in perf probe against the real configured workspace. Run with:
-    ///   cargo test -p orrery --lib perf_contributions -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn perf_contributions() {
-        use std::time::Instant;
-
-        let cfg = crate::config::load();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let t = Instant::now();
-        let repos = crate::scan::scan(
-            &cfg.roots,
-            cfg.scan_depth,
-            &cfg.ignore,
-            &crate::cache::favorites(),
-            now,
-        );
-        let scan_ms = t.elapsed().as_secs_f64() * 1000.0;
-        let ids: Vec<String> = repos.iter().map(|r| r.id.clone()).collect();
-        let today = now.div_euclid(86_400);
-        let since = today - 7 * 53;
-
-        eprintln!("\n── contribution perf ─────────────────────");
-        eprintln!("repos: {}  (scan {:.0} ms)", ids.len(), scan_ms);
-
-        let t = Instant::now();
-        let just_open = ids.iter().filter_map(|p| Repository::open(p).ok()).count();
-        eprintln!(
-            "open all repos: {:.1} ms ({just_open} opened)",
-            t.elapsed().as_secs_f64() * 1000.0
-        );
-
-        for i in 1..=3 {
-            let t = Instant::now();
-            let graph = contributions(&ids, since);
-            let total: u32 = graph.iter().map(|d| d.count).sum();
-            eprintln!(
-                "contributions() run {i}: {:.1} ms  ({} active days, {total} commits)",
-                t.elapsed().as_secs_f64() * 1000.0,
-                graph.len()
-            );
-        }
-        eprintln!("──────────────────────────────────────────\n");
     }
 }
