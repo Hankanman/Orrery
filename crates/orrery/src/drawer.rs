@@ -6,10 +6,11 @@
 //! triage) live here. All five tabs are in: Overview (Row facts + async
 //! branches/commits/worktrees, with worktree add/remove), Readme (gpui-component
 //! markdown), PR (lazy, GitHub-only, via the `task` bridge — rollups, per-check
-//! breakdown + inline approve/merge), Changes (staged/working diff toggle +
-//! commit-message field + Commit, plus AI commit-message + changelog generation
-//! gated on aiReady), and Notes (catch-up + AI "what changed" narrative + an
-//! editable markdown note via gpui-component's multiline input).
+//! breakdown + inline approve/merge), Changes (Unstaged/Staged file lists with
+//! per-file stage/unstage, a per-file diff pane, and a commit composer acting
+//! on the index, plus AI commit-message + changelog generation gated on
+//! aiReady), and Notes (catch-up + AI "what changed" narrative + an editable
+//! markdown note via gpui-component's multiline input).
 
 use gpui::{
     AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
@@ -22,6 +23,7 @@ use crate::data::{self, Row};
 use crate::icon::{brand, lucide};
 use crate::shell::{DrawerTab, OrreryApp, Overlay};
 use crate::theme::Theme;
+use crate::toast::ToastKind;
 
 const MONO: &str = "monospace";
 const PANEL_W: f32 = 560.;
@@ -112,18 +114,17 @@ pub enum DiffState {
     #[default]
     Idle,
     Loading,
-    /// The diff text ("" when there's nothing in the selected mode).
+    /// The diff text ("" when the selected file has no diff on its side).
     Ready(SharedString),
 }
 
-/// Which diff the Changes tab is showing.
-#[derive(Default, Clone, Copy, PartialEq)]
-pub enum DiffMode {
-    /// `git diff --cached` — what a commit would record.
-    #[default]
-    Staged,
-    /// `git diff` — unstaged working-tree changes.
-    Working,
+/// One pending change in the Changes tab's Unstaged/Staged lists (render-ready
+/// [`git_ops::FileChange`]). A path staged and then further edited appears in
+/// both lists.
+pub struct ChangeRow {
+    pub path: SharedString,
+    pub kind: git_ops::ChangeKind,
+    pub staged: bool,
 }
 
 /// Notes tab data: the "resume where I left off" catch-up line (the note text
@@ -147,9 +148,12 @@ pub struct DrawerData {
     pub worktrees: Option<Vec<WorktreeRow>>,
     pub readme: ReadmeState,
     pub pr: PrState,
+    /// The selected file's diff (per-file, capped render — see [`diff_block`]).
     pub diff: DiffState,
-    /// Which diff the Changes tab shows (staged vs working tree).
-    pub diff_mode: DiffMode,
+    /// The Changes tab's file lists; `None` until the tab first loads them.
+    pub changes: Option<Vec<ChangeRow>>,
+    /// The file whose diff the pane shows, as (path, staged-side).
+    pub change_sel: Option<(SharedString, bool)>,
     /// AI-generated commit message for the staged diff, once requested.
     pub commit_suggestion: Option<SharedString>,
     /// AI-generated changelog from recent commits, once requested.
@@ -263,24 +267,110 @@ pub fn load_readme(repo: SharedString, cx: &mut Context<OrreryApp>) {
     .detach();
 }
 
-/// Lazily load the diff (sync git, off the UI thread) for the Changes tab, in
-/// the currently selected mode (staged vs working tree).
-pub fn load_diff(repo: SharedString, cx: &mut Context<OrreryApp>) {
+fn change_row(c: git_ops::FileChange) -> ChangeRow {
+    ChangeRow {
+        path: c.path.into(),
+        kind: c.kind,
+        staged: c.staged,
+    }
+}
+
+/// Lazily load the Changes tab's file lists (sync git, off the UI thread).
+/// The store step auto-selects a file and loads its diff.
+pub fn load_changes(repo: SharedString, cx: &mut Context<OrreryApp>) {
     let id = repo.to_string();
-    let mode = cx.entity().read(cx).drawer.diff_mode;
     cx.spawn(async move |this, cx| {
-        let diff = cx
+        let list = cx
             .background_executor()
-            .spawn(async move {
-                match mode {
-                    DiffMode::Staged => git_ops::staged_diff(&id),
-                    DiffMode::Working => git_ops::working_diff(&id),
-                }
-                .unwrap_or_default()
-            })
+            .spawn(async move { git_ops::changes(&id).unwrap_or_default() })
             .await;
         let _ = this.update(cx, |this, cx| {
             if this.drawer.repo == repo {
+                store_changes(this, list, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// Apply freshly read file lists: keep the selection if its entry survived
+/// (same path on the other side counts — the file just moved lists), else fall
+/// back to the first entry, then (re)load the selected file's diff. Runs after
+/// every load / stage / unstage / commit, so the pane always tracks the index.
+fn store_changes(
+    this: &mut OrreryApp,
+    list: Vec<git_ops::FileChange>,
+    cx: &mut Context<OrreryApp>,
+) {
+    let list: Vec<ChangeRow> = list.into_iter().map(change_row).collect();
+    let sel = this
+        .drawer
+        .change_sel
+        .take()
+        .and_then(|(p, s)| {
+            if list.iter().any(|c| c.path == p && c.staged == s) {
+                Some((p, s))
+            } else {
+                list.iter()
+                    .find(|c| c.path == p)
+                    .map(|c| (c.path.clone(), c.staged))
+            }
+        })
+        .or_else(|| list.first().map(|c| (c.path.clone(), c.staged)));
+    this.drawer.changes = Some(list);
+    this.drawer.change_sel = sel.clone();
+    match sel {
+        Some((path, staged)) => {
+            this.drawer.diff = DiffState::Loading;
+            load_file_diff(this.drawer.repo.clone(), path, staged, cx);
+        }
+        None => this.drawer.diff = DiffState::Ready("".into()),
+    }
+    cx.notify();
+}
+
+/// Show `path`'s diff (from the staged or unstaged side) in the pane.
+fn select_change(
+    this: &mut OrreryApp,
+    path: SharedString,
+    staged: bool,
+    cx: &mut Context<OrreryApp>,
+) {
+    if this
+        .drawer
+        .change_sel
+        .as_ref()
+        .is_some_and(|(p, s)| *p == path && *s == staged)
+    {
+        return;
+    }
+    this.drawer.change_sel = Some((path.clone(), staged));
+    this.drawer.diff = DiffState::Loading;
+    load_file_diff(this.drawer.repo.clone(), path, staged, cx);
+    cx.notify();
+}
+
+/// Load one file's diff (sync git, off the UI thread). The result is dropped
+/// if the drawer moved on or the selection changed while it was in flight.
+fn load_file_diff(
+    repo: SharedString,
+    path: SharedString,
+    staged: bool,
+    cx: &mut Context<OrreryApp>,
+) {
+    let (id, file) = (repo.to_string(), path.to_string());
+    cx.spawn(async move |this, cx| {
+        let diff = cx
+            .background_executor()
+            .spawn(async move { git_ops::file_diff(&id, &file, staged).unwrap_or_default() })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            let still_selected = this
+                .drawer
+                .change_sel
+                .as_ref()
+                .is_some_and(|(p, s)| *p == path && *s == staged);
+            if this.drawer.repo == repo && still_selected {
                 this.drawer.diff = DiffState::Ready(diff.into());
                 cx.notify();
             }
@@ -289,35 +379,80 @@ pub fn load_diff(repo: SharedString, cx: &mut Context<OrreryApp>) {
     .detach();
 }
 
-/// Switch the Changes-tab diff between staged and working tree, then reload.
-/// Called from within an `app.update` closure (so it holds `&mut OrreryApp`).
-pub fn set_diff_mode(mode: DiffMode, this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
-    if this.drawer.diff_mode == mode {
-        return;
-    }
-    this.drawer.diff_mode = mode;
-    this.drawer.diff = DiffState::Loading;
-    let repo = this.drawer.repo.clone();
-    load_diff(repo, cx);
-    cx.notify();
-}
-
-/// Commit the staged changes with `message`, then refresh the (now-empty) diff
-/// and clear the field. The commit trips the watcher, refreshing the card.
-fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp>) {
+/// Stage (or unstage) `paths`, then re-read the file lists + selected diff.
+/// Failures surface as an error toast rather than vanishing silently.
+fn set_staged(repo: SharedString, paths: Vec<String>, stage: bool, cx: &mut Context<OrreryApp>) {
     let id = repo.to_string();
     cx.spawn(async move |this, cx| {
-        let _ = cx
+        let (result, list) = cx
             .background_executor()
-            .spawn(async move { git_ops::commit(&id, message.trim()) })
+            .spawn(async move {
+                let result = if stage {
+                    git_ops::stage_paths(&id, &paths)
+                } else {
+                    git_ops::unstage_paths(&id, &paths)
+                };
+                (result, git_ops::changes(&id).unwrap_or_default())
+            })
             .await;
         let _ = this.update(cx, |this, cx| {
+            if let Err(e) = result {
+                let title = if stage {
+                    "Stage failed"
+                } else {
+                    "Unstage failed"
+                };
+                this.push_toast(ToastKind::Error, title, Some(e.into()), cx);
+            }
+            if this.drawer.repo == repo {
+                store_changes(this, list, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// Commit the index as-is with `message`, toast the outcome, then refresh the
+/// file lists + diff. The commit also trips the watcher, refreshing the card.
+fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp>) {
+    let id = repo.to_string();
+    // The commit subject, for the success toast's detail line.
+    let subject = message.lines().next().unwrap_or("").trim().to_string();
+    cx.spawn(async move |this, cx| {
+        let (result, list) = cx
+            .background_executor()
+            .spawn(async move {
+                let result = git_ops::commit(&id, message.trim());
+                (result, git_ops::changes(&id).unwrap_or_default())
+            })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            // The toast is global feedback — push it even if the drawer moved on.
+            match &result {
+                Ok(hash) => {
+                    this.push_toast(
+                        ToastKind::Success,
+                        format!("Committed {hash}"),
+                        Some(subject.clone().into()),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    this.push_toast(
+                        ToastKind::Error,
+                        "Commit failed",
+                        Some(e.clone().into()),
+                        cx,
+                    );
+                }
+            }
             if this.drawer.repo != repo {
                 return;
             }
-            this.drawer.diff = DiffState::Loading;
-            load_diff(repo, cx);
-            cx.notify();
+            if result.is_ok() {
+                this.drawer.commit_suggestion = None;
+            }
+            store_changes(this, list, cx);
         });
     })
     .detach();
@@ -767,7 +902,7 @@ fn tab_bar(
                                     .placeholder("Commit message…")
                             }));
                         }
-                        load_diff(repo, cx);
+                        load_changes(repo, cx);
                     } else if tab == DrawerTab::Notes {
                         if this.drawer.notes.is_none() {
                             load_notes(repo.clone(), cx);
@@ -1141,7 +1276,8 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
     s
 }
 
-/// Changes tab: a commit-message field + Commit, then the staged diff.
+/// Changes tab: a commit composer acting on the index, the Unstaged/Staged
+/// file lists with per-file stage/unstage, then the selected file's diff.
 fn changes_view(
     row: &Row,
     data: &DrawerData,
@@ -1150,12 +1286,13 @@ fn changes_view(
     ai_ready: bool,
 ) -> impl IntoElement {
     let mut col = div().flex().flex_col().gap(px(12.));
+    let has_staged = data
+        .changes
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|c| c.staged));
 
     // Commit composer (the field exists once the tab has been opened).
     if let Some(input) = &data.commit_input {
-        let repo = row.id.clone();
-        let app2 = app.clone();
-        let input2 = input.clone();
         let mut actions = div().flex().flex_row().items_center().gap(px(6.));
         // AI: suggest a commit message for the staged diff (gated on aiReady).
         if ai_ready {
@@ -1169,19 +1306,38 @@ fn changes_view(
                 },
             ));
         }
-        actions = actions.child(div().flex_1()).child(pr_btn(
-            SharedString::from("commit"),
-            "Commit",
-            t,
-            move |cx: &mut gpui::App| {
-                let repo = repo.clone();
-                let msg = input2.read(cx).value();
-                if msg.trim().is_empty() {
-                    return;
-                }
-                app2.update(cx, |_this, cx| commit_staged(repo, msg.to_string(), cx));
-            },
-        ));
+        actions = actions.child(div().flex_1());
+        if has_staged {
+            let repo = row.id.clone();
+            let app2 = app.clone();
+            let input2 = input.clone();
+            actions = actions.child(pr_btn(
+                SharedString::from("commit"),
+                "Commit",
+                t,
+                move |cx: &mut gpui::App| {
+                    let repo = repo.clone();
+                    let msg = input2.read(cx).value();
+                    if msg.trim().is_empty() {
+                        return;
+                    }
+                    app2.update(cx, |_this, cx| commit_staged(repo, msg.to_string(), cx));
+                },
+            ));
+        } else {
+            // Nothing in the index — commit would be a no-op, so say why (once
+            // the lists have actually loaded) instead of offering a live button.
+            if data.changes.is_some() {
+                actions = actions.child(
+                    div()
+                        .font_family(MONO)
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg3))
+                        .child(SharedString::from("Nothing staged")),
+                );
+            }
+            actions = actions.child(disabled_btn("Commit", t));
+        }
         col = col
             .child(gpui_component::input::Input::new(input))
             .child(actions);
@@ -1218,20 +1374,10 @@ fn changes_view(
         );
     }
 
-    // Diff with a staged / working-tree toggle.
-    col = col.child(diff_mode_tabs(data.diff_mode, t, app));
-    let diff = match &data.diff {
-        DiffState::Ready(d) if d.trim().is_empty() => {
-            let empty = match data.diff_mode {
-                DiffMode::Staged => "Nothing staged — `git add` your changes first.",
-                DiffMode::Working => "No unstaged changes in the working tree.",
-            };
-            placeholder(empty, t).into_any_element()
-        }
-        DiffState::Ready(d) => diff_block(d, t).into_any_element(),
-        _ => placeholder("Loading…", t).into_any_element(),
-    };
-    col = col.child(diff);
+    // Unstaged / Staged file lists, then the selected file's diff.
+    col = col.child(changes_section(row.id.clone(), data, false, t, app));
+    col = col.child(changes_section(row.id.clone(), data, true, t, app));
+    col = col.child(diff_pane(data, t));
 
     // AI changelog from recent commits (gated on aiReady).
     if ai_ready {
@@ -1280,33 +1426,200 @@ fn changes_view(
     col
 }
 
-/// Staged / Working toggle for the Changes-tab diff.
-fn diff_mode_tabs(active: DiffMode, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let tab = |label: &'static str, mode: DiffMode| {
-        let app = app.clone();
-        let on = mode == active;
+/// The kind marker for a change row: git's one-letter convention, coloured by
+/// sentiment (M/A/D/R and "?" for untracked — each kind visibly distinct).
+fn kind_badge(kind: git_ops::ChangeKind, t: &Theme) -> (&'static str, u32) {
+    match kind {
+        git_ops::ChangeKind::Modified => ("M", t.dirty),
+        git_ops::ChangeKind::Added => ("A", t.clean),
+        git_ops::ChangeKind::Deleted => ("D", t.behind),
+        git_ops::ChangeKind::Renamed => ("R", t.accent_bright),
+        git_ops::ChangeKind::Untracked => ("?", t.fg2),
+    }
+}
+
+/// One of the Changes tab's file lists (`staged` picks which). Header: label +
+/// count + a "Stage all"/"Unstage all" action; body: one row per file.
+fn changes_section(
+    repo: SharedString,
+    data: &DrawerData,
+    staged: bool,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> Div {
+    let title = if staged { "STAGED" } else { "UNSTAGED" };
+    let mut head = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg3))
+        .child(SharedString::from(title));
+
+    let mut col = div().flex().flex_col().gap(px(2.));
+    match &data.changes {
+        None => col = col.child(placeholder("Loading…", t)),
+        Some(list) => {
+            let files: Vec<&ChangeRow> = list.iter().filter(|c| c.staged == staged).collect();
+            head = head.child(SharedString::from(format!("· {}", files.len())));
+            if files.is_empty() {
+                let empty = if staged {
+                    "Nothing staged."
+                } else {
+                    "No unstaged changes."
+                };
+                col = col.child(placeholder(empty, t));
+            } else {
+                // Stage all / Unstage all on the section header.
+                let label = if staged { "Unstage all" } else { "Stage all" };
+                let all: Vec<String> = files.iter().map(|c| c.path.to_string()).collect();
+                let (app2, repo2) = (app.clone(), repo.clone());
+                head = head.child(div().flex_1()).child(pr_btn(
+                    SharedString::from(format!("stage-all-{staged}")),
+                    label,
+                    t,
+                    move |cx: &mut gpui::App| {
+                        let (repo, all) = (repo2.clone(), all.clone());
+                        app2.update(cx, |_this, cx| set_staged(repo, all, !staged, cx));
+                    },
+                ));
+                for c in files {
+                    col = col.child(change_item(c, repo.clone(), data, t, app));
+                }
+            }
+        }
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .child(head.mb(px(3.)))
+        .child(col)
+}
+
+/// One file row: kind letter + path + a stage/unstage icon button. Clicking
+/// the row selects it for the diff pane; the trailing button moves it between
+/// the index and the working tree ("+" stages, "x" unstages — the same
+/// remove-from-list affordance as the worktree rows).
+fn change_item(
+    c: &ChangeRow,
+    repo: SharedString,
+    data: &DrawerData,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let selected = data
+        .change_sel
+        .as_ref()
+        .is_some_and(|(p, s)| *p == c.path && *s == c.staged);
+    let (letter, color) = kind_badge(c.kind, t);
+
+    let action = {
+        let (app, repo, path) = (app.clone(), repo.clone(), c.path.to_string());
+        let (staged, icon) = (c.staged, if c.staged { "x" } else { "plus" });
         div()
-            .id(label)
-            .px(px(10.))
-            .py(px(4.))
-            .rounded(px(t.r_sm))
-            .bg(rgb(if on { t.accent_wash } else { t.button_bg }))
-            .border_1()
-            .border_color(rgb(if on { t.primary } else { t.border }))
-            .text_size(px(t.text_data_sm))
-            .text_color(rgb(if on { t.fg0 } else { t.fg2 }))
+            .id(SharedString::from(format!(
+                "chg-act-{}-{}",
+                c.staged, c.path
+            )))
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(22.))
+            .h(px(22.))
+            .rounded(px(t.r_xs))
             .cursor_pointer()
-            .child(label)
+            .hover(|s| s.bg(rgb(t.surface_hover)))
+            .child(lucide(icon, 12., t.fg3))
             .on_click(move |_ev, _win, cx| {
-                app.update(cx, |this, cx| set_diff_mode(mode, this, cx));
+                // Don't also select the row underneath.
+                cx.stop_propagation();
+                let (repo, path) = (repo.clone(), path.clone());
+                app.update(cx, |_this, cx| set_staged(repo, vec![path], !staged, cx));
             })
+    };
+
+    let row = div()
+        .id(SharedString::from(format!("chg-{}-{}", c.staged, c.path)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(7.))
+        .px(px(8.))
+        .py(px(4.))
+        .rounded(px(t.r_sm))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .cursor_pointer()
+        .child(
+            div()
+                .w(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(color))
+                .child(SharedString::from(letter)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_color(rgb(if selected { t.fg0 } else { t.fg1 }))
+                .child(c.path.clone()),
+        )
+        .child(action);
+    let row = if selected {
+        row.bg(rgb(t.accent_wash))
+    } else {
+        row.hover(|s| s.bg(rgb(t.surface_hover)))
+    };
+    let (app, path, staged) = (app.clone(), c.path.clone(), c.staged);
+    row.on_click(move |_ev, _win, cx| {
+        let path = path.clone();
+        app.update(cx, |this, cx| select_change(this, path, staged, cx));
+    })
+}
+
+/// The selected file's diff, under a header naming the file and its side.
+fn diff_pane(data: &DrawerData, t: &Theme) -> Div {
+    let mut head = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg3))
+        .child(SharedString::from("DIFF"));
+    if let Some((path, staged)) = &data.change_sel {
+        let side = if *staged { "staged" } else { "unstaged" };
+        head = head.child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .child(SharedString::from(format!("· {path} ({side})"))),
+        );
+    }
+
+    let body = match (&data.changes, &data.diff) {
+        (None, _) => placeholder("Loading…", t).into_any_element(),
+        (Some(list), _) if list.is_empty() => {
+            placeholder("Working tree clean — nothing to commit.", t).into_any_element()
+        }
+        (_, DiffState::Ready(d)) if d.trim().is_empty() => {
+            placeholder("No diff for this file.", t).into_any_element()
+        }
+        (_, DiffState::Ready(d)) => diff_block(d, t).into_any_element(),
+        _ => placeholder("Loading…", t).into_any_element(),
     };
     div()
         .flex()
-        .flex_row()
-        .gap(px(6.))
-        .child(tab("Staged", DiffMode::Staged))
-        .child(tab("Working", DiffMode::Working))
+        .flex_col()
+        .gap(px(3.))
+        .child(head.mb(px(3.)))
+        .child(body)
 }
 
 /// Cap on rendered diff lines. The whole app re-renders on any `cx.notify()`
@@ -1598,6 +1911,21 @@ fn pr_btn(
         .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
         .child(SharedString::from(label.to_string()))
         .on_click(move |_ev, _win, cx| on(cx))
+}
+
+/// A [`pr_btn`]-shaped button in its disabled state: muted, inert, no hover.
+fn disabled_btn(label: &str, t: &Theme) -> impl IntoElement {
+    div()
+        .px(px(10.))
+        .py(px(5.))
+        .rounded(px(t.r_sm))
+        .bg(rgb(t.button_bg))
+        .border_1()
+        .border_color(rgb(t.border))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg3))
+        .child(SharedString::from(label.to_string()))
 }
 
 /// Title-case a lowercase merge-method name ("squash" → "Squash").

@@ -665,6 +665,26 @@ pub fn staged_diff(path: &str) -> Result<String, String> {
     Ok(diff_to_string(&diff))
 }
 
+/// Unified diff for a single file (repo-relative pathspec): index vs HEAD when
+/// `staged`, else working tree vs index (with untracked content shown as an
+/// add). Backs the drawer's per-file diff pane.
+pub fn file_diff(path: &str, file: &str, staged: bool) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let mut opts = DiffOptions::new();
+    opts.pathspec(file);
+    let diff = if staged {
+        let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
+    } else {
+        opts.include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        repo.diff_index_to_workdir(None, Some(&mut opts))
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(diff_to_string(&diff))
+}
+
 /// Every pending change in the repo, split per file into staged (index vs
 /// HEAD) and unstaged (working tree vs index) entries — the model behind a
 /// per-file staging checklist. Ordered as libgit2 reports them (by path).
@@ -1090,6 +1110,27 @@ mod tests {
             change_tuples(&path),
             vec![("first.txt".into(), ChangeKind::Untracked, false)]
         );
+    }
+
+    #[test]
+    fn file_diff_scopes_to_one_path_and_side() {
+        let (dir, path) = init_repo();
+        // A staged edit to README.md and a separate untracked file.
+        fs::write(dir.path().join("README.md"), "# Test\nstaged line").unwrap();
+        stage_paths(&path, &["README.md".into()]).unwrap();
+        fs::write(dir.path().join("new.txt"), "untracked line").unwrap();
+
+        let staged = file_diff(&path, "README.md", true).unwrap();
+        assert!(staged.contains("staged line"), "staged side: {staged}");
+        assert!(!staged.contains("untracked line"), "scoped to README.md");
+
+        // README.md has no working-tree edits beyond the index.
+        assert!(file_diff(&path, "README.md", false).unwrap().is_empty());
+
+        // The untracked file's content shows on the unstaged side only.
+        let untracked = file_diff(&path, "new.txt", false).unwrap();
+        assert!(untracked.contains("+untracked line"), "got: {untracked}");
+        assert!(file_diff(&path, "new.txt", true).unwrap().is_empty());
     }
 
     #[test]

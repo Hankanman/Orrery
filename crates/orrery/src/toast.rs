@@ -79,9 +79,6 @@ impl OrreryApp {
     /// Show a toast. Success/Info auto-dismiss after [`AUTO_DISMISS`]; Error
     /// stays until clicked; Progress stays until the caller resolves it (use
     /// [`Self::upsert_toast`] for that). Returns the toast's id.
-    // No caller yet — the one-shot entry point for the bulk-ops / commit-flow /
-    // attention workstreams (#182/#184); the Explore clone uses `upsert_toast`.
-    #[allow(dead_code)]
     pub fn push_toast(
         &mut self,
         kind: ToastKind,
