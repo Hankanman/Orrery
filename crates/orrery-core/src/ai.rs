@@ -34,7 +34,7 @@ fn active_backend() -> Backend {
 pub async fn available() -> bool {
     match active_backend() {
         Backend::Ollama => ollama_available().await,
-        Backend::LlamaCpp => crate::llama::available(),
+        Backend::LlamaCpp => crate::llama::available().await,
     }
 }
 

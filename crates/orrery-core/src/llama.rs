@@ -8,7 +8,7 @@
 //! are GGUF files in the app data dir. Generation only; embeddings stay on the
 //! Ollama path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Duration;
@@ -25,13 +25,15 @@ struct Server {
 
 static SERVER: LazyLock<Mutex<Option<Server>>> = LazyLock::new(|| Mutex::new(None));
 
-/// The bundled llama runtime dir (`$RESOURCE/llama-runtime`), recorded once at
-/// startup — resolving it needs an `AppHandle`, which the discovery path lacks.
-/// Empty (or absent) in dev/source builds; populated by the release CI fetch.
+/// The bundled llama runtime dir (`<prefix>/lib/orrery/llama-runtime`),
+/// recorded once at startup — resolving it needs the executable's install
+/// prefix, which the discovery path lacks. Empty (or absent) in dev/source
+/// builds; populated by the release CI fetch.
 static BUNDLED_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Record the bundled llama runtime dir. Called from the Tauri setup hook with
-/// the resolved resource path; a no-op if called more than once.
+/// Record the bundled llama runtime dir. Called from app setup in
+/// `crates/orrery/src/main.rs` with the dir resolved relative to the running
+/// executable; a no-op if called more than once.
 pub fn set_bundled_dir(dir: PathBuf) {
     let _ = BUNDLED_DIR.set(dir);
 }
@@ -128,10 +130,67 @@ fn model_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// True when both the engine binary and a model file are present — enough to
-/// serve generation. (Doesn't spawn the server; that happens lazily.)
-pub fn available() -> bool {
-    server_binary().is_some() && model_path().is_some()
+/// True when `path` has any execute permission bit set. A binary that exists
+/// but isn't executable (e.g. copied without mode bits) would only fail later
+/// at spawn time, so `available()` checks it up front.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
+}
+
+/// GGUF fixed header: magic (4) + version (4) + tensor count (8) + metadata
+/// kv count (8).
+const GGUF_HEADER_LEN: u64 = 24;
+
+/// True when `path` looks like a real GGUF model: at least a full fixed
+/// header long and starting with the `GGUF` magic. A cheap 4-byte read — not
+/// a full parse — but enough to reject empty/truncated downloads and files
+/// that aren't GGUF at all.
+fn valid_gguf(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    if f.metadata().map(|m| m.len()).unwrap_or(0) < GGUF_HEADER_LEN {
+        return false;
+    }
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).is_ok() && &magic == b"GGUF"
+}
+
+/// True when the llama.cpp backend can serve generation. If a sidecar is
+/// already running, this is a live `GET /health` probe (mirroring the Ollama
+/// `/api/version` check). Otherwise it stays cheap — no server spawn, since a
+/// model load can take many seconds — but goes beyond bare existence: the
+/// engine binary must be executable and the model must pass the GGUF header
+/// check, so `ai_ready` isn't reported from a corrupt binary or a truncated
+/// download. (The server itself still spawns lazily, on first generate.)
+pub async fn available() -> bool {
+    let running_port = {
+        let guard = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|s| s.port)
+    };
+    if let Some(port) = running_port {
+        // A dead sidecar refuses the connection immediately, so this stays fast.
+        return client()
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+    }
+    let (Some(bin), Some(model)) = (server_binary(), model_path()) else {
+        return false;
+    };
+    is_executable(&bin) && valid_gguf(&model)
 }
 
 /// Download a GGUF model from `url` into [`models_dir`], reporting
@@ -326,6 +385,51 @@ mod tests {
     #[test]
     fn free_port_returns_something() {
         assert!(free_port().is_some());
+    }
+
+    #[test]
+    fn valid_gguf_accepts_gguf_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("model.gguf");
+        // Magic + version + tensor count + kv count (all little-endian).
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        std::fs::write(&p, &bytes).unwrap();
+        assert!(valid_gguf(&p));
+    }
+
+    #[test]
+    fn valid_gguf_rejects_wrong_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("model.gguf");
+        std::fs::write(&p, vec![0u8; GGUF_HEADER_LEN as usize]).unwrap();
+        assert!(!valid_gguf(&p));
+    }
+
+    #[test]
+    fn valid_gguf_rejects_truncated_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("model.gguf");
+        // Right magic but shorter than the fixed header — a truncated download.
+        std::fs::write(&p, b"GGUF").unwrap();
+        assert!(!valid_gguf(&p));
+        assert!(!valid_gguf(&dir.path().join("nope.gguf")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_tracks_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("llama-server");
+        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable(&p));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable(&p));
+        assert!(!is_executable(&dir.path().join("missing")));
     }
 
     #[test]

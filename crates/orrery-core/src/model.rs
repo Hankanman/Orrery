@@ -1,5 +1,7 @@
-//! Shared domain types serialized to the frontend. These mirror `src/types.ts`
-//! (camelCase over the wire) and `AppConfig` mirrors the TOML on disk.
+//! Shared serde domain types used across the workspace (the UI crate flattens
+//! them into render-ready rows in `crates/orrery/src/data.rs`). Serialized
+//! camelCase for the SQLite cache and forge APIs; `AppConfig` mirrors the
+//! TOML on disk.
 
 use serde::{Deserialize, Serialize};
 
