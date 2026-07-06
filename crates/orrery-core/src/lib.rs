@@ -7,9 +7,11 @@
 
 pub mod activity;
 pub mod ai;
+pub mod attention;
 pub mod cache;
 pub mod config;
 pub mod enrich;
+pub mod fleet;
 pub mod forge;
 pub mod git_ops;
 pub mod inbox;
