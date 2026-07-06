@@ -17,6 +17,7 @@ mod palette;
 mod shell;
 mod task;
 mod theme;
+mod toast;
 mod views;
 
 use std::rc::Rc;
@@ -130,6 +131,8 @@ fn main() {
                             services: Default::default(),
                             tray_active,
                             watcher,
+                            toasts: Vec::new(),
+                            toast_seq: 0,
                             grid: Default::default(),
                             view_filter: None,
                             focus: cx.focus_handle(),
