@@ -23,8 +23,10 @@ fn db_path() -> Option<PathBuf> {
 // making private repos look public until the 6h TTL lapsed. v3 keys host_cache
 // by (host, slug) instead of slug alone, so two repos with the same
 // "owner/repo" slug on different hosts (e.g. github.com + a self-hosted
-// GitLab) no longer share one cached row.
-const CACHE_SCHEMA: i64 = 3;
+// GitLab) no longer share one cached row. v4 re-shapes `embeddings` from one
+// JSON vector per repo id (#41) to chunked f32-blob rows keyed
+// (host, slug, source, chunk_ix) for semantic fleet recall (#186).
+const CACHE_SCHEMA: i64 = 4;
 
 /// `host_cache` DDL, shared by [`init`] and [`migrate`] (which drops and
 /// recreates the table on a schema bump — it's just a cache).
@@ -35,23 +37,40 @@ const HOST_CACHE_DDL: &str = "CREATE TABLE IF NOT EXISTS host_cache (
     fetched_at INTEGER NOT NULL,
     PRIMARY KEY (host, slug));";
 
-fn init(conn: &Connection) -> rusqlite::Result<()> {
+/// `embeddings` DDL — the semantic-recall index (#186). A repo contributes
+/// several `source` kinds ('readme', 'description', 'notes', 'commits', …),
+/// each split into chunks; `vector` is a little-endian f32 blob (see
+/// `semantic::encode_vector`). Keyed per (host, slug) like `host_cache`, per
+/// the #159 lesson. The DDL lives here so schema versioning stays in one
+/// place; the row helpers live in `crate::semantic`.
+const EMBEDDINGS_DDL: &str = "CREATE TABLE IF NOT EXISTS embeddings (
+    host TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    source TEXT NOT NULL,
+    chunk_ix INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (host, slug, source, chunk_ix));";
+
+pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS ai_cache (id TEXT PRIMARY KEY, summary TEXT NOT NULL, last_commit INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS embeddings (id TEXT PRIMARY KEY, vec TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, text TEXT NOT NULL DEFAULT '', last_seen_sha TEXT NOT NULL DEFAULT '', last_seen_unix INTEGER NOT NULL DEFAULT 0);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
     conn.execute_batch(HOST_CACHE_DDL)?;
+    conn.execute_batch(EMBEDDINGS_DDL)?;
     migrate(conn)
 }
 
-/// Drop schema-sensitive cached payloads when CACHE_SCHEMA changes. Only
-/// host enrichment is version-sensitive today; favorites/AI cache are untouched.
-/// The table is dropped (not just emptied) because its shape can change between
-/// versions — v3 changed the primary key from `slug` to `(host, slug)`.
+/// Drop schema-sensitive cached payloads when CACHE_SCHEMA changes — today
+/// host enrichment and the embedding index; favorites/repos/AI summaries are
+/// untouched. The tables are dropped (not just emptied) because their shape
+/// can change between versions — v3 changed host_cache's primary key, v4
+/// changed embeddings' entire shape.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let current: Option<i64> = conn
         .query_row(
@@ -63,7 +82,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         .and_then(|s| s.parse().ok());
     if current != Some(CACHE_SCHEMA) {
         conn.execute("DROP TABLE IF EXISTS host_cache", [])?;
+        conn.execute("DROP TABLE IF EXISTS embeddings", [])?;
         conn.execute_batch(HOST_CACHE_DDL)?;
+        conn.execute_batch(EMBEDDINGS_DDL)?;
+        // The dropped vectors must re-embed; stale signatures would skip them.
+        conn.execute("DELETE FROM meta WHERE key LIKE 'embed_sig:%'", [])?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', ?1)",
             [CACHE_SCHEMA.to_string()],
@@ -72,7 +95,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn open() -> Result<Connection, String> {
+/// Open (and initialize) the on-disk cache. `pub(crate)` so `crate::semantic`'s
+/// public wrappers can follow the same open-per-call pattern for the
+/// `embeddings` table without cache.rs owning its row logic.
+pub(crate) fn open() -> Result<Connection, String> {
     let path = db_path().ok_or("no data directory")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -352,42 +378,6 @@ pub fn store_summary(id: &str, summary: &str, last_commit: i64) {
     }
 }
 
-/// Store a repo's embedding vector (as JSON) for semantic search.
-pub fn store_embedding(id: &str, vec: &[f32]) {
-    if let Ok(conn) = open() {
-        if let Ok(json) = serde_json::to_string(vec) {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO embeddings (id, vec) VALUES (?1, ?2)",
-                rusqlite::params![id, json],
-            );
-        }
-    }
-}
-
-/// Load all repo embeddings as (id, vector).
-pub fn load_embeddings() -> Vec<(String, Vec<f32>)> {
-    let Ok(conn) = open() else {
-        return Vec::new();
-    };
-    let Ok(mut stmt) = conn.prepare("SELECT id, vec FROM embeddings") else {
-        return Vec::new();
-    };
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    });
-    match rows {
-        Ok(iter) => iter
-            .flatten()
-            .filter_map(|(id, json)| {
-                serde_json::from_str::<Vec<f32>>(&json)
-                    .ok()
-                    .map(|v| (id, v))
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 pub fn get_meta(key: &str) -> Option<String> {
     let conn = open().ok()?;
     let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1").ok()?;
@@ -467,7 +457,7 @@ pub fn set_seen(id: &str, sha: &str, unix: i64) -> Result<(), String> {
 fn clear_ai_on(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
     let summaries = conn.execute("DELETE FROM ai_cache", [])?;
     let embeddings = conn.execute("DELETE FROM embeddings", [])?;
-    // The per-repo embedding signatures that drive index-skip (see index_repos).
+    // The per-repo embedding signatures that drive index-skip (see semantic::index).
     conn.execute("DELETE FROM meta WHERE key LIKE 'embed_sig:%'", [])?;
     Ok((summaries, embeddings))
 }
@@ -551,9 +541,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_bump_clears_host_cache() {
+    fn schema_bump_clears_versioned_caches() {
         let conn = mem(); // init() sets cache_schema to the current version
         store_host_info_on(&conn, "github.com", "o/test", &HostInfo::default(), 1_000);
+        conn.execute(
+            "INSERT INTO embeddings (host, slug, source, chunk_ix, content, vector, updated_at)
+             VALUES ('github.com', 'o/test', 'readme', 0, 't', X'0000803f', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('embed_sig:/a', 'x')",
+            [],
+        )
+        .unwrap();
         // Simulate an older schema, then migrate.
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('cache_schema', '1')",
@@ -561,10 +562,21 @@ mod tests {
         )
         .unwrap();
         migrate(&conn).unwrap();
-        let rows: i64 = conn
-            .query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0))
+        for table in ["host_cache", "embeddings"] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, 0, "stale {table} should be cleared on schema bump");
+        }
+        // Embedding signatures go with the vectors, or nothing would re-embed.
+        let sigs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key LIKE 'embed_sig:%'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(rows, 0, "stale host_cache should be cleared on schema bump");
+        assert_eq!(sigs, 0, "embed signatures must be cleared with the vectors");
         // Re-running is a no-op now that the version matches.
         store_host_info_on(&conn, "github.com", "o/test", &HostInfo::default(), 1_000);
         migrate(&conn).unwrap();
@@ -572,6 +584,32 @@ mod tests {
             .query_row("SELECT count(*) FROM host_cache", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1, "matching schema must not clear the cache");
+    }
+
+    #[test]
+    fn migrate_recreates_embeddings_from_pre_v4_shape() {
+        // A v3 database has embeddings keyed by repo id with a JSON vector;
+        // migrate must drop that shape and recreate the chunked v4 table.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE embeddings (id TEXT PRIMARY KEY, vec TEXT NOT NULL);
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('cache_schema', '3');
+             INSERT INTO embeddings (id, vec) VALUES ('/a', '[0.1]');",
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        // The new shape accepts (host, slug, source, chunk_ix) rows and starts empty.
+        conn.execute(
+            "INSERT INTO embeddings (host, slug, source, chunk_ix, content, vector, updated_at)
+             VALUES ('github.com', 'o/test', 'readme', 0, 't', X'0000803f', 1)",
+            [],
+        )
+        .unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]
@@ -724,7 +762,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO embeddings (id, vec) VALUES ('/a', '[0.1]')",
+            "INSERT INTO embeddings (host, slug, source, chunk_ix, content, vector, updated_at)
+             VALUES ('github.com', 'o/test', 'readme', 0, 'text', X'0000803f', 1)",
             [],
         )
         .unwrap();

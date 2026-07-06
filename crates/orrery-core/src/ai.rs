@@ -2,7 +2,8 @@
 //! the Ollama HTTP path (default, GPU-accelerated) or the bundled llama.cpp
 //! sidecar (#21). The public entry points (`available`, `installed_models`,
 //! `generate`, `embed`, `pull`) dispatch on the configured backend; everything
-//! backend-agnostic (prompts, `pick_model`, `cosine`) stays free-standing.
+//! backend-agnostic (prompts, `pick_model`) stays free-standing; vector
+//! similarity lives in `crate::semantic`.
 //!
 //! Everything degrades gracefully: if the active backend isn't reachable,
 //! summaries are simply unavailable and the UI shows nothing.
@@ -325,26 +326,6 @@ async fn ollama_embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
         .ok_or_else(|| "model returned no embedding".to_string())
 }
 
-/// Cosine similarity of two equal-length vectors (0 if mismatched/empty).
-pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    if na == 0.0 || nb == 0.0 {
-        0.0
-    } else {
-        dot / (na.sqrt() * nb.sqrt())
-    }
-}
-
 fn clamp_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -490,15 +471,6 @@ mod tests {
         assert!(p.contains("Rust"));
         assert!(p.contains("7 uncommitted"));
         assert!(p.contains("branch main"));
-    }
-
-    #[test]
-    fn cosine_basics() {
-        let a = [1.0, 0.0, 0.0];
-        assert!((cosine(&a, &a) - 1.0).abs() < 1e-6); // identical
-        assert!(cosine(&a, &[0.0, 1.0, 0.0]).abs() < 1e-6); // orthogonal
-        assert_eq!(cosine(&a, &[1.0, 0.0]), 0.0); // mismatched length
-        assert_eq!(cosine(&[], &[]), 0.0); // empty
     }
 
     #[test]
