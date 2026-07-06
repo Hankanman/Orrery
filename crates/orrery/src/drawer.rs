@@ -170,6 +170,10 @@ pub struct DrawerData {
     /// The repo's default branch (origin/HEAD else main/master), loaded with
     /// the Overview — the base for "Open PR" and its visibility check.
     pub default_branch: Option<SharedString>,
+    /// The repo's cached default-branch CI state (central pass, #183), looked
+    /// up from the app's `ci_states` when the drawer opens — the Overview's
+    /// CI line. `None` for non-GitHub repos or before the first pass.
+    pub ci: Option<orrery_core::cache::CiEntry>,
     /// A commit landed in this drawer session — keeps Push offered even while
     /// the grid row's ahead count is stale (no upstream / pre-rescan).
     pub committed: bool,
@@ -1071,6 +1075,40 @@ fn overview(row: &Row, t: &Theme, data: &DrawerData, app: &Entity<OrreryApp>) ->
         facts = facts.child(seg("tag", row.release.clone(), t.fg2));
     }
     facts = facts.child(seg("clock", row.age.clone(), t.fg2));
+    // Default-branch CI state from the central pass (#183); clicking it opens
+    // the run's page when the API offered one.
+    if let Some(ci) = &data.ci {
+        let state = match ci.state.as_str() {
+            "failure" => Some(("circle-alert", "CI failing", t.behind)),
+            "success" => Some(("circle-check", "CI passing", t.clean)),
+            "pending" => Some(("clock", "CI running", t.fg2)),
+            _ => None, // "none": no CI on this repo — show nothing.
+        };
+        if let Some((icon, label, color)) = state {
+            facts = facts.child(match &ci.url {
+                Some(url) => {
+                    let url = url.clone();
+                    div()
+                        .id("ci-run")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .text_color(rgb(color))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(rgb(t.fg0)))
+                        .child(lucide(icon, 13., color))
+                        .child(SharedString::from(label))
+                        .child(lucide("external-link", 11., t.fg3))
+                        .on_click(move |_ev, _win, _cx| {
+                            let _ = launch::open(&url);
+                        })
+                        .into_any_element()
+                }
+                None => seg(icon, SharedString::from(label), color).into_any_element(),
+            });
+        }
+    }
     col = col.child(facts);
 
     // Async git data.

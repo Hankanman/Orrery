@@ -236,6 +236,15 @@ pub struct OrreryApp {
     /// [`Self::recompute_attention`] tells "no host facts yet" from "inbox
     /// genuinely empty".
     pub polled_inbox: Option<Vec<orrery_core::inbox::InboxItem>>,
+    /// Cached CI states keyed (remote host domain, slug) — the attention
+    /// model's CI input and the drawer Overview's CI line. Seeded from
+    /// `ci_cache` at launch (instant, offline-tolerant) and reloaded after
+    /// each central CI pass ([`Self::refresh_ci`]).
+    pub ci_states: std::collections::HashMap<(String, String), orrery_core::cache::CiEntry>,
+    /// The last whole-pass CI failure surfaced as a toast, so an ongoing
+    /// outage (expired token polled every few minutes) toasts once per
+    /// distinct error, not per pass.
+    pub ci_last_error: Option<String>,
     /// The ranked "needs you" list from `orrery_core::attention::compute`
     /// (Urgent first). Recomputed on each source update — rescan, inbox load,
     /// cleanup scan, agents poll — never per frame.
@@ -468,9 +477,9 @@ impl OrreryApp {
     /// (re)scan, inbox facts with each attention poll (and each Inbox load,
     /// which is fresher while it lasts), prunable counts with each Cleanup
     /// scan, agent sessions with the agents poll — and facts from a lazy view
-    /// are simply absent until it has loaded. CI facts stay empty for now:
-    /// there's no central CI poll yet (`inbox::github_ci` is fetched
-    /// per-drawer), so `CiFailing` items arrive with a later #183 workstream.
+    /// are simply absent until it has loaded. CI facts come from `ci_states`
+    /// (cache-seeded at launch, refreshed by the central pass in
+    /// [`Self::refresh_ci`]), restricted to remotes still in the fleet.
     pub fn recompute_attention(&mut self) {
         use orrery_core::attention::{self, AgentFact, PrunableFact};
         // Prefer the Inbox view's facts (they're the freshest the moment it
@@ -515,7 +524,8 @@ impl OrreryApp {
                 }
                 _ => Vec::new(),
             };
-        self.attention_items = attention::compute(&self.repos, inbox, &[], &prunable, &agents);
+        let ci = orrery_core::ci::facts(&self.ci_states, &self.repos);
+        self.attention_items = attention::compute(&self.repos, inbox, &ci, &prunable, &agents);
         // Items are severity-sorted (Urgent first), so a repo's first
         // occurrence is its highest severity.
         self.attention_by_repo.clear();
@@ -550,13 +560,16 @@ impl OrreryApp {
     /// dedupe).
     fn notify_fresh_urgent(&mut self) {
         use std::collections::HashSet;
-        // Every urgent kind today derives from host inbox facts (review
-        // requests; CI facts aren't wired yet). Until an inbox source has
+        // Urgent kinds derive from host facts: review requests from the
+        // inbox, CI failures from `ci_states`. Until an inbox source has
         // produced — the background poll or the Inbox view — an empty urgent
         // set means "not loaded yet", not "all clear": diffing against it
         // would first persist an empty snapshot, then re-notify every
-        // still-pending item on the next poll of every launch. Revisit this
-        // gate when CI facts (a non-inbox urgent source) land.
+        // still-pending item on the next poll of every launch. CI facts
+        // don't need their own gate: they're cache-seeded at launch (so any
+        // still-failing repo is already in the persisted seen-set) and only
+        // ever refreshed by the pass, never blanked (an `Err` keeps the last
+        // known state, see `orrery_core::ci`).
         let inbox_loaded = self.polled_inbox.is_some()
             || matches!(self.inbox, crate::views::inbox::InboxState::Ready(_));
         if !inbox_loaded {
@@ -608,6 +621,20 @@ impl OrreryApp {
             tab: DrawerTab::Overview,
         });
         self.drawer = crate::drawer::DrawerData::loading(repo.clone());
+        // The Overview's CI line: the repo's cached default-branch CI state
+        // (kept fresh by the central pass — see `refresh_ci`). Sync map
+        // lookup, no I/O.
+        self.drawer.ci = self
+            .repos
+            .iter()
+            .find(|r| r.id.as_str() == repo.as_ref())
+            .and_then(|r| {
+                let slug = r.slug.as_deref()?;
+                let host = r.remote_host.as_deref().unwrap_or_default();
+                self.ci_states
+                    .get(&(host.to_string(), slug.to_string()))
+                    .cloned()
+            });
         // The new-worktree field lives in Overview, shown immediately on open.
         self.drawer.worktree_input = Some(cx.new(|cx| {
             gpui_component::input::InputState::new(window, cx).placeholder("new-worktree-name")
@@ -2462,6 +2489,7 @@ impl OrreryApp {
                 // Drop selected ids for repos that vanished in the rescan.
                 this.prune_selection();
                 this.enrich_hosts(cx);
+                this.refresh_ci(cx);
                 this.load_activity(cx);
                 // Refresh which repos have a live agent, so Mission Control shows
                 // the indicator without needing the Agents view open.
@@ -2742,6 +2770,54 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.apply_snapshot(snap);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Run the central CI-status pass (`orrery_core::ci`, #183) on the tokio
+    /// runtime, then reload `ci_states` from the cache and recompute
+    /// attention — failing default-branch CI flows to badges, tray, and
+    /// notifications through the model. TTL-paced in core (~5 min), so
+    /// calling this on every rescan and attention poll is cheap.
+    ///
+    /// A pass where *everything* failed (expired token, rate limit, outage)
+    /// surfaces one error toast per distinct error — the cached states are
+    /// deliberately left untouched (see `orrery_core::ci`), so this toast is
+    /// the only way an auth problem becomes visible instead of CI silently
+    /// going stale.
+    pub fn refresh_ci(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let now = crate::data::now_unix();
+            let outcome =
+                crate::task::run(async move { orrery_core::ci::refresh_cached(now).await }).await;
+            if outcome.updated == 0 && outcome.errors == 0 {
+                return; // Nothing attempted (all fresh / no token / no repos).
+            }
+            let states = cx
+                .background_executor()
+                .spawn(async { orrery_core::cache::all_ci_states() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if outcome.all_failed() {
+                    if this.ci_last_error != outcome.last_error
+                        && let Some(err) = &outcome.last_error
+                    {
+                        this.upsert_toast(
+                            "ci-pass",
+                            ToastKind::Error,
+                            "CI status check failed",
+                            Some(err.clone().into()),
+                            cx,
+                        );
+                    }
+                    this.ci_last_error = outcome.last_error;
+                } else {
+                    this.ci_last_error = None;
+                }
+                this.ci_states = states;
+                this.recompute_attention();
                 cx.notify();
             });
         })

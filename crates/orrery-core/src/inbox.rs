@@ -66,6 +66,9 @@ pub struct RemoteRepo {
 pub struct CiStatus {
     /// "success" | "failure" | "pending" | "none"
     pub state: String,
+    /// The run's web page (GitHub's `html_url`), when a run was found — lets
+    /// surfaces link straight to the failing run.
+    pub url: Option<String>,
 }
 
 /// One entry in the activity feed. `kind` distinguishes a starred-repo release
@@ -1126,7 +1129,9 @@ pub async fn github_approve_pr(slug: &str, number: u64) -> Result<(), String> {
     Err(msg)
 }
 
-/// Latest GitHub Actions run conclusion for a repo's default branch.
+/// Latest GitHub Actions run conclusion for a repo, filtered to `branch` when
+/// given (the central CI pass passes the default branch so PR-branch runs
+/// can't masquerade as trunk state).
 ///
 /// "No CI" (`state: "none"`) is only reported when GitHub answers
 /// definitively: a 2xx with an empty run list, or a 404 (the repo isn't
@@ -1134,7 +1139,7 @@ pub async fn github_approve_pr(slug: &str, number: u64) -> Result<(), String> {
 /// there is nothing to show). Auth failures (401 expired token), rate limits
 /// (403/429), and server errors surface as `Err` — same rule as `gh_search`
 /// above — so a broken token reads as an error, not as CI vanishing.
-pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
+pub async fn github_ci(slug: &str, branch: Option<&str>) -> Result<CiStatus, String> {
     #[derive(Deserialize)]
     struct Runs {
         #[serde(default)]
@@ -1144,16 +1149,23 @@ pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
     struct Run {
         status: String,
         conclusion: Option<String>,
+        html_url: Option<String>,
     }
     // No token → forge calls are gated off entirely; an unconnected app
     // legitimately shows no CI (this is absence of a source, not a failure).
     let Some(token) = oauth::github_token() else {
         return Ok(CiStatus {
             state: "none".into(),
+            url: None,
         });
     };
-    let resp = client()
-        .get(format!("{GH}/repos/{slug}/actions/runs?per_page=1"))
+    let mut req = client()
+        .get(format!("{GH}/repos/{slug}/actions/runs"))
+        .query(&[("per_page", "1")]);
+    if let Some(branch) = branch {
+        req = req.query(&[("branch", branch)]);
+    }
+    let resp = req
         .bearer_auth(&token)
         .send()
         .await
@@ -1165,16 +1177,18 @@ pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
         }
         return Ok(CiStatus {
             state: "none".into(),
+            url: None,
         });
     }
     let runs: Runs = resp.json().await.map_err(|e| e.to_string())?;
-    let state = runs
-        .workflow_runs
-        .first()
+    let run = runs.workflow_runs.into_iter().next();
+    let state = run
+        .as_ref()
         .map(|r| workflow_run_state(&r.status, r.conclusion.as_deref()))
         .unwrap_or("none");
     Ok(CiStatus {
         state: state.to_string(),
+        url: run.and_then(|r| r.html_url),
     })
 }
 

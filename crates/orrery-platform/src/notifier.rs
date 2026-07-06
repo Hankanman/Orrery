@@ -3,11 +3,12 @@
 //! inbox facts (the attention model's host input, so the app has them without
 //! the Inbox view ever opening), and the *newly-appeared* items to notify
 //! (deduped against the previous poll, filtered by the per-type opt-in
-//! toggles). Review requests are gathered but never notified from here: they
-//! are `Urgent` in `orrery_core::attention`, and the app notifies new urgent
-//! items itself after each recompute — notifying here too would double-fire
-//! for the same fact. UI-agnostic: callers surface the glance (a tray, a nav
-//! badge) and fire notifications however they like.
+//! toggles). Review requests and CI alerts are gathered but never notified
+//! from here: both are `Urgent` in `orrery_core::attention` (reviews from
+//! inbox facts, CI failures from the central CI pass, #183), and the app
+//! notifies new urgent items itself after each recompute — notifying here
+//! too would double-fire for the same fact. UI-agnostic: callers surface the
+//! glance (a tray, a nav badge) and fire notifications however they like.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -118,12 +119,13 @@ pub async fn poll(cfg: &AppConfig) -> PollResult {
 fn type_enabled(cfg: &AppConfig, kind: &str) -> bool {
     match kind {
         "pr" => cfg.notify_new_pr,
-        // Review requests notify through the attention model (they're Urgent
-        // there and the app dedupes + fires after each recompute); notifying
-        // from this poll too would double-fire for the same fact. They still
-        // feed the glance lines and the seen-set above.
-        "review" => false,
-        "ci" => cfg.notify_ci_failure,
+        // Review requests and CI failures notify through the attention model
+        // (they're Urgent there and the app dedupes + fires after each
+        // recompute — CI facts come from the central pass in
+        // `orrery_core::ci`, #183); notifying from this poll too would
+        // double-fire for the same fact. Both still feed the glance lines
+        // and the seen-set above.
+        "review" | "ci" => false,
         _ => false,
     }
 }
@@ -168,7 +170,9 @@ async fn collect() -> (Vec<Attention>, Vec<inbox::InboxItem>) {
     }
 
     // CheckSuite notifications are GitHub's CI alerts (it notifies on your own
-    // failed/required runs, not routine passes).
+    // failed/required runs, not routine passes). Glance-only since #183: the
+    // desktop notification for a failing default branch comes from the
+    // attention model's `CiFailing` (see `type_enabled`).
     if let Ok(notes) = inbox::github_notifications().await {
         for n in notes {
             if n.kind == "CheckSuite" {
@@ -198,14 +202,16 @@ mod tests {
     }
 
     #[test]
-    fn reviews_never_notify_from_the_poll() {
-        // Review requests are Urgent in the attention model; the app notifies
-        // them after each recompute. The poll must not double-fire, whatever
-        // the (still-honored-by-the-model) per-type toggle says.
+    fn reviews_and_ci_never_notify_from_the_poll() {
+        // Review requests and CI failures are Urgent in the attention model;
+        // the app notifies them after each recompute (CI facts from the
+        // central pass, #183). The poll must not double-fire, whatever the
+        // (still-honored-by-the-model) per-type toggles say.
         let cfg = AppConfig::default();
         assert!(cfg.notify_review_requested);
+        assert!(cfg.notify_ci_failure);
         assert!(!type_enabled(&cfg, "review"));
+        assert!(!type_enabled(&cfg, "ci"));
         assert!(type_enabled(&cfg, "pr"));
-        assert!(type_enabled(&cfg, "ci"));
     }
 }

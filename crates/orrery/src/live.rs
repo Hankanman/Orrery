@@ -137,6 +137,7 @@ pub fn spawn(
                         // enrichment (skips repos still within the cache TTL).
                         app.index_semantic();
                         app.enrich_hosts(cx);
+                        app.refresh_ci(cx);
                         app.load_activity(cx);
                         cx.notify();
                     });
@@ -169,6 +170,10 @@ pub fn spawn(
                             // Fresh host facts → refresh the attention
                             // surfaces (badges, tray, urgent notifications).
                             app.recompute_attention();
+                            // Piggyback the central CI pass on the poll's
+                            // cadence (180s) — its own TTL (~5 min) makes
+                            // most of these ticks a no-op.
+                            app.refresh_ci(cx);
                             cx.notify();
                         })
                         .is_err()

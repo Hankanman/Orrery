@@ -9,6 +9,7 @@ pub mod activity;
 pub mod ai;
 pub mod attention;
 pub mod cache;
+pub mod ci;
 pub mod config;
 pub mod dispatch;
 pub mod enrich;
