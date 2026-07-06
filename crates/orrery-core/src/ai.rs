@@ -56,6 +56,13 @@ pub async fn generate(model: &str, prompt: &str) -> Result<String, String> {
     }
 }
 
+/// Whether the active backend can embed at all. Embeddings are Ollama-only, so
+/// semantic indexing/recall stays dormant (not broken) on the llama.cpp
+/// backend — callers skip the work instead of erroring per call.
+pub fn embeddings_supported() -> bool {
+    matches!(active_backend(), Backend::Ollama)
+}
+
 /// Embed `text` with `model` on the active backend. Embeddings are Ollama-only
 /// for now — semantic search stays hidden on the llama.cpp backend.
 pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {

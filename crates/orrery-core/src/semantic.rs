@@ -16,20 +16,24 @@
 //! the logic sits in `*_on(conn)` variants unit-tested against in-memory
 //! SQLite.
 //!
-//! The corpus indexing pipeline and palette recall mode are separate #186
-//! workstreams. Until they land, the [`index`]/[`search`] pair at the bottom
-//! keeps the #41-era whole-repo pipeline working on top of this store.
+//! Indexing ([`index_fleet`]) builds a per-repo corpus — readme (chunked),
+//! description, topics, notes, recent commit subjects — and embeds only the
+//! (repo, source) pairs whose text signature changed since the last pass
+//! (`embed_sig:*` meta keys), pacing itself so a cold fleet doesn't hammer the
+//! backend. Recall ([`recall`]) ranks a query vector against the whole index,
+//! best chunk per repo. Both are dormant unless the backend can embed.
 
 use rusqlite::Connection;
 
-use crate::{ai, cache, config};
+use crate::model::Repo;
+use crate::{ai, cache, config, git_ops};
 
 /// Minimum cosine similarity for a query↔repo match to surface.
-const MIN_SCORE: f32 = 0.35;
-/// Max ranked hits returned for a query.
-const MAX_HITS: usize = 8;
-/// How many repos to embed concurrently per batch.
-const BATCH: usize = 6;
+pub const MIN_SCORE: f32 = 0.35;
+/// Max ranked repos returned for a query.
+pub const MAX_HITS: usize = 8;
+/// How many chunks to embed concurrently.
+const BATCH: usize = 4;
 
 /// One stored chunk of the embedding index, decoded and ready to rank.
 #[derive(Debug, Clone, PartialEq)]
@@ -297,80 +301,391 @@ pub fn top_k(query: &[f32], rows: Vec<EmbeddingRow>, k: usize) -> Vec<ScoredHit>
         .collect()
 }
 
-// ── Legacy whole-repo pipeline (#41) ────────────────────────────────────────
-// One vector per repo (name/slug/language/description), keyed by repo id.
-// Ported onto the chunked store so the palette keeps working until the #186
-// indexing + recall workstreams replace it. Rows are stored under an empty
-// host with the repo id (a path) standing in for the slug, tagged with a
-// dedicated source so real (host, slug) corpus rows never mix with them.
-
-/// Source tag for legacy whole-repo rows.
-const LEGACY_SOURCE: &str = "repo";
-
-/// Embed each `(id, text)` whose text changed since the last index, caching the
-/// vector + a signature so unchanged repos are skipped. Returns how many were
-/// (re-)embedded. Embedding failures (AI unreachable) are swallowed — the index
-/// just stays as-is.
-pub async fn index(items: &[(String, String)]) -> usize {
-    let model = config::load().embed_model;
-    let now = unix_now();
-    let mut count = 0usize;
-    for chunk in items.chunks(BATCH) {
-        let done = futures_util::future::join_all(chunk.iter().map(|(id, text)| {
-            let model = model.clone();
-            async move {
-                let key = format!("embed_sig:{id}");
-                let sig = text_signature(text);
-                if cache::get_meta(&key).as_deref() == Some(sig.as_str()) {
-                    return false; // unchanged — skip the embed call
-                }
-                match ai::embed(&model, text).await {
-                    Ok(vec) => {
-                        let stored =
-                            store_embeddings("", id, LEGACY_SOURCE, &[(text.clone(), vec)], now);
-                        if stored.is_ok() {
-                            cache::set_meta(&key, &sig);
-                        }
-                        stored.is_ok()
-                    }
-                    Err(_) => false,
-                }
+/// Rank the whole index against a query vector: the best-scoring chunk per
+/// repo, best repos first, floored at `min_score` and capped at `k`. Pure —
+/// this is the palette recall engine; the UI resolves (host, slug) back to a
+/// repo row and shows `content` as the matching snippet.
+pub fn recall(query: &[f32], rows: &[EmbeddingRow], k: usize, min_score: f32) -> Vec<ScoredHit> {
+    let mut best: std::collections::HashMap<(&str, &str), (f32, &EmbeddingRow)> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let score = cosine_similarity(query, &r.vector);
+        if score < min_score {
+            continue;
+        }
+        let entry = best.entry((r.host.as_str(), r.slug.as_str()));
+        match entry {
+            std::collections::hash_map::Entry::Occupied(mut e) if score > e.get().0 => {
+                e.insert((score, r));
             }
-        }))
-        .await;
-        count += done.into_iter().filter(|x| *x).count();
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert((score, r));
+            }
+            _ => {}
+        }
     }
-    count
-}
-
-/// Rank the embedding index against `query`, returning `(repo id, score)` for the
-/// top matches above the similarity floor. Empty when the query is blank or the
-/// embedding backend is unreachable.
-pub async fn search(query: &str) -> Vec<(String, f32)> {
-    if query.trim().is_empty() {
-        return Vec::new();
-    }
-    let model = config::load().embed_model;
-    let Ok(q) = ai::embed(&model, query).await else {
-        return Vec::new();
-    };
-    let rows: Vec<EmbeddingRow> = all_embeddings()
-        .into_iter()
-        .filter(|r| r.host.is_empty() && r.source == LEGACY_SOURCE)
+    let mut hits: Vec<ScoredHit> = best
+        .into_values()
+        .map(|(score, r)| ScoredHit {
+            host: r.host.clone(),
+            slug: r.slug.clone(),
+            source: r.source.clone(),
+            content: r.content.clone(),
+            score,
+        })
         .collect();
-    top_k(&q, rows, MAX_HITS)
-        .into_iter()
-        .filter(|h| h.score > MIN_SCORE)
-        .map(|h| (h.slug, h.score))
-        .collect()
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| (&a.host, &a.slug).cmp(&(&b.host, &b.slug)))
+    });
+    hits.truncate(k);
+    hits
 }
 
-/// Stable hex fingerprint of a repo's embedding text, for skip-if-unchanged.
-fn text_signature(text: &str) -> String {
+// ── Corpus building (per-repo sources) ──────────────────────────────────────
+
+/// Source kinds a repo contributes to the index. Each is stored, signed, and
+/// re-embedded independently, so e.g. a new commit only re-embeds 'commits'.
+pub const SOURCE_README: &str = "readme";
+pub const SOURCE_DESCRIPTION: &str = "description";
+pub const SOURCE_TOPICS: &str = "topics";
+pub const SOURCE_NOTES: &str = "notes";
+pub const SOURCE_COMMITS: &str = "commits";
+
+/// Chunk packing target/hard-cap, in chars (~200–400 tokens per chunk).
+const CHUNK_TARGET_CHARS: usize = 1200;
+const CHUNK_MAX_CHARS: usize = 1800;
+/// Cap chunks per source so a huge readme can't monopolize an indexing pass.
+const MAX_CHUNKS_PER_SOURCE: usize = 12;
+/// Cap on readme text read from disk.
+const README_MAX_CHARS: usize = 24_000;
+/// How many recent commit subjects feed the 'commits' source.
+const COMMIT_SUBJECTS: usize = 30;
+
+/// A repo's identity in the embedding store plus its corpus texts, one entry
+/// per source kind (present even when empty, so a cleared source is detected
+/// and its stale chunks dropped).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepoDoc {
+    pub host: String,
+    pub slug: String,
+    /// `(source kind, text)` — the full pre-chunk text per source.
+    pub sources: Vec<(String, String)>,
+}
+
+/// A repo's key in the embedding store: (remote domain, slug) when it has a
+/// remote — the #159 host-keying lesson — else ("", absolute path), which can
+/// never collide with a real slug pair.
+pub fn repo_key(repo: &Repo) -> (String, String) {
+    match &repo.slug {
+        Some(slug) => (repo.remote_host.clone().unwrap_or_default(), slug.clone()),
+        None => (String::new(), repo.id.clone()),
+    }
+}
+
+/// Meta key holding the text signature for one (repo, source). Unit-separator
+/// joints keep host/slug/source concatenations collision-free, and distinguish
+/// these keys from the legacy `embed_sig:{id}` shape.
+pub fn sig_key(host: &str, slug: &str, source: &str) -> String {
+    format!("embed_sig:{host}\u{1f}{slug}\u{1f}{source}")
+}
+
+/// Stable hex fingerprint of a source's text, for skip-if-unchanged.
+pub fn text_signature(text: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut h);
     format!("{:x}", h.finish())
+}
+
+/// Split `text` into embedding-sized chunks: markdown headings and blank lines
+/// delimit blocks, blocks pack greedily to ~[`CHUNK_TARGET_CHARS`], and a
+/// single oversized block hard-splits at whitespace. Empty text → no chunks.
+pub fn chunk_text(text: &str) -> Vec<String> {
+    // Pass 1: blocks. A heading starts a new block (so a section title stays
+    // with its first paragraph); a blank line ends one.
+    let mut blocks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            if !cur.trim().is_empty() {
+                blocks.push(std::mem::take(&mut cur));
+            }
+            cur.clear();
+            continue;
+        }
+        if line.starts_with('#') && !cur.trim().is_empty() {
+            blocks.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(line);
+    }
+    if !cur.trim().is_empty() {
+        blocks.push(cur);
+    }
+
+    // Pass 2: pack blocks into chunks.
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for block in blocks {
+        let block_len = block.chars().count();
+        if !cur.is_empty() && cur.chars().count() + block_len > CHUNK_TARGET_CHARS {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        if block_len > CHUNK_MAX_CHARS {
+            if !cur.is_empty() {
+                chunks.push(std::mem::take(&mut cur));
+            }
+            chunks.extend(hard_split(&block));
+        } else {
+            if !cur.is_empty() {
+                cur.push_str("\n\n");
+            }
+            cur.push_str(&block);
+        }
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks.truncate(MAX_CHUNKS_PER_SOURCE);
+    chunks
+}
+
+/// Split an oversized block at whitespace near the cap (mid-word only when a
+/// "word" exceeds half a chunk, e.g. minified text).
+fn hard_split(block: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = block;
+    while rest.chars().count() > CHUNK_MAX_CHARS {
+        let cap = rest
+            .char_indices()
+            .nth(CHUNK_MAX_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        let head = &rest[..cap];
+        let cut = head
+            .rfind(char::is_whitespace)
+            .filter(|&i| i > cap / 2)
+            .unwrap_or(cap);
+        let piece = rest[..cut].trim();
+        if !piece.is_empty() {
+            out.push(piece.to_string());
+        }
+        rest = rest[cut..].trim_start();
+    }
+    if !rest.trim().is_empty() {
+        out.push(rest.trim().to_string());
+    }
+    out
+}
+
+/// Which of a doc's sources need (re)embedding, given the stored signature per
+/// source: `(source, text, new signature)` for each changed one. Pure — the
+/// signature lookup is injected. A source that is empty *and* was never stored
+/// is skipped outright (no rows to write, no signature worth recording); an
+/// emptied source that *was* stored is returned so its stale chunks drop.
+pub fn changed_sources(
+    sources: &[(String, String)],
+    stored_sig: impl Fn(&str) -> Option<String>,
+) -> Vec<(&str, &str, String)> {
+    sources
+        .iter()
+        .filter_map(|(source, text)| {
+            let stored = stored_sig(source);
+            if text.trim().is_empty() && stored.is_none() {
+                return None;
+            }
+            let sig = text_signature(text);
+            (stored.as_deref() != Some(sig.as_str())).then_some((
+                source.as_str(),
+                text.as_str(),
+                sig,
+            ))
+        })
+        .collect()
+}
+
+/// Build a repo's corpus doc: readme from disk, description/topics from the
+/// (enriched) snapshot, the drawer note from the cache, and recent commit
+/// subjects via git. Sync fs/git/SQLite I/O — call off the UI thread.
+pub fn build_doc(repo: &Repo) -> RepoDoc {
+    let (host, slug) = repo_key(repo);
+    // Name/slug/language ride with the description so "that rust dashboard
+    // thing" style queries land even when a repo has no readme.
+    let description = format!(
+        "{} {} {} {}",
+        repo.display_name,
+        repo.slug.as_deref().unwrap_or(""),
+        repo.language.as_deref().unwrap_or(""),
+        repo.description.as_deref().unwrap_or(""),
+    );
+    let commits = git_ops::recent_log(&repo.id, COMMIT_SUBJECTS)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| c.summary)
+        .collect::<Vec<_>>()
+        .join("\n");
+    RepoDoc {
+        host,
+        slug,
+        sources: vec![
+            (SOURCE_README.into(), read_readme_text(&repo.id)),
+            (SOURCE_DESCRIPTION.into(), description),
+            (SOURCE_TOPICS.into(), repo.topics.join(", ")),
+            (SOURCE_NOTES.into(), cache::note(&repo.id)),
+            (SOURCE_COMMITS.into(), commits),
+        ],
+    }
+}
+
+/// The repo's readme text (same candidates as the scanner), capped so a
+/// pathological readme can't blow up chunking. Empty when there isn't one.
+fn read_readme_text(repo_path: &str) -> String {
+    let candidates = [
+        "README.md",
+        "Readme.md",
+        "readme.md",
+        "README.markdown",
+        "README",
+    ];
+    let path = std::path::Path::new(repo_path);
+    let text = candidates
+        .iter()
+        .find_map(|name| std::fs::read_to_string(path.join(name)).ok())
+        .unwrap_or_default();
+    if text.chars().count() > README_MAX_CHARS {
+        text.chars().take(README_MAX_CHARS).collect()
+    } else {
+        text
+    }
+}
+
+// ── The indexing pass ───────────────────────────────────────────────────────
+
+/// How many repos to embed before pausing, and for how long — gentle pacing so
+/// a cold full-fleet index doesn't monopolize the local backend (the enrich
+/// precedent: bounded concurrency + skip-fresh).
+const REPOS_PER_BURST: usize = 12;
+const BURST_PAUSE_MS: u64 = 1500;
+
+/// Index the fleet's corpus incrementally: build each repo's doc, skip sources
+/// whose signature is unchanged, embed + store the rest. Returns how many repos
+/// had something (re)embedded. Fully graceful: returns 0 without side effects
+/// when the backend can't embed, stops early (to retry next pass) when it goes
+/// away mid-run, and at most one pass runs at a time process-wide.
+pub async fn index_fleet(repos: Vec<Repo>) -> usize {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INDEXING: AtomicBool = AtomicBool::new(false);
+    if !ai::embeddings_supported() || INDEXING.swap(true, Ordering::SeqCst) {
+        return 0;
+    }
+    let count = index_fleet_inner(&repos).await;
+    INDEXING.store(false, Ordering::SeqCst);
+    count
+}
+
+/// One source's pending work: (source kind, full text, new signature).
+type SourceWork = (String, String, String);
+
+async fn index_fleet_inner(repos: &[Repo]) -> usize {
+    let _ = purge_legacy();
+    let model = config::load().embed_model;
+    let now = unix_now();
+
+    // Plan first (cheap, local): docs + changed sources, deduped by store key
+    // (two checkouts of one remote index once, like enrich jobs).
+    let mut seen = std::collections::HashSet::new();
+    let mut work: Vec<(RepoDoc, Vec<SourceWork>)> = Vec::new();
+    for repo in repos {
+        let key = repo_key(repo);
+        if !seen.insert(key) {
+            continue;
+        }
+        let doc = build_doc(repo);
+        let changed: Vec<SourceWork> = changed_sources(&doc.sources, |source| {
+            cache::get_meta(&sig_key(&doc.host, &doc.slug, source))
+        })
+        .into_iter()
+        .map(|(s, t, sig)| (s.to_string(), t.to_string(), sig))
+        .collect();
+        if !changed.is_empty() {
+            work.push((doc, changed));
+        }
+    }
+
+    let mut embedded = 0usize;
+    for (i, (doc, sources)) in work.into_iter().enumerate() {
+        if i > 0 && i.is_multiple_of(REPOS_PER_BURST) {
+            tokio::time::sleep(std::time::Duration::from_millis(BURST_PAUSE_MS)).await;
+        }
+        for (source, text, sig) in sources {
+            let chunks = chunk_text(&text);
+            let Ok(vectors) = embed_chunks(&model, &chunks).await else {
+                // Backend went away mid-run — unfinished sources keep their old
+                // signatures, so the next pass picks up exactly here.
+                return embedded;
+            };
+            if store_embeddings(&doc.host, &doc.slug, &source, &vectors, now).is_ok() {
+                cache::set_meta(&sig_key(&doc.host, &doc.slug, &source), &sig);
+            }
+        }
+        embedded += 1;
+    }
+    embedded
+}
+
+/// Embed a source's chunks, [`BATCH`] at a time. Any failure fails the source
+/// (partial vectors must not be stored — ranking needs the full source).
+async fn embed_chunks(model: &str, chunks: &[String]) -> Result<Vec<(String, Vec<f32>)>, String> {
+    let mut out = Vec::with_capacity(chunks.len());
+    for group in chunks.chunks(BATCH) {
+        let vecs = futures_util::future::join_all(group.iter().map(|c| ai::embed(model, c))).await;
+        for (chunk, vec) in group.iter().zip(vecs) {
+            out.push((chunk.clone(), vec?));
+        }
+    }
+    Ok(out)
+}
+
+// ── Maintenance ─────────────────────────────────────────────────────────────
+
+/// Drop rows + signatures left by the pre-#186 single-vector-per-repo pipeline
+/// (source 'repo' under an empty host; sig keys without unit separators), so
+/// they never pollute corpus recall. Idempotent, cheap.
+pub fn purge_legacy_on(conn: &Connection) -> rusqlite::Result<usize> {
+    let rows = conn.execute(
+        "DELETE FROM embeddings WHERE host = '' AND source = 'repo'",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM meta WHERE key LIKE 'embed_sig:%' AND key NOT LIKE '%' || char(31) || '%'",
+        [],
+    )?;
+    Ok(rows)
+}
+
+/// See [`purge_legacy_on`].
+pub fn purge_legacy() -> Result<usize, String> {
+    let conn = cache::open()?;
+    purge_legacy_on(&conn).map_err(|e| e.to_string())
+}
+
+/// Empty the whole index and its skip signatures, so the next pass re-embeds
+/// everything (Settings "Rebuild index"). Returns the chunks removed.
+pub fn clear_index_on(conn: &Connection) -> rusqlite::Result<usize> {
+    let rows = conn.execute("DELETE FROM embeddings", [])?;
+    conn.execute("DELETE FROM meta WHERE key LIKE 'embed_sig:%'", [])?;
+    Ok(rows)
+}
+
+/// See [`clear_index_on`].
+pub fn clear_index() -> Result<usize, String> {
+    let conn = cache::open()?;
+    clear_index_on(&conn).map_err(|e| e.to_string())
 }
 
 fn unix_now() -> i64 {
@@ -565,6 +880,203 @@ mod tests {
                 ("gitlab.acme.io", "o/a", "readme"),
             ]
         );
+    }
+
+    #[test]
+    fn chunking_packs_paragraphs_and_respects_headings() {
+        assert!(chunk_text("").is_empty());
+        assert!(chunk_text("  \n\n \n").is_empty());
+
+        // Short paragraphs pack into one chunk.
+        let chunks = chunk_text("first para\nstill first\n\nsecond para");
+        assert_eq!(chunks, vec!["first para\nstill first\n\nsecond para"]);
+
+        // A heading stays glued to its following paragraph...
+        let chunks = chunk_text("# Title\nintro text\n\n## Usage\nrun it");
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("# Title\nintro text"));
+        assert!(chunks[0].contains("## Usage\nrun it"));
+
+        // ...and once past the target, a new heading starts a new chunk.
+        let para = "x".repeat(CHUNK_TARGET_CHARS - 10);
+        let text = format!("# One\n{para}\n\n# Two\nsecond section");
+        let chunks = chunk_text(&text);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].starts_with("# One"));
+        assert_eq!(chunks[1], "# Two\nsecond section");
+    }
+
+    #[test]
+    fn chunking_hard_splits_oversized_blocks_and_caps_count() {
+        // One giant unbroken paragraph must split under the hard cap.
+        let words = "word ".repeat(1000); // ~5000 chars, no blank lines
+        let chunks = chunk_text(&words);
+        assert!(chunks.len() >= 3);
+        for c in &chunks {
+            assert!(c.chars().count() <= CHUNK_MAX_CHARS);
+            assert!(!c.is_empty());
+        }
+        // Splits land at whitespace, so no word is torn apart.
+        assert!(chunks.iter().all(|c| c.starts_with("word")));
+
+        // A pathological readme is capped, not embedded forever.
+        let huge = "para\n\n".repeat(10_000);
+        assert_eq!(chunk_text(&huge).len(), MAX_CHUNKS_PER_SOURCE);
+    }
+
+    #[test]
+    fn changed_sources_skips_unchanged_and_absent() {
+        let sources = vec![
+            ("readme".to_string(), "# Hello".to_string()),
+            ("notes".to_string(), "remember the milk".to_string()),
+            ("topics".to_string(), "".to_string()), // never stored, empty
+        ];
+        // Nothing stored yet → both non-empty sources change; empty 'topics'
+        // is skipped (no rows to write).
+        let changed = changed_sources(&sources, |_| None);
+        assert_eq!(
+            changed.iter().map(|(s, ..)| *s).collect::<Vec<_>>(),
+            vec!["readme", "notes"]
+        );
+
+        // readme signature matches → only notes changes.
+        let readme_sig = text_signature("# Hello");
+        let changed = changed_sources(&sources, |s| (s == "readme").then(|| readme_sig.clone()));
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, "notes");
+        assert_eq!(changed[0].2, text_signature("remember the milk"));
+
+        // A cleared source that *was* stored is returned, so its rows drop.
+        let cleared = vec![("notes".to_string(), "".to_string())];
+        let changed = changed_sources(&cleared, |_| Some("oldsig".into()));
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].1, "");
+        // ...and once the empty text's signature is stored, it stops changing.
+        let empty_sig = text_signature("");
+        assert!(changed_sources(&cleared, |_| Some(empty_sig.clone())).is_empty());
+    }
+
+    #[test]
+    fn recall_groups_best_chunk_per_repo_and_ranks() {
+        let rows = vec![
+            row("github.com", "o/a", "readme", 0, &[0.6, 0.8]), // a: 0.6
+            row("github.com", "o/a", "notes", 0, &[1.0, 0.0]),  // a: 1.0 ← best
+            row("github.com", "o/b", "readme", 0, &[1.0, 1.0]), // b: ≈0.707
+            row("github.com", "o/c", "readme", 0, &[0.0, 1.0]), // c: 0 — floored
+        ];
+        let hits = recall(&[1.0, 0.0], &rows, 8, 0.35);
+        assert_eq!(hits.len(), 2, "one hit per repo, floor applied");
+        assert_eq!(hits[0].slug, "o/a");
+        assert_eq!(hits[0].source, "notes", "best chunk wins the repo");
+        assert_eq!(hits[0].content, "o/a notes 0");
+        assert_eq!(hits[1].slug, "o/b");
+        assert!(hits[0].score > hits[1].score);
+
+        // k truncates repos, not chunks.
+        assert_eq!(recall(&[1.0, 0.0], &rows, 1, 0.35).len(), 1);
+        assert!(recall(&[1.0, 0.0], &[], 8, 0.35).is_empty());
+    }
+
+    #[test]
+    fn repo_key_prefers_host_slug_and_falls_back_to_path() {
+        use crate::model::{Activity, GitStatus};
+        let mut repo = Repo {
+            id: "/home/u/dev/orrery".into(),
+            display_name: "Orrery".into(),
+            slug: Some("o/orrery".into()),
+            path: "~/dev/orrery".into(),
+            description: None,
+            language: None,
+            git: GitStatus::default(),
+            last_commit_unix: 0,
+            activity: Activity::Active,
+            root: "~/dev".into(),
+            host: None,
+            remote_host: Some("github.com".into()),
+            stars: 0,
+            topics: vec![],
+            open_issues: 0,
+            latest_release: None,
+            private: false,
+            favorite: false,
+            ai_summary: None,
+        };
+        assert_eq!(
+            repo_key(&repo),
+            ("github.com".to_string(), "o/orrery".to_string())
+        );
+        repo.slug = None;
+        // No remote → keyed by path under the empty host (can't collide with
+        // a real slug pair).
+        assert_eq!(
+            repo_key(&repo),
+            (String::new(), "/home/u/dev/orrery".to_string())
+        );
+    }
+
+    #[test]
+    fn purge_legacy_drops_only_legacy_rows_and_sigs() {
+        let mut conn = mem();
+        // A legacy row (empty host, source 'repo') and a real corpus row.
+        store_embeddings_on(&mut conn, "", "/x/repo", "repo", &chunks(&[&[1.0]]), 1).unwrap();
+        store_embeddings_on(
+            &mut conn,
+            "github.com",
+            "o/test",
+            "readme",
+            &chunks(&[&[1.0]]),
+            1,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('embed_sig:/x/repo', 'old'),
+             (?1, 'new'), ('other_key', 'kept')",
+            [sig_key("github.com", "o/test", "readme")],
+        )
+        .unwrap();
+
+        assert_eq!(purge_legacy_on(&conn).unwrap(), 1);
+        let rows = all_embeddings_on(&conn);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "readme");
+        let keys: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT key FROM meta ORDER BY key").unwrap();
+            let iter = stmt.query_map([], |r| r.get(0)).unwrap();
+            iter.flatten().collect()
+        };
+        assert!(keys.contains(&"other_key".to_string()));
+        assert!(keys.contains(&sig_key("github.com", "o/test", "readme")));
+        assert!(!keys.contains(&"embed_sig:/x/repo".to_string()));
+    }
+
+    #[test]
+    fn clear_index_empties_rows_and_signatures() {
+        let mut conn = mem();
+        store_embeddings_on(
+            &mut conn,
+            "github.com",
+            "o/test",
+            "readme",
+            &chunks(&[&[1.0], &[0.5]]),
+            1,
+        )
+        .unwrap();
+        cache_sig(&conn, &sig_key("github.com", "o/test", "readme"));
+        assert_eq!(clear_index_on(&conn).unwrap(), 2);
+        assert!(all_embeddings_on(&conn).is_empty());
+        let sigs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key LIKE 'embed_sig:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sigs, 0);
+    }
+
+    fn cache_sig(conn: &Connection, key: &str) {
+        conn.execute("INSERT INTO meta (key, value) VALUES (?1, 'sig')", [key])
+            .unwrap();
     }
 
     #[test]

@@ -31,15 +31,30 @@ pub struct CodeHit {
     pub abs: SharedString,  // absolute path, for launching the editor
 }
 
+/// A semantic recall hit: a repo (by id) plus the chunk text that matched,
+/// shown as context under the repo name.
+#[derive(Clone)]
+pub struct SemanticHit {
+    pub id: SharedString,
+    pub snippet: SharedString,
+}
+
 /// Live palette state.
 pub struct PaletteData {
     pub query: Entity<InputState>,
     pub selected: usize,
     /// Cross-repo ripgrep results for the current query (debounced).
     pub code: Vec<CodeHit>,
-    /// Repo ids ranked by semantic similarity to the query (debounced; empty
-    /// unless AI is ready). Surfaced as repo rows the substring filter missed.
-    pub semantic: Vec<SharedString>,
+    /// Repos ranked by semantic similarity to the query (debounced; empty
+    /// unless AI is ready), surfaced below the name matches with their
+    /// matching snippet.
+    pub semantic: Vec<SemanticHit>,
+    /// The stored embedding index, loaded once per palette open (never per
+    /// keystroke); `None` until the load lands or when AI is off.
+    pub embeddings: Option<std::sync::Arc<Vec<orrery_core::semantic::EmbeddingRow>>>,
+    /// Session cache of query → embedding, so re-typing a query (or ranking
+    /// after the index load) never re-hits the backend.
+    pub query_vecs: std::collections::HashMap<String, std::sync::Arc<Vec<f32>>>,
     /// Query generation, for debouncing/dropping stale searches.
     pub generation: u64,
     /// Keeps the query-observation alive (re-renders the app on each keystroke).
@@ -85,20 +100,50 @@ pub enum PaletteItem {
     Action(PaletteAction),
     /// Index into `OrreryApp::rows`.
     Repo(usize),
+    /// A semantic recall hit: the repo's index into `OrreryApp::rows` plus its
+    /// index into `PaletteData::semantic` (for the snippet).
+    Recall {
+        row: usize,
+        hit: usize,
+    },
     /// Index into `PaletteData::code`.
     Code(usize),
 }
 
 const ACTIONS: [PaletteAction; 2] = [PaletteAction::Rescan, PaletteAction::Settings];
 
-/// Build the filtered result list for `query`: actions, matching repos (by
-/// substring, then semantic matches the substring filter missed), then
-/// code-search hits. Must be deterministic — the executor rebuilds it to resolve
-/// the selected index.
+/// How strongly a repo's name matches `q` (already lowercased): 0 exact (name,
+/// slug, or the slug's repo tail equals), 1 prefix, 2 substring (incl. path),
+/// `None` no match. Lower ranks list first; semantic recall comes after all of
+/// them, so a repo literally named like the query always beats a meaning match.
+pub fn name_rank(name: &str, slug: &str, path: &str, q: &str) -> Option<u8> {
+    let (name, slug, path) = (
+        name.to_lowercase(),
+        slug.to_lowercase(),
+        path.to_lowercase(),
+    );
+    let tail = slug.rsplit('/').next().unwrap_or(&slug);
+    if name == q || slug == q || tail == q {
+        Some(0)
+    } else if name.starts_with(q) || slug.starts_with(q) || tail.starts_with(q) {
+        Some(1)
+    } else if name.contains(q) || slug.contains(q) || path.contains(q) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Build the filtered result list for `query`: actions, name-matching repos
+/// (exact/prefix first, then substring), semantic recall hits the name pass
+/// missed (deduped, similarity-ranked, with snippets), then code-search hits.
+/// Must be deterministic — the executor rebuilds it to resolve the selected
+/// index. With AI off `semantic` is always empty and this reduces to the
+/// name-only palette.
 pub fn items(
     rows: &[Row],
     code: &[CodeHit],
-    semantic: &[SharedString],
+    semantic: &[SemanticHit],
     query: &str,
 ) -> Vec<PaletteItem> {
     use std::collections::HashSet;
@@ -112,26 +157,32 @@ pub fn items(
         }
     }
 
-    for (i, r) in rows.iter().enumerate() {
-        let hit = q.is_empty()
-            || r.name.to_lowercase().contains(&q)
-            || r.slug.to_lowercase().contains(&q)
-            || r.path.to_lowercase().contains(&q);
-        if hit && shown.insert(i) {
-            out.push(PaletteItem::Repo(i));
-            if shown.len() >= MAX_REPOS {
-                break;
+    // Name matches, exact/prefix before substring; the sort is stable so grid
+    // order is preserved within each rank.
+    let mut matched: Vec<(u8, usize)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            if q.is_empty() {
+                return Some((2, i));
             }
+            name_rank(&r.name, &r.slug, &r.path, &q).map(|rank| (rank, i))
+        })
+        .collect();
+    matched.sort_by_key(|(rank, _)| *rank);
+    for (_, i) in matched.into_iter().take(MAX_REPOS) {
+        if shown.insert(i) {
+            out.push(PaletteItem::Repo(i));
         }
     }
 
-    // Semantic (meaning) matches the substring pass didn't already surface.
+    // Semantic recall the name pass didn't surface, best match first.
     if !q.is_empty() {
-        for id in semantic {
-            if let Some(i) = rows.iter().position(|r| &r.id == id)
-                && shown.insert(i)
+        for (hit, h) in semantic.iter().enumerate() {
+            if let Some(row) = rows.iter().position(|r| r.id == h.id)
+                && shown.insert(row)
             {
-                out.push(PaletteItem::Repo(i));
+                out.push(PaletteItem::Recall { row, hit });
             }
         }
     }
@@ -163,7 +214,16 @@ pub fn render(
         );
     }
     for (i, item) in items.iter().enumerate() {
-        list = list.child(row_view(item, i, i == selected, rows, &data.code, t, app));
+        list = list.child(row_view(
+            item,
+            i,
+            i == selected,
+            rows,
+            &data.code,
+            &data.semantic,
+            t,
+            app,
+        ));
     }
 
     let panel = div()
@@ -211,24 +271,34 @@ pub fn render(
         .child(panel)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row_view(
     item: &PaletteItem,
     idx: usize,
     selected: bool,
     rows: &[Row],
     code: &[CodeHit],
+    semantic: &[SemanticHit],
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
-    let (icon, primary, secondary) = match item {
+    // `context` renders as a second line under the primary text (the semantic
+    // hit's matching snippet); `secondary` stays a right-aligned single line.
+    let (icon, primary, secondary, context) = match item {
         PaletteItem::Action(a) => (
             a.icon(),
             SharedString::from(a.label()),
             SharedString::default(),
+            None,
         ),
         PaletteItem::Repo(i) => {
             let r = &rows[*i];
-            ("box", r.name.clone(), r.slug.clone())
+            ("box", r.name.clone(), r.slug.clone(), None)
+        }
+        PaletteItem::Recall { row, hit } => {
+            let r = &rows[*row];
+            let snippet = semantic.get(*hit).map(|h| h.snippet.clone());
+            ("sparkles", r.name.clone(), r.slug.clone(), snippet)
         }
         PaletteItem::Code(i) => {
             let h = &code[*i];
@@ -236,9 +306,27 @@ fn row_view(
                 "file-search",
                 SharedString::from(format!("{}:{}", h.file, h.line)),
                 h.text.clone(),
+                None,
             )
         }
     };
+
+    let mut main = div()
+        .flex_1()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .gap(px(1.))
+        .child(div().truncate().text_size(px(t.text_small)).child(primary));
+    if let Some(snippet) = context {
+        main = main.child(
+            div()
+                .truncate()
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg3))
+                .child(snippet),
+        );
+    }
 
     let item = item.clone();
     let app = app.clone();
@@ -258,14 +346,7 @@ fn row_view(
             15.,
             if selected { t.accent_bright } else { t.fg2 },
         ))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .truncate()
-                .text_size(px(t.text_small))
-                .child(primary),
-        )
+        .child(main)
         .on_click(move |_ev, window, cx| {
             let fh = app.read(cx).focus.clone();
             let item = item.clone();
@@ -287,4 +368,129 @@ fn row_view(
         row = row.bg(rgb(t.accent_wash));
     }
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, name: &str, slug: &str) -> Row {
+        Row {
+            id: id.into(),
+            url: "".into(),
+            name: name.into(),
+            slug: slug.into(),
+            root: "".into(),
+            path: id.into(),
+            description: "".into(),
+            language: "".into(),
+            branch: "".into(),
+            age: "".into(),
+            release: "".into(),
+            ai_summary: "".into(),
+            ahead: 0,
+            behind: 0,
+            dirty: 0,
+            stars: "".into(),
+            host: "".into(),
+            private: false,
+            favorite: false,
+            activity: orrery_core::model::Activity::Active,
+            last_commit_unix: 0,
+        }
+    }
+
+    fn hit(id: &str) -> SemanticHit {
+        SemanticHit {
+            id: id.into(),
+            snippet: format!("snippet for {id}").into(),
+        }
+    }
+
+    /// Repo indices in result order (name matches and recall hits together).
+    fn repo_order(items: &[PaletteItem]) -> Vec<usize> {
+        items
+            .iter()
+            .filter_map(|it| match it {
+                PaletteItem::Repo(i) => Some(*i),
+                PaletteItem::Recall { row, .. } => Some(*row),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn name_rank_orders_exact_prefix_substring() {
+        // name / slug-tail exact
+        assert_eq!(name_rank("Orrery", "o/orrery", "/x", "orrery"), Some(0));
+        assert_eq!(name_rank("Dash", "seb/orrery", "/x", "orrery"), Some(0));
+        // prefix
+        assert_eq!(name_rank("orrery-docs", "o/other", "/x", "orrery"), Some(1));
+        // substring anywhere (incl. path)
+        assert_eq!(name_rank("my-orrery-fork", "o/f", "/x", "orrery"), Some(2));
+        assert_eq!(name_rank("f", "o/f", "/dev/orrery-old", "orrery"), Some(2));
+        // no match
+        assert_eq!(name_rank("gamma", "o/gamma", "/g", "orrery"), None);
+    }
+
+    #[test]
+    fn items_ranks_exact_and_prefix_names_before_substrings() {
+        // Grid order deliberately puts the substring match first: the exact
+        // match must still list first, then the prefix, then the substring.
+        let rows = vec![
+            row("/1", "not-alpha", "o/not-alpha"), // substring
+            row("/2", "alphabet", "o/alphabet"),   // prefix
+            row("/3", "alpha", "o/alpha"),         // exact
+        ];
+        let out = items(&rows, &[], &[], "alpha");
+        assert_eq!(repo_order(&out), vec![2, 1, 0]);
+        // No actions match "alpha".
+        assert!(!out.iter().any(|i| matches!(i, PaletteItem::Action(_))));
+    }
+
+    #[test]
+    fn items_appends_semantic_after_names_and_dedups() {
+        let rows = vec![
+            row("/a", "alpha", "o/alpha"),
+            row("/b", "beta", "o/beta"),
+            row("/c", "gamma", "o/gamma"),
+        ];
+        // Semantic ranked beta-then-alpha; alpha already matched by name, so
+        // only beta surfaces as a recall row — after the name match.
+        let semantic = vec![hit("/b"), hit("/a")];
+        let out = items(&rows, &[], &semantic, "alpha");
+        assert_eq!(repo_order(&out), vec![0, 1]);
+        assert!(matches!(out[0], PaletteItem::Repo(0)));
+        assert!(matches!(out[1], PaletteItem::Recall { row: 1, hit: 0 }));
+
+        // A semantic hit whose repo vanished from the grid is skipped.
+        let out = items(&rows, &[], &[hit("/gone")], "alpha");
+        assert_eq!(repo_order(&out), vec![0]);
+    }
+
+    #[test]
+    fn items_without_semantic_matches_todays_palette() {
+        // AI off → `semantic` is empty; empty query lists everything in grid
+        // order, and a query filters by substring.
+        let rows = vec![row("/a", "alpha", "o/alpha"), row("/b", "beta", "o/beta")];
+        let out = items(&rows, &[], &[], "");
+        assert_eq!(repo_order(&out), vec![0, 1]);
+        assert_eq!(
+            out.iter()
+                .filter(|i| matches!(i, PaletteItem::Action(_)))
+                .count(),
+            2
+        );
+        let out = items(&rows, &[], &[], "bet");
+        assert_eq!(repo_order(&out), vec![1]);
+        assert!(!out.iter().any(|i| matches!(i, PaletteItem::Recall { .. })));
+    }
+
+    #[test]
+    fn items_ignores_semantic_when_query_is_empty() {
+        // A stale recall list must not leak into the empty-query view.
+        let rows = vec![row("/a", "alpha", "o/alpha")];
+        let out = items(&rows, &[], &[hit("/a")], "");
+        assert!(out.iter().all(|i| !matches!(i, PaletteItem::Recall { .. })));
+    }
 }

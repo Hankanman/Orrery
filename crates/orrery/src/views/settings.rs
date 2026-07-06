@@ -61,6 +61,8 @@ pub struct SettingsState {
     pub saved: bool,
     /// Result line for the AI Test / Clear-cache actions.
     pub ai_note: SharedString,
+    /// Semantic-index size (chunks/repos/bytes); `None` until loaded.
+    pub index_stats: Option<orrery_core::semantic::IndexStats>,
 }
 
 impl SettingsState {
@@ -101,16 +103,19 @@ impl SettingsState {
             draft: cfg.clone(),
             saved: false,
             ai_note: SharedString::default(),
+            index_stats: None,
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     s: &SettingsState,
     filter: Option<&str>,
     authed: bool,
     device: &Option<GithubDevice>,
     ai: &AiStatus,
+    ai_ready: bool,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -127,7 +132,7 @@ pub fn render(
         sections.push(launchers_section(s, t).into_any_element());
     }
     if show("ai") {
-        sections.push(ai_section(s, ai, t, app).into_any_element());
+        sections.push(ai_section(s, ai, ai_ready, t, app).into_any_element());
     }
     if show("notifications") {
         sections.push(notifications_section(s, t, app).into_any_element());
@@ -313,6 +318,7 @@ fn backend_is_llama(backend: &str) -> bool {
 fn ai_section(
     s: &SettingsState,
     ai: &AiStatus,
+    ai_ready: bool,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
@@ -341,8 +347,44 @@ fn ai_section(
             .child(labeled("Chat model", s.ai_model.clone(), t))
             .child(labeled("Embedding model", s.embed_model.clone(), t));
     }
-    sec.child(labeled("GitHub OAuth client id", s.client_id.clone(), t))
-        .child(ai_status_block(s, is_llama, ai, t, app))
+    sec = sec
+        .child(labeled("GitHub OAuth client id", s.client_id.clone(), t))
+        .child(ai_status_block(s, is_llama, ai, t, app));
+    // Semantic recall index — an aiReady affordance (hidden, not broken, when
+    // AI is off/unreachable or the backend can't embed).
+    if ai_ready && orrery_core::ai::embeddings_supported() {
+        sec = sec.child(semantic_index_block(s, t, app));
+    }
+    sec
+}
+
+/// Semantic-index size line + "Rebuild index" (drop + re-embed the corpus).
+fn semantic_index_block(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let line: SharedString = match &s.index_stats {
+        Some(st) if st.chunks > 0 => format!(
+            "Semantic index: {} chunk{} across {} repo{} · {}",
+            st.chunks,
+            if st.chunks == 1 { "" } else { "s" },
+            st.repos,
+            if st.repos == 1 { "" } else { "s" },
+            crate::data::human_bytes(st.bytes),
+        )
+        .into(),
+        Some(_) => "Semantic index: empty — repos embed in the background.".into(),
+        None => "Semantic index: …".into(),
+    };
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.))
+        .child(div().flex_1().child(status_row("sparkles", line, t.fg2, t)))
+        .child(button("Rebuild index", t, {
+            let app = app.clone();
+            move |cx| {
+                app.update(cx, |this, cx| this.rebuild_semantic_index(cx));
+            }
+        }))
 }
 
 /// Two-way Ollama / llama.cpp backend picker. Takes effect on Save.

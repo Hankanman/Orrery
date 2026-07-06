@@ -471,10 +471,34 @@ impl OrreryApp {
             selected: 0,
             code: Vec::new(),
             semantic: Vec::new(),
+            embeddings: None,
+            query_vecs: std::collections::HashMap::new(),
             generation: 0,
             _sub: sub,
         }));
         window.focus(&fh, cx);
+        // Load the embedding index once per palette session (a per-keystroke
+        // load would dominate recall latency). Gated on AI: with it off the
+        // index stays `None` and the palette is name-matching only.
+        if self.services.ai_ready {
+            cx.spawn(async move |this, cx| {
+                let index = cx
+                    .background_executor()
+                    .spawn(async { orrery_core::semantic::all_embeddings() })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    match &mut this.overlay {
+                        Some(Overlay::Palette(d)) => {
+                            d.embeddings = Some(std::sync::Arc::new(index))
+                        }
+                        _ => return, // palette closed while loading
+                    }
+                    // Rank whatever was typed while the index loaded.
+                    this.trigger_semantic_search(cx);
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -703,23 +727,44 @@ impl OrreryApp {
         .detach();
     }
 
-    /// Debounced semantic (embedding) repo search for the current query. Gated
-    /// on AI being ready; reuses the code-search generation for stale-drop.
+    /// Debounced semantic recall for the current palette query: embed the
+    /// query, rank it against the session-cached embedding index, and surface
+    /// the best repo per match with its snippet. Gated on AI being ready (and
+    /// the backend supporting embeddings); reuses the code-search generation
+    /// for stale-drop. The query embedding is cached per palette session, so
+    /// only genuinely new queries hit the backend — and never before the
+    /// debounce window passes.
     fn trigger_semantic_search(&mut self, cx: &mut Context<Self>) {
-        if !self.services.ai_ready {
+        if !self.services.ai_ready || !orrery_core::ai::embeddings_supported() {
             return;
         }
         let (query, generation) = match &self.overlay {
-            Some(Overlay::Palette(d)) => (d.query.read(cx).value().to_string(), d.generation),
+            Some(Overlay::Palette(d)) => {
+                (d.query.read(cx).value().trim().to_string(), d.generation)
+            }
             _ => return,
         };
-        if query.trim().len() < 2 {
+        if query.len() < 2 {
             if let Some(Overlay::Palette(d)) = &mut self.overlay {
                 d.semantic.clear();
             }
             return;
         }
+        // Session-cached query vector → rank right away, no debounce/backend.
+        if let Some(Overlay::Palette(d)) = &self.overlay
+            && let (Some(vec), Some(index)) =
+                (d.query_vecs.get(&query).cloned(), d.embeddings.clone())
+        {
+            let hits = self.semantic_rank(&vec, &index);
+            if let Some(Overlay::Palette(d)) = &mut self.overlay {
+                d.semantic = hits;
+            }
+            cx.notify();
+            return;
+        }
+        let model = self.config.embed_model.clone();
         cx.spawn(async move |this, cx| {
+            // Debounce keystrokes before the (slow) embedding round-trip.
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(260))
                 .await;
@@ -732,18 +777,68 @@ impl OrreryApp {
             if !current {
                 return;
             }
-            let hits =
-                crate::task::run(async move { orrery_core::semantic::search(&query).await }).await;
+            let q = query.clone();
+            let vec =
+                crate::task::run(async move { orrery_core::ai::embed(&model, &q).await }).await;
             let _ = this.update(cx, |this, cx| {
+                let Ok(vec) = vec else {
+                    // Backend unreachable — recall just finds nothing.
+                    if let Some(Overlay::Palette(d)) = &mut this.overlay
+                        && d.generation == generation
+                    {
+                        d.semantic.clear();
+                        cx.notify();
+                    }
+                    return;
+                };
+                let vec = std::sync::Arc::new(vec);
+                let index = match &mut this.overlay {
+                    Some(Overlay::Palette(d)) => {
+                        // Cache even when stale — a re-typed query reuses it.
+                        d.query_vecs.insert(query, vec.clone());
+                        d.embeddings.clone()
+                    }
+                    _ => return,
+                };
+                // Index still loading → its completion re-triggers ranking.
+                let Some(index) = index else { return };
+                let hits = this.semantic_rank(&vec, &index);
                 if let Some(Overlay::Palette(d)) = &mut this.overlay
                     && d.generation == generation
                 {
-                    d.semantic = hits.into_iter().map(|(id, _)| id.into()).collect();
+                    d.semantic = hits;
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+
+    /// Rank the loaded embedding index against a query vector and resolve the
+    /// hits to repo rows: best chunk per repo (core `recall`), then
+    /// (host, slug) store keys mapped back to repo ids for the palette.
+    fn semantic_rank(
+        &self,
+        query: &[f32],
+        index: &[orrery_core::semantic::EmbeddingRow],
+    ) -> Vec<crate::palette::SemanticHit> {
+        use orrery_core::semantic;
+        let by_key: std::collections::HashMap<(String, String), &str> = self
+            .repos
+            .iter()
+            .map(|r| (semantic::repo_key(r), r.id.as_str()))
+            .collect();
+        semantic::recall(query, index, semantic::MAX_HITS, semantic::MIN_SCORE)
+            .into_iter()
+            .filter_map(|h| {
+                let id = by_key.get(&(h.host.clone(), h.slug.clone()))?;
+                let snippet: String = crate::data::oneline(h.content).chars().take(120).collect();
+                Some(crate::palette::SemanticHit {
+                    id: SharedString::from(id.to_string()),
+                    snippet: snippet.into(),
+                })
+            })
+            .collect()
     }
 
     /// Close the palette and act on `item`.
@@ -760,7 +855,7 @@ impl OrreryApp {
         match item {
             PaletteItem::Action(PaletteAction::Rescan) => self.rescan(cx),
             PaletteItem::Action(PaletteAction::Settings) => self.view = View::Settings,
-            PaletteItem::Repo(i) => {
+            PaletteItem::Repo(i) | PaletteItem::Recall { row: i, .. } => {
                 if let Some(r) = self.rows.get(i) {
                     let _ = orrery_core::launch::launch(&self.config.ide_command, &r.id);
                 }
@@ -900,6 +995,7 @@ impl OrreryApp {
         ));
         self.refresh_github_authed(cx);
         self.ai_refresh(cx);
+        self.load_index_stats(cx);
         cx.notify();
     }
 
@@ -1107,6 +1203,67 @@ impl OrreryApp {
                 if let Some(s) = &mut this.settings {
                     s.ai_note = note.into();
                 }
+                this.load_index_stats(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Refresh the semantic-index size line (chunks/repos/bytes) shown in the
+    /// Settings AI section.
+    pub fn load_index_stats(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let stats = cx
+                .background_executor()
+                .spawn(async { orrery_core::semantic::index_stats() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(s) = &mut this.settings {
+                    s.index_stats = Some(stats);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Settings: drop the whole semantic index (rows + skip signatures) and
+    /// re-embed the corpus from scratch, reporting in the AI note. Gated on
+    /// `aiReady` like every AI affordance.
+    pub fn rebuild_semantic_index(&mut self, cx: &mut Context<Self>) {
+        if !self.services.ai_ready {
+            return;
+        }
+        if let Some(s) = &mut self.settings {
+            s.ai_note = "Rebuilding index…".into();
+        }
+        cx.notify();
+        let repos = self.repos.clone();
+        cx.spawn(async move |this, cx| {
+            let cleared = cx
+                .background_executor()
+                .spawn(async { orrery_core::semantic::clear_index() })
+                .await;
+            let note = match cleared {
+                Ok(_) => {
+                    let n =
+                        crate::task::run(
+                            async move { orrery_core::semantic::index_fleet(repos).await },
+                        )
+                        .await;
+                    format!(
+                        "Rebuilt index — embedded {n} repo{}",
+                        if n == 1 { "" } else { "s" }
+                    )
+                }
+                Err(e) => format!("Rebuild failed: {e}"),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(s) = &mut this.settings {
+                    s.ai_note = note.into();
+                }
+                this.load_index_stats(cx);
                 cx.notify();
             });
         })
@@ -1305,24 +1462,18 @@ impl OrreryApp {
         .detach();
     }
 
-    /// (Re)build the semantic embedding index from the current rows, off the UI
-    /// thread. Cheap when nothing changed (core skips unchanged repos).
+    /// (Re)index the semantic corpus (readme/description/topics/notes/commits
+    /// per repo) from the current snapshot, on the shared tokio runtime.
+    /// Incremental and self-pacing: unchanged (repo, source) pairs skip via
+    /// signatures and core throttles the embed bursts, so post-rescan calls
+    /// are cheap. Gated on `aiReady` — no model, no indexing, no errors.
     pub fn index_semantic(&self) {
         if !self.services.ai_ready {
             return;
         }
-        let items: Vec<(String, String)> = self
-            .rows
-            .iter()
-            .map(|r| {
-                (
-                    r.id.to_string(),
-                    format!("{} {} {} {}", r.name, r.slug, r.language, r.description),
-                )
-            })
-            .collect();
+        let repos = self.repos.clone();
         crate::task::spawn_detached(async move {
-            let _ = orrery_core::semantic::index(&items).await;
+            let _ = orrery_core::semantic::index_fleet(repos).await;
         });
     }
 
@@ -1744,6 +1895,9 @@ impl OrreryApp {
                 // Refresh which repos have a live agent, so Mission Control shows
                 // the indicator without needing the Agents view open.
                 this.scan_agents(false, cx);
+                // Fold the fresh snapshot into the semantic index (incremental;
+                // a no-op with AI off/unreachable).
+                this.index_semantic();
                 cx.notify();
             });
         })
@@ -2819,6 +2973,7 @@ impl OrreryApp {
                     self.services.github_authed,
                     &self.services.github_device,
                     &self.services.ai_status,
+                    self.services.ai_ready,
                     t,
                     &cx.entity(),
                 )
