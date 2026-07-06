@@ -80,6 +80,7 @@ impl Default for AppConfig {
             notify_new_pr: true,
             notify_review_requested: true,
             notify_ci_failure: true,
+            notify_attention: true,
         }
     }
 }

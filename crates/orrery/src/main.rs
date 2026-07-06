@@ -104,9 +104,11 @@ fn main() {
                     let view = cx.new(|cx| {
                         // Start the live wiring: filesystem watch, appearance,
                         // attention poll, and system tray all marshal back onto
-                        // this entity. Returns whether the tray came up plus
-                        // the watcher handle (re-armed when repos are added).
-                        let (tray_active, watcher) = live::spawn(cx);
+                        // this entity. Returns the tray handle (if the tray
+                        // came up — the app pushes attention summaries to it)
+                        // plus the watcher handle (re-armed when repos are
+                        // added).
+                        let (tray, watcher) = live::spawn(cx);
                         OrreryApp {
                             view: View::Grid,
                             rows: snap.rows,
@@ -115,8 +117,11 @@ fn main() {
                             theme,
                             config,
                             attention: Vec::new(),
+                            polled_inbox: None,
                             attention_items: Vec::new(),
                             attention_by_repo: Default::default(),
+                            attention_seen: None,
+                            tray_attention: Default::default(),
                             overlay: None,
                             drawer: Default::default(),
                             inbox: Default::default(),
@@ -133,7 +138,8 @@ fn main() {
                             settings: None,
                             devtools: None,
                             services: Default::default(),
-                            tray_active,
+                            tray_active: tray.is_some(),
+                            tray,
                             watcher,
                             selected: Default::default(),
                             fleet_run: None,

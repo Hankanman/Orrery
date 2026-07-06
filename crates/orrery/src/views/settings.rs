@@ -587,6 +587,17 @@ fn notifications_section(
             },
         ))
         .child(toggle(
+            "Urgent attention items",
+            s.draft.notify_attention,
+            t,
+            app,
+            |a| {
+                if let Some(s) = &mut a.settings {
+                    s.draft.notify_attention = !s.draft.notify_attention;
+                }
+            },
+        ))
+        .child(toggle(
             "New pull request",
             s.draft.notify_new_pr,
             t,

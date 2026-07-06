@@ -147,6 +147,10 @@ pub struct AppConfig {
     /// Notify on a CI/check-suite alert for one of your repos.
     #[serde(default = "default_true")]
     pub notify_ci_failure: bool,
+    /// Notify when a new *urgent* item appears in the attention model (#183) —
+    /// e.g. a review request. Layered under `notify_enabled`.
+    #[serde(default = "default_true")]
+    pub notify_attention: bool,
 }
 
 pub(crate) fn default_ai_backend() -> String {

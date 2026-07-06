@@ -4,8 +4,10 @@
 //!
 //! - **filesystem watch** → rescan the roots and reload the grid;
 //! - **appearance change** → recompute the theme with the new system accent;
-//! - **attention poll** → update the Inbox nav badge (notifications fire inside
-//!   the platform poller);
+//! - **attention poll** → feed the poll's inbox facts into the attention model
+//!   (badges, tray summary, urgent notifications — all downstream of
+//!   `recompute_attention`; the poller itself only notifies the non-model
+//!   PR/CI kinds);
 //! - **global shortcut** (Ctrl+Alt+O) → raise the window;
 //! - **system tray** → show / rescan / quit / open-a-repo.
 //!
@@ -31,8 +33,9 @@ enum Signal {
     ReposChanged,
     /// Desktop theme/accent changed — recompute the theme.
     Appearance(Appearance),
-    /// Latest attention glance lines — for the Inbox nav badge.
-    Attention(Vec<String>),
+    /// Latest attention-poll result: glance lines (the Inbox nav badge's
+    /// fallback) + the raw inbox facts for the attention model.
+    Attention(Vec<String>, Vec<orrery_core::inbox::InboxItem>),
     /// Raise the main window (tray: left-click / "Show Orrery").
     ShowWindow,
     /// Quit the app (tray: "Quit").
@@ -40,12 +43,19 @@ enum Signal {
 }
 
 /// Start the background watchers and the gpui task that applies their signals.
-/// Call once during app construction (inside `cx.new`). Returns whether the
-/// system tray came up — the window's close-to-tray behaviour is gated on it, so
-/// there's always a way to quit when there's no tray — and the fs-watcher
-/// handle, so the app can re-arm the watches when repos/roots are added at
-/// runtime (Settings save, New Project, Explore clone).
-pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::WatcherHandle) {
+/// Call once during app construction (inside `cx.new`). Returns the tray
+/// handle if the system tray came up — the app stores it to push attention
+/// summaries after each recompute, and the window's close-to-tray behaviour is
+/// gated on its presence so there's always a way to quit when there's no tray
+/// — and the fs-watcher handle, so the app can re-arm the watches when
+/// repos/roots are added at runtime (Settings save, New Project, Explore
+/// clone).
+pub fn spawn(
+    cx: &mut Context<OrreryApp>,
+) -> (
+    Option<orrery_platform::tray::TrayHandle>,
+    orrery_platform::watcher::WatcherHandle,
+) {
     let (tx, rx) = async_channel::unbounded::<Signal>();
 
     // Filesystem watch → rescan. Debounced inside the platform watcher.
@@ -65,11 +75,13 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::Wa
         });
     }
 
-    // Attention poll → Inbox badge. Notifications fire inside the poller itself.
+    // Attention poll → Inbox badge + attention-model inbox facts. The poller
+    // still notifies its non-model kinds (new PR / CI alert) itself; urgent
+    // model items notify from the app after each recompute.
     {
         let tx = tx.clone();
-        orrery_platform::notifier::watch(move |lines| {
-            let _ = tx.try_send(Signal::Attention(lines));
+        orrery_platform::notifier::watch(move |lines, items| {
+            let _ = tx.try_send(Signal::Attention(lines, items));
         });
     }
 
@@ -99,12 +111,13 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::Wa
             let _ = tx.try_send(signal);
         })
     };
-    let tray_active = tray.is_some();
 
     // The single foreground consumer. Holds a weak handle to the app entity; it
     // ends naturally when the entity is dropped (its `update` calls start failing
-    // and the channel closes). Owns the tray handle so it can push glance +
-    // panel-theme updates to it.
+    // and the channel closes). Keeps a tray-handle clone to push panel-theme
+    // updates (the attention summary is pushed by the app itself, from
+    // `recompute_attention`, through the clone returned below).
+    let tray_for_app = tray.clone();
     cx.spawn(async move |this, cx| {
         while let Ok(signal) = rx.recv().await {
             match signal {
@@ -148,13 +161,14 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::Wa
                         break;
                     }
                 }
-                Signal::Attention(lines) => {
-                    if let Some(tray) = &tray {
-                        tray.set_glance(lines.clone());
-                    }
+                Signal::Attention(lines, items) => {
                     if this
                         .update(cx, |app, cx| {
                             app.attention = lines;
+                            app.polled_inbox = Some(items);
+                            // Fresh host facts → refresh the attention
+                            // surfaces (badges, tray, urgent notifications).
+                            app.recompute_attention();
                             cx.notify();
                         })
                         .is_err()
@@ -169,5 +183,5 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::Wa
     })
     .detach();
 
-    (tray_active, watcher)
+    (tray_for_app, watcher)
 }
