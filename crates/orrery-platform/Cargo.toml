@@ -30,5 +30,8 @@ png = "0.18"             # decode the tray glyph PNGs to ARGB for the SNI pixmap
 # zbus connections — same constraint as the tray).
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 
+[dev-dependencies]
+tempfile = "3"           # watcher target-computation tests
+
 [lints.clippy]
 all = "warn"

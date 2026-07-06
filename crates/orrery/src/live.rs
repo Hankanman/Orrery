@@ -42,17 +42,19 @@ enum Signal {
 /// Start the background watchers and the gpui task that applies their signals.
 /// Call once during app construction (inside `cx.new`). Returns whether the
 /// system tray came up — the window's close-to-tray behaviour is gated on it, so
-/// there's always a way to quit when there's no tray.
-pub fn spawn(cx: &mut Context<OrreryApp>) -> bool {
+/// there's always a way to quit when there's no tray — and the fs-watcher
+/// handle, so the app can re-arm the watches when repos/roots are added at
+/// runtime (Settings save, New Project, Explore clone).
+pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::WatcherHandle) {
     let (tx, rx) = async_channel::unbounded::<Signal>();
 
     // Filesystem watch → rescan. Debounced inside the platform watcher.
-    {
+    let watcher = {
         let tx = tx.clone();
         orrery_platform::watcher::spawn(move || {
             let _ = tx.try_send(Signal::ReposChanged);
-        });
-    }
+        })
+    };
 
     // Desktop appearance (theme/accent) → live theme. Fires once immediately, so
     // the launch accent is reconfirmed (a no-op past the synchronous startup read).
@@ -166,5 +168,5 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> bool {
     })
     .detach();
 
-    tray_active
+    (tray_active, watcher)
 }

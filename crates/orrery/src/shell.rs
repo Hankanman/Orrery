@@ -252,6 +252,10 @@ pub struct OrreryApp {
     pub services: Services,
     /// Whether the system tray came up — gates close-to-tray.
     pub tray_active: bool,
+    /// Handle to the fs-watcher thread — re-armed when repos/roots are added at
+    /// runtime (Settings save, New Project, Explore clone) so new paths get
+    /// live change events without a restart.
+    pub watcher: orrery_platform::watcher::WatcherHandle,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
     /// The active contextual sub-filter for the current non-Grid view (e.g. the
@@ -1421,6 +1425,8 @@ impl OrreryApp {
                     this.explore_errors
                         .insert(slug, format!("Failed: {e}").into());
                 }
+                // Watch the freshly cloned repo for live changes too.
+                this.watcher.rearm();
                 cx.notify();
             });
         })
@@ -1582,6 +1588,11 @@ impl OrreryApp {
     /// Re-scan the roots from disk (off the UI thread) and reload the grid, then
     /// refresh host enrichment.
     fn rescan(&mut self, cx: &mut Context<Self>) {
+        // Explicit rescans follow repo/root additions (Settings save, New
+        // Project, header/palette refresh) — re-arm the fs watcher so the new
+        // paths get live change events too. The watcher-driven rescan doesn't
+        // come through here, so routine fs events never churn the watches.
+        self.watcher.rearm();
         cx.spawn(async move |this, cx| {
             let (rows, roots) = cx
                 .background_executor()
