@@ -1095,12 +1095,15 @@ impl OrreryApp {
             } else {
                 crate::task::run(async move { orrery_core::ai::commit_message(&diff).await })
                     .await
-                    .map(|m| m.trim().to_string())
+                    // Keep only the subject line: the suggestion is rendered in a
+                    // single-line seg (GPUI panics on embedded newlines) and
+                    // "Commit this" commits it verbatim, so show == commit.
+                    .map(|m| m.trim().lines().next().unwrap_or_default().to_string())
                     .unwrap_or_else(|e| format!("Generate failed: {e}"))
             };
             let _ = this.update(cx, |this, cx| {
                 if this.drawer.repo == repo {
-                    this.drawer.commit_suggestion = Some(text.into());
+                    this.drawer.commit_suggestion = Some(crate::data::oneline(text).into());
                     cx.notify();
                 }
             });
