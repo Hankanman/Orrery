@@ -452,7 +452,10 @@ fn repo_from_url(repository_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_run_state, repo_from_url, rollup_state, split_slug, status_context_state};
+    use super::{
+        check_run_state, ci_error_for_status, repo_from_url, rollup_state, split_slug,
+        status_context_state, workflow_run_state,
+    };
 
     #[test]
     fn repo_from_url_extracts_owner_repo() {
@@ -498,6 +501,43 @@ mod tests {
         assert_eq!(status_context_state(Some("SUCCESS")), "success");
         assert_eq!(status_context_state(Some("ERROR")), "failure");
         assert_eq!(status_context_state(None), "pending");
+    }
+
+    #[test]
+    fn workflow_run_state_maps_status_and_conclusion() {
+        assert_eq!(workflow_run_state("in_progress", None), "pending");
+        assert_eq!(workflow_run_state("queued", Some("success")), "pending");
+        assert_eq!(workflow_run_state("completed", Some("success")), "success");
+        assert_eq!(workflow_run_state("completed", Some("failure")), "failure");
+        assert_eq!(
+            workflow_run_state("completed", Some("timed_out")),
+            "failure"
+        );
+        assert_eq!(
+            workflow_run_state("completed", Some("startup_failure")),
+            "failure"
+        );
+        assert_eq!(workflow_run_state("completed", Some("cancelled")), "none");
+        assert_eq!(workflow_run_state("completed", None), "none");
+    }
+
+    #[test]
+    fn ci_errors_surface_auth_and_rate_limit_but_not_missing_repo() {
+        use reqwest::StatusCode;
+        // 404 = repo not visible to this token — genuinely nothing to show.
+        assert_eq!(ci_error_for_status(StatusCode::NOT_FOUND), None);
+        // Expired/revoked token, rate limit, and server errors must be errors,
+        // not a silent "none" that blanks CI across the grid.
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            let err = ci_error_for_status(status).expect("must surface an error");
+            assert!(err.contains(status.as_str()), "{err}");
+        }
     }
 }
 
@@ -1034,6 +1074,13 @@ pub async fn github_approve_pr(slug: &str, number: u64) -> Result<(), String> {
 }
 
 /// Latest GitHub Actions run conclusion for a repo's default branch.
+///
+/// "No CI" (`state: "none"`) is only reported when GitHub answers
+/// definitively: a 2xx with an empty run list, or a 404 (the repo isn't
+/// visible to this token — deleted, renamed, or private without access — so
+/// there is nothing to show). Auth failures (401 expired token), rate limits
+/// (403/429), and server errors surface as `Err` — same rule as `gh_search`
+/// above — so a broken token reads as an error, not as CI vanishing.
 pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
     #[derive(Deserialize)]
     struct Runs {
@@ -1045,6 +1092,8 @@ pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
         status: String,
         conclusion: Option<String>,
     }
+    // No token → forge calls are gated off entirely; an unconnected app
+    // legitimately shows no CI (this is absence of a source, not a failure).
     let Some(token) = oauth::github_token() else {
         return Ok(CiStatus {
             state: "none".into(),
@@ -1056,22 +1105,42 @@ pub async fn github_ci(slug: &str) -> Result<CiStatus, String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
+        if let Some(err) = ci_error_for_status(status) {
+            return Err(err);
+        }
         return Ok(CiStatus {
             state: "none".into(),
         });
     }
     let runs: Runs = resp.json().await.map_err(|e| e.to_string())?;
-    let state = match runs.workflow_runs.first() {
-        Some(r) if r.status != "completed" => "pending",
-        Some(r) => match r.conclusion.as_deref() {
-            Some("success") => "success",
-            Some("failure") | Some("timed_out") | Some("startup_failure") => "failure",
-            _ => "none",
-        },
-        None => "none",
-    };
+    let state = runs
+        .workflow_runs
+        .first()
+        .map(|r| workflow_run_state(&r.status, r.conclusion.as_deref()))
+        .unwrap_or("none");
     Ok(CiStatus {
         state: state.to_string(),
     })
+}
+
+/// How a non-2xx from the workflow-runs endpoint is treated: 404 means the
+/// repo isn't visible with this token (deleted/renamed/no access) — genuinely
+/// no CI to show, so `None`. Anything else (401 expired token, 403 rate
+/// limit, 5xx) is a transport/auth failure the caller must see.
+fn ci_error_for_status(status: reqwest::StatusCode) -> Option<String> {
+    (status != reqwest::StatusCode::NOT_FOUND).then(|| format!("GitHub CI {status}"))
+}
+
+/// Map a workflow run's REST (status, conclusion) to our four-state vocabulary.
+fn workflow_run_state(status: &str, conclusion: Option<&str>) -> &'static str {
+    if status != "completed" {
+        return "pending";
+    }
+    match conclusion {
+        Some("success") => "success",
+        Some("failure") | Some("timed_out") | Some("startup_failure") => "failure",
+        _ => "none",
+    }
 }

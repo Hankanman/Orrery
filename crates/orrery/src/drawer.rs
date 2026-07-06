@@ -1268,7 +1268,12 @@ fn changes_view(
                     div()
                         .text_size(px(t.text_small))
                         .text_color(rgb(t.fg1))
-                        .child(log.clone()),
+                        .child(
+                            // The prompt asks for markdown bullets, so render as
+                            // markdown — reflowed first, like the Readme tab, since
+                            // the renderer panics on a run's embedded newlines.
+                            gpui_component::text::markdown(crate::data::unwrap_soft_breaks(log)),
+                        ),
                 ),
         );
     }
@@ -1682,7 +1687,12 @@ fn notes_view(
                     div()
                         .text_size(px(t.text_small))
                         .text_color(rgb(t.fg1))
-                        .child(resume.clone()),
+                        .child(
+                            // Render as markdown (reflowed, like the Readme tab): the
+                            // prompt asks for plain sentences but models still emit
+                            // multi-line text, which plain text elements panic on.
+                            gpui_component::text::markdown(crate::data::unwrap_soft_breaks(resume)),
+                        ),
                 ),
         );
     }

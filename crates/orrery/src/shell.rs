@@ -241,6 +241,8 @@ pub struct OrreryApp {
     pub agents_polling: bool,
     /// Slugs currently being cloned from the Explore view.
     pub explore_cloning: std::collections::HashSet<SharedString>,
+    /// Explore clone failures keyed by slug, shown on the card; cleared on retry.
+    pub explore_errors: std::collections::HashMap<SharedString, SharedString>,
     /// Settings editing session (draft config + field inputs); created on first
     /// open, kept so edits survive navigating away.
     pub settings: Option<crate::views::settings::SettingsState>,
@@ -1101,12 +1103,15 @@ impl OrreryApp {
             } else {
                 crate::task::run(async move { orrery_core::ai::commit_message(&diff).await })
                     .await
-                    .map(|m| m.trim().to_string())
+                    // Keep only the subject line: the suggestion is rendered in a
+                    // single-line seg (GPUI panics on embedded newlines) and
+                    // "Commit this" commits it verbatim, so show == commit.
+                    .map(|m| m.trim().lines().next().unwrap_or_default().to_string())
                     .unwrap_or_else(|e| format!("Generate failed: {e}"))
             };
             let _ = this.update(cx, |this, cx| {
                 if this.drawer.repo == repo {
-                    this.drawer.commit_suggestion = Some(text.into());
+                    this.drawer.commit_suggestion = Some(crate::data::oneline(text).into());
                     cx.notify();
                 }
             });
@@ -1389,6 +1394,7 @@ impl OrreryApp {
             return;
         };
         self.explore_cloning.insert(slug.clone());
+        self.explore_errors.remove(&slug);
         cx.notify();
         let dest = orrery_core::scan::expand(&root)
             .join(name.as_ref())
@@ -1396,19 +1402,25 @@ impl OrreryApp {
             .into_owned();
         let url = clone_url.to_string();
         cx.spawn(async move |this, cx| {
-            let (rows, roots) = cx
+            let (result, (rows, roots)) = cx
                 .background_executor()
                 .spawn(async move {
-                    if !std::path::Path::new(&dest).exists() {
-                        let _ = orrery_core::git_ops::clone(&url, &dest);
-                    }
-                    crate::data::rescan()
+                    let result = if std::path::Path::new(&dest).exists() {
+                        Ok(())
+                    } else {
+                        orrery_core::git_ops::clone(&url, &dest).map(|_| ())
+                    };
+                    (result, crate::data::rescan())
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.rows = rows;
                 this.roots = roots;
                 this.explore_cloning.remove(&slug);
+                if let Err(e) = result {
+                    this.explore_errors
+                        .insert(slug, format!("Failed: {e}").into());
+                }
                 cx.notify();
             });
         })
@@ -2547,8 +2559,11 @@ impl OrreryApp {
                     self.rows.iter().map(|r| r.slug.clone()).collect();
                 crate::views::explore::render(
                     &self.explore,
-                    &cloned,
-                    &self.explore_cloning,
+                    crate::views::explore::CloneStatus {
+                        cloned: &cloned,
+                        cloning: &self.explore_cloning,
+                        errors: &self.explore_errors,
+                    },
                     self.view_filter.as_deref(),
                     self.config.roots.first().map(|s| s.as_str()),
                     t,
