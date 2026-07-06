@@ -1309,7 +1309,13 @@ fn diff_mode_tabs(active: DiffMode, t: &Theme, app: &Entity<OrreryApp>) -> impl 
         .child(tab("Working", DiffMode::Working))
 }
 
-/// Render a unified diff with per-line sentiment colouring.
+/// Cap on rendered diff lines. The whole app re-renders on any `cx.notify()`
+/// (agents poll, attention poll, appearance signals), so an unbounded diff
+/// would rebuild thousands of elements on every background tick.
+const DIFF_MAX_LINES: usize = 500;
+
+/// Render a unified diff with per-line sentiment colouring, truncated to
+/// [`DIFF_MAX_LINES`] with a muted "… n more lines" footer.
 fn diff_block(diff: &str, t: &Theme) -> impl IntoElement {
     let mut block = div()
         .flex()
@@ -1321,7 +1327,8 @@ fn diff_block(diff: &str, t: &Theme) -> impl IntoElement {
         .border_color(rgb(t.border))
         .font_family(MONO)
         .text_size(px(t.text_data_sm));
-    for line in diff.lines() {
+    let mut lines = diff.lines();
+    for line in lines.by_ref().take(DIFF_MAX_LINES) {
         let color = match line.as_bytes().first() {
             Some(b'+') => t.clean,
             Some(b'-') => t.behind,
@@ -1332,6 +1339,15 @@ fn diff_block(diff: &str, t: &Theme) -> impl IntoElement {
             div()
                 .text_color(rgb(color))
                 .child(SharedString::from(line.to_string())),
+        );
+    }
+    let hidden = lines.count();
+    if hidden > 0 {
+        block = block.child(
+            div()
+                .pt(px(6.))
+                .text_color(rgb(t.fg3))
+                .child(SharedString::from(format!("… {hidden} more lines"))),
         );
     }
     block
