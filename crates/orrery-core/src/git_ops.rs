@@ -37,6 +37,28 @@ pub struct WorktreeInfo {
     pub path: String,
 }
 
+/// What kind of pending change a file has (relative to HEAD or the index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeKind {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+}
+
+/// One file's pending change, for the drawer's Changes tab. A path that is
+/// both staged and further modified in the working tree yields two entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChange {
+    pub path: String,
+    pub kind: ChangeKind,
+    /// In the index (part of the next commit) vs working-tree only.
+    pub staged: bool,
+}
+
 /// Credentials callback: SSH agent for ssh remotes, the git credential helper
 /// (or a token via helper) for HTTPS. Best-effort — failures surface as errors.
 fn remote_callbacks() -> RemoteCallbacks<'static> {
@@ -636,6 +658,98 @@ pub fn staged_diff(path: &str) -> Result<String, String> {
     Ok(diff_to_string(&diff))
 }
 
+/// Every pending change in the repo, split per file into staged (index vs
+/// HEAD) and unstaged (working tree vs index) entries — the model behind a
+/// per-file staging checklist. Ordered as libgit2 reports them (by path).
+pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .renames_head_to_index(true)
+        .renames_index_to_workdir(true);
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for entry in statuses.iter() {
+        let s = entry.status();
+        let file = String::from_utf8_lossy(entry.path_bytes()).into_owned();
+        // A single status entry carries both index and worktree bits; the
+        // rename checks come first because RENAMED can combine with MODIFIED.
+        let staged_kind = if s.is_index_renamed() {
+            Some(ChangeKind::Renamed)
+        } else if s.is_index_new() {
+            Some(ChangeKind::Added)
+        } else if s.is_index_deleted() {
+            Some(ChangeKind::Deleted)
+        } else if s.is_index_modified() || s.is_index_typechange() {
+            Some(ChangeKind::Modified)
+        } else {
+            None
+        };
+        if let Some(kind) = staged_kind {
+            out.push(FileChange {
+                path: file.clone(),
+                kind,
+                staged: true,
+            });
+        }
+        let unstaged_kind = if s.is_wt_renamed() {
+            Some(ChangeKind::Renamed)
+        } else if s.is_wt_new() {
+            Some(ChangeKind::Untracked)
+        } else if s.is_wt_deleted() {
+            Some(ChangeKind::Deleted)
+        } else if s.is_wt_modified() || s.is_wt_typechange() {
+            Some(ChangeKind::Modified)
+        } else {
+            None
+        };
+        if let Some(kind) = unstaged_kind {
+            out.push(FileChange {
+                path: file,
+                kind,
+                staged: false,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Stage specific files into the index (`git add <paths>`). Paths are
+/// repo-relative. A path missing from the working tree stages as a deletion
+/// (`git rm --cached` semantics) — `add_path` would error on it.
+pub fn stage_paths(path: &str, paths: &[String]) -> Result<(), String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    for p in paths {
+        let rel = std::path::Path::new(p);
+        // symlink_metadata so a broken symlink still stages as an add.
+        if workdir.join(rel).symlink_metadata().is_ok() {
+            index.add_path(rel).map_err(|e| e.to_string())?;
+        } else {
+            index.remove_path(rel).map_err(|e| e.to_string())?;
+        }
+    }
+    index.write().map_err(|e| e.to_string())
+}
+
+/// Unstage specific files: reset their index entries back to HEAD
+/// (`git restore --staged <paths>`). The working tree is untouched. On an
+/// unborn HEAD (no commits yet) there is nothing to reset to, so the entries
+/// are removed from the index — which is what `reset_default(None, ..)` does.
+pub fn unstage_paths(path: &str, paths: &[String]) -> Result<(), String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let head = repo
+        .head()
+        .ok()
+        .and_then(|h| h.peel(git2::ObjectType::Commit).ok());
+    repo.reset_default(head.as_ref(), paths)
+        .map_err(|e| e.to_string())
+}
+
 /// Commit the currently-staged changes with `message`. Returns the short hash.
 pub fn commit(path: &str, message: &str) -> Result<String, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
@@ -853,6 +967,122 @@ mod tests {
         );
         fs::write(dir.path().join("README.md"), "# Test\nchanged").unwrap();
         assert!(working_diff(&path).unwrap().contains("changed"));
+    }
+
+    /// The `FileChange` entries for `path`, as (path, kind, staged) tuples.
+    fn change_tuples(path: &str) -> Vec<(String, ChangeKind, bool)> {
+        changes(path)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.path, c.kind, c.staged))
+            .collect()
+    }
+
+    #[test]
+    fn stage_one_of_two_modified_files_commits_only_it() {
+        let (dir, path) = init_repo();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        fs::write(dir.path().join("b.txt"), "b").unwrap();
+        stage_paths(&path, &["a.txt".into(), "b.txt".into()]).unwrap();
+        commit(&path, "add a and b").unwrap();
+
+        // Modify both, stage only one.
+        fs::write(dir.path().join("a.txt"), "a2").unwrap();
+        fs::write(dir.path().join("b.txt"), "b2").unwrap();
+        stage_paths(&path, &["a.txt".into()]).unwrap();
+        let got = change_tuples(&path);
+        assert!(got.contains(&("a.txt".into(), ChangeKind::Modified, true)));
+        assert!(got.contains(&("b.txt".into(), ChangeKind::Modified, false)));
+
+        commit(&path, "change a only").unwrap();
+        // a's change landed; b is still an unstaged modification.
+        assert_eq!(
+            change_tuples(&path),
+            vec![("b.txt".into(), ChangeKind::Modified, false)]
+        );
+        let staged = staged_diff(&path).unwrap();
+        assert!(staged.is_empty(), "nothing staged after commit: {staged}");
+    }
+
+    #[test]
+    fn unstage_resets_index_to_head() {
+        let (dir, path) = init_repo();
+        fs::write(dir.path().join("README.md"), "# changed").unwrap();
+        stage_paths(&path, &["README.md".into()]).unwrap();
+        assert!(staged_diff(&path).unwrap().contains("changed"));
+
+        unstage_paths(&path, &["README.md".into()]).unwrap();
+        assert!(staged_diff(&path).unwrap().is_empty(), "index back at HEAD");
+        // The edit survives in the working tree.
+        assert_eq!(
+            change_tuples(&path),
+            vec![("README.md".into(), ChangeKind::Modified, false)]
+        );
+    }
+
+    #[test]
+    fn staging_a_deleted_file_stages_a_deletion() {
+        let (dir, path) = init_repo();
+        fs::remove_file(dir.path().join("README.md")).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("README.md".into(), ChangeKind::Deleted, false)]
+        );
+
+        stage_paths(&path, &["README.md".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("README.md".into(), ChangeKind::Deleted, true)]
+        );
+
+        commit(&path, "remove README").unwrap();
+        assert!(change_tuples(&path).is_empty(), "deletion committed");
+        let repo = Repository::open(&path).unwrap();
+        let tree = repo.head().unwrap().peel_to_tree().unwrap();
+        assert!(tree.get_name("README.md").is_none(), "gone from HEAD tree");
+    }
+
+    #[test]
+    fn staging_an_untracked_file_marks_it_added() {
+        let (dir, path) = init_repo();
+        fs::write(dir.path().join("new.txt"), "hello").unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Untracked, false)]
+        );
+
+        stage_paths(&path, &["new.txt".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Added, true)]
+        );
+        // Unstaging an add drops it from the index entirely (not in HEAD).
+        unstage_paths(&path, &["new.txt".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Untracked, false)]
+        );
+    }
+
+    #[test]
+    fn unstage_on_unborn_head_removes_from_index() {
+        // A fresh repo with no commits — HEAD is unborn.
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path()).unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        fs::write(dir.path().join("first.txt"), "x").unwrap();
+
+        stage_paths(&path, &["first.txt".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("first.txt".into(), ChangeKind::Added, true)]
+        );
+
+        unstage_paths(&path, &["first.txt".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("first.txt".into(), ChangeKind::Untracked, false)]
+        );
     }
 
     #[test]
