@@ -450,11 +450,18 @@ fn repo_from_url(repository_url: &str) -> String {
         .to_string()
 }
 
+/// Whether a just-fetched page suggests more results exist: a full page means
+/// GitHub may have more, a short (or empty) page is the last one. Shared by
+/// the bounded pagination loops below so they all stop early the same way.
+fn page_may_have_more(page_len: usize, per_page: usize) -> bool {
+    page_len >= per_page
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        check_run_state, ci_error_for_status, repo_from_url, rollup_state, split_slug,
-        status_context_state, workflow_run_state,
+        check_run_state, ci_error_for_status, page_may_have_more, repo_from_url, rollup_state,
+        split_slug, status_context_state, workflow_run_state,
     };
 
     #[test]
@@ -464,6 +471,18 @@ mod tests {
             "Hankanman/Orrery"
         );
         assert_eq!(repo_from_url("https://api.github.com/repos/a/b"), "a/b");
+    }
+
+    #[test]
+    fn pagination_stops_on_short_page_and_continues_on_full_page() {
+        // A full page means GitHub may have more → keep going.
+        assert!(page_may_have_more(50, 50));
+        // A short or empty page is the last one → stop.
+        assert!(!page_may_have_more(49, 50));
+        assert!(!page_may_have_more(0, 50));
+        // A page longer than requested (shouldn't happen, but defensively):
+        // still "may have more".
+        assert!(page_may_have_more(61, 60));
     }
 
     #[test]
@@ -541,26 +560,32 @@ mod tests {
     }
 }
 
+/// GitHub issue/PR search, paginated up to 3 pages × 50 items (150 per query)
+/// — bounded because the search API has its own tight rate limit. Stops early
+/// when a page comes back short. Any page failing (401 expired token, 403/429
+/// rate limit) propagates as an error rather than a misleading empty inbox.
 async fn gh_search(token: &str, query: &str, kind: &str) -> Result<Vec<InboxItem>, String> {
-    let url = format!(
-        "{GH}/search/issues?per_page=50&q={}",
-        urlencoding::encode(query)
-    );
-    let resp = client()
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        // Surface auth/rate-limit failures instead of a misleading empty inbox.
-        return Err(format!("GitHub search {}", resp.status()));
-    }
-    let parsed: SearchResp = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(parsed
-        .items
-        .into_iter()
-        .map(|i| InboxItem {
+    const PER_PAGE: usize = 50;
+    const MAX_PAGES: usize = 3;
+    let mut items = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let url = format!(
+            "{GH}/search/issues?per_page={PER_PAGE}&page={page}&q={}",
+            urlencoding::encode(query)
+        );
+        let resp = client()
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            // Surface auth/rate-limit failures instead of a misleading empty inbox.
+            return Err(format!("GitHub search {}", resp.status()));
+        }
+        let parsed: SearchResp = resp.json().await.map_err(|e| e.to_string())?;
+        let page_len = parsed.items.len();
+        items.extend(parsed.items.into_iter().map(|i| InboxItem {
             kind: kind.to_string(),
             title: i.title,
             repo: repo_from_url(&i.repository_url),
@@ -568,8 +593,12 @@ async fn gh_search(token: &str, query: &str, kind: &str) -> Result<Vec<InboxItem
             number: i.number,
             draft: i.draft,
             host: Host::Github,
-        })
-        .collect())
+        }));
+        if !page_may_have_more(page_len, PER_PAGE) {
+            break;
+        }
+    }
+    Ok(items)
 }
 
 /// Open PRs authored by the user, PRs awaiting their review, and issues
@@ -599,6 +628,10 @@ pub async fn github_inbox() -> Result<Vec<InboxItem>, String> {
     Ok(items)
 }
 
+/// Unread notifications, paginated up to 3 pages × 50 (150 total) so a busy
+/// account isn't silently cut off at the first page. Stops early when a page
+/// comes back short; any page failing propagates as an error (same rule as
+/// `gh_search`).
 pub async fn github_notifications() -> Result<Vec<Notification>, String> {
     #[derive(Deserialize)]
     struct N {
@@ -616,28 +649,41 @@ pub async fn github_notifications() -> Result<Vec<Notification>, String> {
     struct Repo {
         full_name: String,
     }
+    const PER_PAGE: usize = 50;
+    const MAX_PAGES: usize = 3;
     let token = oauth::github_token().ok_or("connect GitHub to see notifications")?;
-    let resp = client()
-        .get(format!("{GH}/notifications?per_page=50"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API {}", resp.status()));
-    }
-    let raw: Vec<N> = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(raw
-        .into_iter()
-        .map(|n| Notification {
+    let mut items = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let resp = client()
+            .get(format!(
+                "{GH}/notifications?per_page={PER_PAGE}&page={page}"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("GitHub API {}", resp.status()));
+        }
+        let raw: Vec<N> = resp.json().await.map_err(|e| e.to_string())?;
+        let page_len = raw.len();
+        items.extend(raw.into_iter().map(|n| Notification {
             title: n.subject.title,
             repo: n.repository.full_name,
             reason: n.reason,
             kind: n.subject.kind,
-        })
-        .collect())
+        }));
+        if !page_may_have_more(page_len, PER_PAGE) {
+            break;
+        }
+    }
+    Ok(items)
 }
 
+/// The user's starred repos, paginated up to 3 pages × 60 (180 total,
+/// most-recently-starred first) — same order of cap as the feed's ~200-star
+/// GraphQL fetch in `release_items`. Stops early when a page comes back
+/// short; any page failing propagates as an error (same rule as `gh_search`).
 pub async fn github_starred() -> Result<Vec<RemoteRepo>, String> {
     #[derive(Deserialize)]
     struct R {
@@ -648,28 +694,35 @@ pub async fn github_starred() -> Result<Vec<RemoteRepo>, String> {
         language: Option<String>,
         clone_url: String,
     }
+    const PER_PAGE: usize = 60;
+    const MAX_PAGES: usize = 3;
     let token = oauth::github_token().ok_or("connect GitHub to browse stars")?;
-    let resp = client()
-        .get(format!("{GH}/user/starred?per_page=60"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API {}", resp.status()));
-    }
-    let raw: Vec<R> = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(raw
-        .into_iter()
-        .map(|r| RemoteRepo {
+    let mut items = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let resp = client()
+            .get(format!("{GH}/user/starred?per_page={PER_PAGE}&page={page}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("GitHub API {}", resp.status()));
+        }
+        let raw: Vec<R> = resp.json().await.map_err(|e| e.to_string())?;
+        let page_len = raw.len();
+        items.extend(raw.into_iter().map(|r| RemoteRepo {
             slug: r.full_name,
             description: r.description,
             stars: r.stargazers_count,
             language: r.language,
             clone_url: r.clone_url,
             host: Host::Github,
-        })
-        .collect())
+        }));
+        if !page_may_have_more(page_len, PER_PAGE) {
+            break;
+        }
+    }
+    Ok(items)
 }
 
 // ── PR action panel (#67): per-repo checks / review / mergeable + merge ──────
