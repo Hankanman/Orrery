@@ -10,6 +10,7 @@ mod assets;
 mod card;
 mod data;
 mod drawer;
+mod fleet;
 mod heatmap;
 mod icon;
 mod live;
@@ -134,6 +135,9 @@ fn main() {
                             services: Default::default(),
                             tray_active,
                             watcher,
+                            selected: Default::default(),
+                            fleet_run: None,
+                            fleet_seq: 0,
                             toasts: Vec::new(),
                             toast_seq: 0,
                             grid: Default::default(),

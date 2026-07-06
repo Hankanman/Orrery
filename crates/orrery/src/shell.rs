@@ -277,6 +277,15 @@ pub struct OrreryApp {
     /// runtime (Settings save, New Project, Explore clone) so new paths get
     /// live change events without a restart.
     pub watcher: orrery_platform::watcher::WatcherHandle,
+    /// Fleet multi-selection: repo ids picked via card checkbox / Ctrl+click.
+    /// Keyed by id so the selection survives filter changes; pruned to
+    /// existing repos on rescan. Drives the fleet bar (see `fleet.rs`).
+    pub selected: std::collections::HashSet<SharedString>,
+    /// The in-flight fleet bulk run, if any — one at a time; carries the
+    /// engine's cancel flag + the live done/total counter.
+    pub fleet_run: Option<crate::fleet::FleetRun>,
+    /// Monotonic fleet-run id source — guards stale progress events.
+    pub fleet_seq: u64,
     /// Active toasts, oldest first (rendered bottom-right by
     /// `toast::toast_layer`; see `toast.rs` for the lifecycle).
     pub toasts: Vec<crate::toast::Toast>,
@@ -1715,7 +1724,7 @@ impl OrreryApp {
 
     /// Re-scan the roots from disk (off the UI thread) and reload the grid, then
     /// refresh host enrichment.
-    fn rescan(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn rescan(&mut self, cx: &mut Context<Self>) {
         // Explicit rescans follow repo/root additions (Settings save, New
         // Project, header/palette refresh) — re-arm the fs watcher so the new
         // paths get live change events too. The watcher-driven rescan doesn't
@@ -1728,6 +1737,8 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.apply_snapshot(snap);
+                // Drop selected ids for repos that vanished in the rescan.
+                this.prune_selection();
                 this.enrich_hosts(cx);
                 this.load_activity(cx);
                 // Refresh which repos have a live agent, so Mission Control shows
@@ -1943,7 +1954,7 @@ impl OrreryApp {
 
     /// Absolute row indices passing every active filter (chip AND root AND
     /// language), in the active sort order.
-    fn visible_rows(&self) -> Vec<usize> {
+    pub(crate) fn visible_rows(&self) -> Vec<usize> {
         let mut v: Vec<usize> = self
             .rows
             .iter()
@@ -2057,13 +2068,16 @@ impl OrreryApp {
         (n, urgent)
     }
 
-    /// The card indicator flags for `rows[idx]`: live agent session + urgent
-    /// attention. Cheap map lookups — fine inside the `uniform_list` closures.
-    fn indicators(&self, idx: usize) -> crate::card::Indicators {
+    /// The card state flags for `rows[idx]`: live agent session, urgent
+    /// attention, and fleet selection. Cheap map lookups — fine inside the
+    /// `uniform_list` closures.
+    fn card_state(&self, idx: usize, selecting: bool) -> crate::card::CardState {
         let id = &self.rows[idx].id;
-        crate::card::Indicators {
-            agent: self.active_agents.contains(id),
+        crate::card::CardState {
+            active: self.active_agents.contains(id),
             urgent: self.attention_by_repo.get(id).copied() == Some(Severity::Urgent),
+            selected: selecting && self.selected.contains(id),
+            selecting,
         }
     }
 
@@ -2823,6 +2837,9 @@ impl OrreryApp {
             _ => None,
         };
         let visible = self.visible_rows();
+        // The fleet bar (multi-select bulk ops) pins under the scrolling cards;
+        // `None` (no element at all) until a selection exists or a run is live.
+        let fleet_bar = self.fleet_bar(t, cx, visible.len());
         div()
             .flex()
             .flex_col()
@@ -2832,6 +2849,7 @@ impl OrreryApp {
             .child(self.toolbar(t, cx, visible.len()))
             .child(self.filter_chips(t, cx))
             .child(self.card_list(t, cx, cols, visible))
+            .children(fleet_bar)
     }
 
     /// The "All repos · N repos" heading + right-aligned action buttons.
@@ -2991,6 +3009,7 @@ impl OrreryApp {
             Layout::List => {
                 gpui::uniform_list("repo-list", visible.len(), move |range, _win, cx| {
                     let app = entity.read(cx);
+                    let selecting = !app.selected.is_empty();
                     range
                         .map(|i| {
                             let abs = visible[i];
@@ -3001,7 +3020,7 @@ impl OrreryApp {
                                 &entity,
                                 &ide,
                                 &agent,
-                                app.indicators(abs),
+                                app.card_state(abs, selecting),
                             )
                             .into_any_element()
                         })
@@ -3020,6 +3039,7 @@ impl OrreryApp {
                 let row_h = if has_ai { ROW_H_AI } else { ROW_H };
                 gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
                     let app = entity.read(cx);
+                    let selecting = !app.selected.is_empty();
                     range
                         .map(|gi| {
                             let start = gi * cols;
@@ -3029,8 +3049,8 @@ impl OrreryApp {
                             let mut cells: Vec<gpui::AnyElement> = visible[start..end]
                                 .iter()
                                 .map(|&i| {
-                                    let ind = app.indicators(i);
-                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent, ind)
+                                    let state = app.card_state(i, selecting);
+                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent, state)
                                         .into_any_element()
                                 })
                                 .collect();
@@ -3144,6 +3164,9 @@ impl Render for OrreryApp {
                     this.close_overlay();
                     window.focus(&this.focus, cx);
                     cx.notify();
+                } else if !this.selected.is_empty() {
+                    // No overlay to dismiss — Esc clears the fleet selection.
+                    this.clear_selection(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &crate::OpenPalette, window, cx| {

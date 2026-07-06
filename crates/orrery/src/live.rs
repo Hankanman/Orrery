@@ -117,6 +117,8 @@ pub fn spawn(cx: &mut Context<OrreryApp>) -> (bool, orrery_platform::watcher::Wa
                         .await;
                     let applied = this.update(cx, |app, cx| {
                         app.apply_snapshot(snap);
+                        // Drop fleet-selected ids for repos that vanished.
+                        app.prune_selection();
                         // New/changed repos → refresh the semantic index (cheap
                         // when unchanged; a no-op unless AI is ready) and host
                         // enrichment (skips repos still within the cache TTL).

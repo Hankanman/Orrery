@@ -5,8 +5,8 @@
 //! handler/hover closure captures owned values — never a borrow of `&Theme`.
 
 use gpui::{
-    App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px, rgb,
+    App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use orrery_core::{cache, launch};
 
@@ -16,6 +16,86 @@ use crate::shell::OrreryApp;
 use crate::theme::{Theme, devicon_stem, lang_color};
 
 const MONO: &str = "monospace";
+
+/// Per-card interactive state, resolved by the caller inside the
+/// `uniform_list` render closure (cheap per-row lookups by id — no allocation).
+#[derive(Clone, Copy)]
+pub struct CardState {
+    /// A live agent session is running in this repo.
+    pub active: bool,
+    /// An urgent attention item (`orrery_core::attention::Severity::Urgent`).
+    pub urgent: bool,
+    /// This repo is in the fleet multi-selection.
+    pub selected: bool,
+    /// Any selection exists — keeps every card's checkbox visible (not just
+    /// hover-revealed) while a selection is being built.
+    pub selecting: bool,
+}
+
+/// The fleet multi-select checkbox: filled with a check when selected;
+/// otherwise invisible (keeping its layout slot, so nothing shifts) until the
+/// card's hover group is hovered or any selection exists. Clicking toggles the
+/// repo in the selection without opening the drawer.
+fn select_box(
+    id: SharedString,
+    group: SharedString,
+    row_id: SharedString,
+    state: CardState,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let app = app.clone();
+    let (border_c, bg_c) = if state.selected {
+        (t.primary, t.primary)
+    } else {
+        (t.border_strong, t.button_bg)
+    };
+    let hov = t.primary;
+    let mut b = div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(16.))
+        .h(px(16.))
+        .rounded(px(t.r_xs))
+        .border_1()
+        .border_color(rgb(border_c))
+        .bg(rgb(bg_c))
+        .cursor_pointer()
+        .hover(move |s| s.border_color(rgb(hov)))
+        .on_click(move |_ev, _win, cx| {
+            // Selection toggles in place — don't also open the drawer.
+            cx.stop_propagation();
+            let row_id = row_id.clone();
+            app.update(cx, |this, cx| this.toggle_selected(row_id, cx));
+        });
+    if state.selected {
+        b = b.child(lucide("check", 12., t.page));
+    } else if !state.selecting {
+        b = b.invisible().group_hover(group, |s| s.visible());
+    }
+    b
+}
+
+/// Click handler for a card's open-drawer region: Ctrl/Cmd+click toggles the
+/// fleet selection, a plain click opens the drawer.
+fn open_or_select(
+    app: &Entity<OrreryApp>,
+    row_id: &SharedString,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let app = app.clone();
+    let id = row_id.clone();
+    move |ev, window, cx| {
+        let id = id.clone();
+        if ev.modifiers().secondary() {
+            app.update(cx, |this, cx| this.toggle_selected(id, cx));
+        } else {
+            app.update(cx, |this, cx| this.open_drawer(id, window, cx));
+        }
+    }
+}
 
 /// The language mark: the multicolor devicon when one is bundled, else the
 /// brand-color dot (no devicon for this language). Shared with the sidebar's
@@ -32,15 +112,6 @@ pub(crate) fn lang_mark(language: &str, t: &Theme) -> gpui::AnyElement {
         .rounded_full()
         .bg(rgb(lang_color(language, t.fg3)))
         .into_any_element()
-}
-
-/// Per-repo live indicator flags, computed by the caller from `OrreryApp`
-/// state the card can't reach: a running agent session in the repo, and an
-/// urgent attention item (`orrery_core::attention::Severity::Urgent`).
-#[derive(Clone, Copy, Default)]
-pub struct Indicators {
-    pub agent: bool,
-    pub urgent: bool,
 }
 
 /// The urgent-attention mark: a small flat dot in the danger token, shown
@@ -104,9 +175,11 @@ pub fn card(
     app: &Entity<OrreryApp>,
     ide_cmd: &str,
     agent_cmd: &str,
-    ind: Indicators,
+    state: CardState,
 ) -> impl IntoElement {
-    // ── head: language mark + name, and the (clickable) favorite star ──────
+    // Hover group: reveals the (otherwise invisible) select checkbox.
+    let group = SharedString::from(format!("cardg-{idx}"));
+    // ── head: select box + language mark + name, and the favorite star ─────
     let fav_star = {
         let app = app.clone();
         let id = row.id.clone();
@@ -148,10 +221,22 @@ pub fn card(
                 .text_size(px(t.text_h3))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(t.fg0))
+                .child(select_box(
+                    SharedString::from(format!("sel-{idx}")),
+                    group.clone(),
+                    row.id.clone(),
+                    state,
+                    t,
+                    app,
+                ))
                 .child(lang_mark(&row.language, t))
                 .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
                 // Live agent session running in this repo.
-                .children(ind.agent.then(|| lucide("square-terminal", 13., t.clean))),
+                .children(
+                    state
+                        .active
+                        .then(|| lucide("square-terminal", 13., t.clean)),
+                ),
         )
         .child(fav_star);
 
@@ -185,7 +270,7 @@ pub fn card(
         .font_family(MONO)
         .text_size(px(t.text_data_sm));
     // Urgent attention (failing CI / review request) leads the status row.
-    if ind.urgent {
+    if state.urgent {
         status = status.child(urgent_dot(t));
     }
     status = status.child(seg("git-branch", row.branch.clone(), t.fg2));
@@ -303,24 +388,18 @@ pub fn card(
     }
 
     // ── clickable content region → opens the repo drawer ──────────────────
-    // Everything except the launcher row opens the drawer on click; the
-    // launchers (and the favorite star, which stops propagation) act in place.
-    let mut body = {
-        let app = app.clone();
-        let id = row.id.clone();
-        div()
-            .id(SharedString::from(format!("open-{idx}")))
-            .flex()
-            .flex_col()
-            .cursor_pointer()
-            .on_click(move |_ev, window, cx| {
-                let id = id.clone();
-                app.update(cx, |this, cx| this.open_drawer(id, window, cx));
-            })
-            .child(head)
-            .child(slug)
-            .child(desc)
-    };
+    // Everything except the launcher row opens the drawer on click (Ctrl+click
+    // toggles the fleet selection instead); the launchers (and the favorite
+    // star / select box, which stop propagation) act in place.
+    let mut body = div()
+        .id(SharedString::from(format!("open-{idx}")))
+        .flex()
+        .flex_col()
+        .cursor_pointer()
+        .on_click(open_or_select(app, &row.id))
+        .child(head)
+        .child(slug)
+        .child(desc);
 
     // AI summary, when present, sits between description and status.
     if !row.ai_summary.is_empty() {
@@ -342,10 +421,11 @@ pub fn card(
     }
     body = body.child(status).child(host);
 
-    // ── card shell (hover lift via border/bg) ─────────────────────────────
+    // ── card shell (hover lift via border/bg; accent border when selected) ─
     let (hov_border, hov_bg) = (t.border_accent, t.surface_hover);
     div()
         .id(SharedString::from(format!("card-{idx}")))
+        .group(group)
         .flex()
         .flex_1()
         .flex_col()
@@ -354,7 +434,11 @@ pub fn card(
         .py(px(14.))
         .bg(rgb(t.surface))
         .border_1()
-        .border_color(rgb(t.border))
+        .border_color(rgb(if state.selected {
+            t.border_accent
+        } else {
+            t.border
+        }))
         .rounded(px(t.r_md))
         .overflow_hidden()
         .hover(move |s| s.border_color(rgb(hov_border)).bg(rgb(hov_bg)))
@@ -371,8 +455,18 @@ pub(crate) fn list_item(
     app: &Entity<OrreryApp>,
     ide_cmd: &str,
     agent_cmd: &str,
-    ind: Indicators,
+    state: CardState,
 ) -> impl IntoElement {
+    // Hover group: reveals the (otherwise invisible) select checkbox.
+    let group = SharedString::from(format!("listg-{idx}"));
+    let select = select_box(
+        SharedString::from(format!("lsel-{idx}")),
+        group.clone(),
+        row.id.clone(),
+        state,
+        t,
+        app,
+    );
     let fav_star = {
         let app = app.clone();
         let id = row.id.clone();
@@ -397,10 +491,8 @@ pub(crate) fn list_item(
             })
     };
 
-    // Name + slug·path; clicking opens the drawer.
+    // Name + slug·path; clicking opens the drawer (Ctrl+click selects).
     let open = {
-        let app = app.clone();
-        let id = row.id.clone();
         div()
             .id(SharedString::from(format!("lopen-{idx}")))
             .flex()
@@ -410,10 +502,7 @@ pub(crate) fn list_item(
             .flex_1()
             .min_w(px(0.))
             .cursor_pointer()
-            .on_click(move |_ev, window, cx| {
-                let id = id.clone();
-                app.update(cx, |this, cx| this.open_drawer(id, window, cx));
-            })
+            .on_click(open_or_select(app, &row.id))
             .child(lang_mark(&row.language, t))
             .child(
                 div()
@@ -438,7 +527,11 @@ pub(crate) fn list_item(
                     ),
             )
             // Live agent session running in this repo.
-            .children(ind.agent.then(|| lucide("square-terminal", 13., t.clean)))
+            .children(
+                state
+                    .active
+                    .then(|| lucide("square-terminal", 13., t.clean)),
+            )
     };
 
     // Status segments (branch / ahead-behind / dirty / stars / age).
@@ -451,7 +544,7 @@ pub(crate) fn list_item(
         .font_family(MONO)
         .text_size(px(t.text_data_sm));
     // Urgent attention (failing CI / review request) leads the status row.
-    if ind.urgent {
+    if state.urgent {
         status = status.child(urgent_dot(t));
     }
     status = status.child(seg("git-branch", row.branch.clone(), t.fg2));
@@ -541,8 +634,9 @@ pub(crate) fn list_item(
     }
 
     let hov_bg = t.surface_hover;
-    div()
+    let mut shell = div()
         .id(SharedString::from(format!("lrow-{idx}")))
+        .group(group)
         .flex()
         .flex_row()
         .items_center()
@@ -553,8 +647,13 @@ pub(crate) fn list_item(
         .border_b_1()
         .border_color(rgb(t.border))
         .hover(move |s| s.bg(rgb(hov_bg)))
+        .child(select)
         .child(fav_star)
         .child(open)
         .child(status)
-        .child(acts)
+        .child(acts);
+    if state.selected {
+        shell = shell.bg(rgb(t.accent_wash));
+    }
+    shell
 }
