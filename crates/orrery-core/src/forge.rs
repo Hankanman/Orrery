@@ -136,6 +136,81 @@ async fn fetch_github(slug: &str, token: Option<&str>) -> Result<HostInfo, Strin
     })
 }
 
+/// The JSON body for a GitHub create-PR request. Pure for testing.
+pub(crate) fn pr_request_body(
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "title": title,
+        "head": head,
+        "base": base,
+        "body": body,
+    })
+}
+
+/// Open a pull request on GitHub (`POST /repos/{slug}/pulls`) and return its
+/// web URL. GitHub-only for now (GitLab merge requests come later). Token
+/// egress: like all GitHub calls here, this only ever talks to the fixed
+/// `api.github.com` — the host is never derived from a repo remote, so the
+/// GitLab trust gating above is untouched.
+pub async fn create_pr(
+    slug: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    token: &str,
+) -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct Created {
+        html_url: String,
+    }
+    if !slug.contains('/') {
+        return Err(format!("not an owner/name slug: {slug}"));
+    }
+    let resp = client()
+        .post(format!("https://api.github.com/repos/{slug}/pulls"))
+        .header("Accept", "application/vnd.github+json")
+        .bearer_auth(token)
+        .json(&pr_request_body(head, base, title, body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if status.is_success() {
+        let created: Created = resp.json().await.map_err(|e| e.to_string())?;
+        return Ok(created.html_url);
+    }
+    // GitHub explains rejections in JSON ("A pull request already exists…",
+    // validation errors); surface that over the bare status code.
+    let detail = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| {
+            let msg = v.get("message")?.as_str()?.to_string();
+            let errs = v
+                .get("errors")
+                .and_then(|e| e.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .filter(|s| !s.is_empty());
+            Some(match errs {
+                Some(errs) => format!("{msg}: {errs}"),
+                None => msg,
+            })
+        })
+        .unwrap_or_else(|| format!("GitHub PR create {status}"));
+    Err(detail)
+}
+
 async fn fetch_gitlab(
     domain: &str,
     slug: &str,
@@ -204,7 +279,7 @@ async fn fetch_gitlab(
 
 #[cfg(test)]
 mod tests {
-    use super::{gitlab_host_trusted, valid_host};
+    use super::{gitlab_host_trusted, pr_request_body, valid_host};
 
     #[test]
     fn valid_host_accepts_dns_names_and_rejects_unsafe() {
@@ -239,5 +314,16 @@ mod tests {
         // SSRF-shaped hosts are never trusted regardless of the allowlist.
         assert!(!gitlab_host_trusted("169.254.169.254", &allow));
         assert!(!gitlab_host_trusted("gitlab.acme.io:22", &allow));
+    }
+
+    #[test]
+    fn pr_request_body_carries_all_fields() {
+        let body = pr_request_body("feat/x", "main", "feat: add x", "- one\n- two");
+        assert_eq!(body["head"], "feat/x");
+        assert_eq!(body["base"], "main");
+        assert_eq!(body["title"], "feat: add x");
+        assert_eq!(body["body"], "- one\n- two");
+        // Exactly the documented fields — nothing extra rides along.
+        assert_eq!(body.as_object().unwrap().len(), 4);
     }
 }
