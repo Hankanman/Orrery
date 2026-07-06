@@ -462,6 +462,34 @@ pub fn add_worktree(path: &str, name: &str, dest: &str) -> Result<String, String
     Ok(wt.path().to_string_lossy().into_owned())
 }
 
+/// Create branch `branch` at HEAD and add worktree `name` at `dest` checked out
+/// on it — the agent-dispatch shape (#185), where the branch (`agent/…`) is
+/// namespaced with a `/` and so can't double as the worktree name the way
+/// [`add_worktree`]'s does (libgit2 uses the name as a directory under
+/// `.git/worktrees/`).
+pub fn add_worktree_on_branch(
+    path: &str,
+    name: &str,
+    branch: &str,
+    dest: &str,
+) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let head = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map_err(|e| e.to_string())?;
+    let branch = repo
+        .branch(branch, &head, false)
+        .map_err(|e| e.to_string())?;
+    let reference = branch.into_reference();
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&reference));
+    let wt = repo
+        .worktree(name, std::path::Path::new(dest), Some(&opts))
+        .map_err(|e| e.to_string())?;
+    Ok(wt.path().to_string_lossy().into_owned())
+}
+
 pub fn remove_worktree(path: &str, name: &str) -> Result<(), String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let wt = repo.find_worktree(name).map_err(|e| e.to_string())?;
@@ -1076,6 +1104,40 @@ mod tests {
         remove_worktree(&path, "feat-x").unwrap();
         assert!(worktrees(&path).unwrap().is_empty());
 
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn worktree_on_branch_checks_out_namespaced_branch() {
+        let (_dir, path) = init_repo();
+        let dest = format!("{path}-agent-wt");
+        let wt_path =
+            add_worktree_on_branch(&path, "agent-fix-x-abcd", "agent/fix-x-abcd", &dest).unwrap();
+
+        // The worktree is listed under its flat name…
+        let wts = worktrees(&path).unwrap();
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].name, "agent-fix-x-abcd");
+        // …its HEAD is the namespaced branch…
+        let wt_repo = Repository::open(&wt_path).unwrap();
+        assert_eq!(
+            wt_repo.head().unwrap().shorthand(),
+            Some("agent/fix-x-abcd")
+        );
+        // …and the branch exists in the origin repo too.
+        let repo = Repository::open(&path).unwrap();
+        assert!(repo
+            .find_branch("agent/fix-x-abcd", BranchType::Local)
+            .is_ok());
+
+        // A fresh worktree reports no uncommitted changes; a scribbled-on one
+        // does — the signal the "Remove worktree" guard uses.
+        assert!(changes(&wt_path).unwrap().is_empty());
+        fs::write(std::path::Path::new(&wt_path).join("scratch.txt"), "wip").unwrap();
+        assert!(!changes(&wt_path).unwrap().is_empty());
+
+        remove_worktree(&path, "agent-fix-x-abcd").unwrap();
+        assert!(worktrees(&path).unwrap().is_empty());
         let _ = fs::remove_dir_all(&dest);
     }
 

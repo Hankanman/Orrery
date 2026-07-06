@@ -179,6 +179,10 @@ pub struct DrawerData {
     pub pr_busy: bool,
     /// The PR created from this drawer, for the "View PR" affordance.
     pub pr_url: Option<SharedString>,
+    /// The agent-dispatch task field (Overview), created when the drawer opens.
+    pub dispatch_input: Option<Entity<gpui_component::input::InputState>>,
+    /// Whether "Dispatch" runs the agent on a fresh worktree (#185).
+    pub dispatch_fresh: bool,
 }
 
 impl DrawerData {
@@ -1072,7 +1076,81 @@ fn overview(row: &Row, t: &Theme, data: &DrawerData, app: &Entity<OrreryApp>) ->
     // Async git data.
     col = col.child(branches_section(data, t, app));
     col = col.child(commits_section(data, t));
-    col.child(worktrees_section(data, t, app))
+    col = col.child(worktrees_section(data, t, app));
+    col.child(dispatch_section(data, t, app))
+}
+
+/// "Dispatch agent" (#185): a task-prompt field, a fresh-worktree toggle, and
+/// the Dispatch button. Plain dispatch starts the configured agent in the repo
+/// with the task appended (`agent_dispatch_args`); the toggle first creates an
+/// `agent/…` branch + worktree and starts the agent there.
+fn dispatch_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let repo = data.repo.clone();
+    let mut s = section(t, "Dispatch agent", None);
+    let Some(input) = &data.dispatch_input else {
+        return s;
+    };
+
+    let fresh = data.dispatch_fresh;
+    let toggle = {
+        let app = app.clone();
+        div()
+            .id("dispatch-fresh")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .child(lucide(
+                if fresh { "circle-check" } else { "circle-dot" },
+                14.,
+                if fresh { t.clean } else { t.fg3 },
+            ))
+            .child(
+                div()
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg1))
+                    .child("Fresh worktree"),
+            )
+            .on_click(move |_ev, _win, cx| {
+                app.update(cx, |this, cx| this.toggle_dispatch_fresh(cx));
+            })
+    };
+
+    let (app2, repo2, input2) = (app.clone(), repo, input.clone());
+    s = s.child(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .mt(px(2.))
+            .child(gpui_component::input::Input::new(input))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(toggle)
+                    .child(div().flex_1())
+                    .child(pr_btn(
+                        SharedString::from("dispatch-agent"),
+                        "Dispatch",
+                        t,
+                        move |cx| {
+                            let repo = repo2.clone();
+                            let prompt = input2.read(cx).value().trim().to_string();
+                            if prompt.is_empty() {
+                                return;
+                            }
+                            app2.update(cx, |this, cx| {
+                                this.dispatch_agent(repo, prompt, fresh, cx)
+                            });
+                        },
+                    )),
+            ),
+    );
+    s
 }
 
 /// Section wrapper: an uppercase label (+ optional count) over a list.

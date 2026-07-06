@@ -133,6 +133,8 @@ fn main() {
                             agents: Default::default(),
                             active_agents: Default::default(),
                             agents_polling: false,
+                            agents_confirm: None,
+                            agents_confirm_gen: 0,
                             explore_cloning: Default::default(),
                             explore_errors: Default::default(),
                             settings: None,

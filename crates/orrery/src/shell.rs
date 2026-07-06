@@ -276,6 +276,12 @@ pub struct OrreryApp {
     pub active_agents: std::collections::HashSet<SharedString>,
     /// Whether the Agents-view poll loop is running (guards against duplicates).
     pub agents_polling: bool,
+    /// Worktree path whose Agents "Remove worktree" button is armed, awaiting a
+    /// confirming second click (the cleanup-confirm pattern).
+    pub agents_confirm: Option<SharedString>,
+    /// Bumped each time a worktree-remove confirm is armed, so a stale revert
+    /// timer from an earlier arm can't clear a newer one.
+    pub agents_confirm_gen: u64,
     /// Slugs currently being cloned from the Explore view.
     pub explore_cloning: std::collections::HashSet<SharedString>,
     /// Explore clone failures keyed by slug, shown on the card; cleared on retry.
@@ -485,18 +491,30 @@ impl OrreryApp {
             _ => Vec::new(),
         };
         // Only live sessions are detectable (the /proc scan can't see one that
-        // already exited), so every agent fact is `running: true` for now.
-        let agents: Vec<AgentFact> = match &self.agents {
-            crate::views::agents::AgentsState::Ready(rows) => rows
-                .iter()
-                .map(|a| AgentFact {
-                    repo_id: a.repo.to_string(),
-                    program: a.program(),
-                    running: true,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        // already exited), so every agent fact is `running: true` for now. A
+        // live dispatched-worktree session counts against its *origin* repo —
+        // the worktree itself isn't a scanned repo.
+        let agents: Vec<AgentFact> =
+            match &self.agents {
+                crate::views::agents::AgentsState::Ready(data) => {
+                    data.sessions
+                        .iter()
+                        .map(|a| AgentFact {
+                            repo_id: a.repo.to_string(),
+                            program: a.program(),
+                            running: true,
+                        })
+                        .chain(data.dispatched.iter().filter(|d| d.pid.is_some()).map(|d| {
+                            AgentFact {
+                                repo_id: d.origin.to_string(),
+                                program: d.program.to_string(),
+                                running: true,
+                            }
+                        }))
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
         self.attention_items = attention::compute(&self.repos, inbox, &[], &prunable, &agents);
         // Items are severity-sorted (Urgent first), so a repo's first
         // occurrence is its highest severity.
@@ -593,6 +611,11 @@ impl OrreryApp {
         // The new-worktree field lives in Overview, shown immediately on open.
         self.drawer.worktree_input = Some(cx.new(|cx| {
             gpui_component::input::InputState::new(window, cx).placeholder("new-worktree-name")
+        }));
+        // The dispatch task-prompt field (Overview's "Dispatch agent" section) —
+        // created here because InputState needs the Window.
+        self.drawer.dispatch_input = Some(cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx).placeholder("Task for the agent…")
         }));
         crate::drawer::load_overview(repo, cx);
         cx.notify();
@@ -1720,6 +1743,7 @@ impl OrreryApp {
         let mut draft = s.draft.clone();
         draft.ide_command = s.ide.read(cx).value().to_string();
         draft.agent_command = s.agent.read(cx).value().to_string();
+        draft.agent_dispatch_args = s.agent_dispatch.read(cx).value().to_string();
         draft.ollama_host = s.ollama_host.read(cx).value().to_string();
         draft.ai_model = s.ai_model.read(cx).value().to_string();
         draft.embed_model = s.embed_model.read(cx).value().to_string();
@@ -1928,8 +1952,20 @@ impl OrreryApp {
                 .spawn(async move { crate::views::agents::scan(&rows, &agent_command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let active: std::collections::HashSet<SharedString> =
-                    result.iter().map(|a| a.repo.clone()).collect();
+                // Card indicator: repos with a live session, including the
+                // origin repo of any live dispatched-worktree session.
+                let active: std::collections::HashSet<SharedString> = result
+                    .sessions
+                    .iter()
+                    .map(|a| a.repo.clone())
+                    .chain(
+                        result
+                            .dispatched
+                            .iter()
+                            .filter(|d| d.pid.is_some())
+                            .map(|d| d.origin.clone()),
+                    )
+                    .collect();
                 let changed = active != this.active_agents;
                 this.active_agents = active;
                 this.agents = AgentsState::Ready(result);
@@ -1982,6 +2018,224 @@ impl OrreryApp {
                 .spawn(async move { orrery_platform::agents::terminate(pid) })
                 .await;
             let _ = this.update(cx, |this, cx| this.scan_agents(false, cx));
+        })
+        .detach();
+    }
+
+    /// Toggle the drawer's "fresh worktree" dispatch option.
+    pub fn toggle_dispatch_fresh(&mut self, cx: &mut Context<Self>) {
+        self.drawer.dispatch_fresh = !self.drawer.dispatch_fresh;
+        cx.notify();
+    }
+
+    /// Dispatch a coding agent onto `repo` with a task `prompt` (#185). Plain
+    /// dispatch launches `agent_command` + `agent_dispatch_args` in the repo
+    /// directory, exactly like the drawer's Agent button plus the prompt as an
+    /// argument. With `fresh`, a branch `agent/<slug>-<rand>` and a worktree
+    /// under the app data dir are created first (sync git — background
+    /// executor), the pairing is recorded in the cache, and the agent starts in
+    /// the worktree. Success/failure lands as a toast either way.
+    pub fn dispatch_agent(
+        &mut self,
+        repo: SharedString,
+        prompt: String,
+        fresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::toast::ToastKind;
+        let cmd = self.config.agent_command.clone();
+        let args = self.config.agent_dispatch_args.clone();
+
+        if !fresh {
+            match orrery_core::launch::spawn_with_prompt(&cmd, &args, &repo, &prompt) {
+                Ok(_) => {
+                    self.push_toast(
+                        ToastKind::Success,
+                        "Agent dispatched",
+                        Some(repo.clone()),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    self.push_toast(ToastKind::Error, "Dispatch failed", Some(e.into()), cx);
+                }
+            }
+            return;
+        }
+
+        let names = orrery_core::dispatch::names(&prompt);
+        let Some(dest) = orrery_core::dispatch::worktree_dest(&repo, &names.worktree) else {
+            self.push_toast(
+                ToastKind::Error,
+                "Dispatch failed",
+                Some("no data directory for worktrees".into()),
+                cx,
+            );
+            return;
+        };
+        let toast_key = SharedString::from(format!("dispatch:{repo}"));
+        self.upsert_toast(
+            toast_key.clone(),
+            ToastKind::Progress,
+            format!("Creating worktree on {}…", names.branch),
+            Some(repo.clone()),
+            cx,
+        );
+
+        let branch = names.branch.clone();
+        let id = repo.to_string();
+        let now = crate::data::now_unix();
+        cx.spawn(async move |this, cx| {
+            // Worktree add is sync libgit2 work — keep it off the UI thread.
+            let (id2, name, branch2, prompt2, dest2) = (
+                id.clone(),
+                names.worktree.clone(),
+                names.branch.clone(),
+                prompt.clone(),
+                dest.to_string_lossy().into_owned(),
+            );
+            let created: Result<String, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    if let Some(parent) = std::path::Path::new(&dest2).parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let wt_path = orrery_core::git_ops::add_worktree_on_branch(
+                        &id2, &name, &branch2, &dest2,
+                    )?;
+                    orrery_core::cache::record_agent_worktree(
+                        &orrery_core::cache::AgentWorktree {
+                            worktree_path: wt_path.clone(),
+                            repo_id: id2,
+                            branch: branch2,
+                            worktree_name: name,
+                            prompt: prompt2,
+                            created_at: now,
+                        },
+                    )?;
+                    Ok(wt_path)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                use crate::toast::ToastKind;
+                match created {
+                    Ok(wt_path) => {
+                        let launched = orrery_core::launch::spawn_with_prompt(
+                            &this.config.agent_command,
+                            &this.config.agent_dispatch_args,
+                            &wt_path,
+                            &prompt,
+                        );
+                        match launched {
+                            Ok(_) => this.upsert_toast(
+                                toast_key,
+                                ToastKind::Success,
+                                "Agent dispatched on fresh worktree",
+                                Some(branch.into()),
+                                cx,
+                            ),
+                            Err(e) => this.upsert_toast(
+                                toast_key,
+                                ToastKind::Error,
+                                "Worktree created, but the agent failed to launch",
+                                Some(e.into()),
+                                cx,
+                            ),
+                        };
+                        // Show the new worktree in the open drawer's Overview
+                        // and the Agents view without waiting for the poll.
+                        if this.drawer.repo == repo {
+                            crate::drawer::load_overview(repo.clone(), cx);
+                        }
+                        this.scan_agents(false, cx);
+                    }
+                    Err(e) => {
+                        this.upsert_toast(
+                            toast_key,
+                            ToastKind::Error,
+                            "Dispatch failed",
+                            Some(e.into()),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// First click on a dispatched worktree's "Remove worktree" button: arm the
+    /// two-stage confirm (same pattern as [`Self::arm_prune`]).
+    pub fn arm_worktree_remove(&mut self, path: SharedString, cx: &mut Context<Self>) {
+        self.agents_confirm = Some(path);
+        self.agents_confirm_gen += 1;
+        let generation = self.agents_confirm_gen;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.agents_confirm_gen == generation && this.agents_confirm.take().is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Remove a dispatched agent worktree: refused (with a toast) while it has
+    /// uncommitted changes, otherwise unlink it from the origin repo, delete
+    /// its directory (it lives under our data dir), and forget the pairing.
+    /// The `agent/…` branch is kept — it holds the agent's commits. Only
+    /// reached via the two-stage confirm ([`Self::arm_worktree_remove`]).
+    pub fn remove_dispatch_worktree(
+        &mut self,
+        path: SharedString,
+        origin: SharedString,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.agents_confirm = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (p, o, n) = (path.to_string(), origin.to_string(), name.to_string());
+            let result: Result<(), String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let dirty = !orrery_core::git_ops::changes(&p)
+                        .map_err(|e| format!("can't inspect worktree: {e}"))?
+                        .is_empty();
+                    if dirty {
+                        return Err("the worktree has uncommitted changes".into());
+                    }
+                    orrery_core::git_ops::remove_worktree(&o, &n)?;
+                    // Unlinking leaves the files; this worktree is ours (under
+                    // the app data dir), so clean up the directory too.
+                    std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
+                    orrery_core::cache::remove_agent_worktree(&p)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                use crate::toast::ToastKind;
+                match result {
+                    Ok(()) => this.push_toast(
+                        ToastKind::Success,
+                        "Worktree removed",
+                        Some(path.clone()),
+                        cx,
+                    ),
+                    Err(e) => this.push_toast(
+                        ToastKind::Error,
+                        "Worktree not removed",
+                        Some(e.into()),
+                        cx,
+                    ),
+                };
+                this.scan_agents(false, cx);
+            });
         })
         .detach();
     }
@@ -2892,11 +3146,15 @@ impl OrreryApp {
     fn agents_panel(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::views::agents::AgentsState;
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        let total = if let AgentsState::Ready(rows) = &self.agents {
-            for r in rows {
+        let total = if let AgentsState::Ready(data) = &self.agents {
+            for r in &data.sessions {
                 *counts.entry(r.name.as_ref()).or_default() += 1;
             }
-            rows.len()
+            // Dispatched worktrees file under their origin repo's name.
+            for d in &data.dispatched {
+                *counts.entry(d.origin_name.as_ref()).or_default() += 1;
+            }
+            data.sessions.len() + data.dispatched.len()
         } else {
             0
         };
@@ -3114,6 +3372,7 @@ impl OrreryApp {
             View::Agents => crate::views::agents::render(
                 &self.agents,
                 self.view_filter.as_deref(),
+                self.agents_confirm.as_deref(),
                 t,
                 &cx.entity(),
             )

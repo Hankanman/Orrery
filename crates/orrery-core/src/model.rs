@@ -103,6 +103,12 @@ pub struct AppConfig {
     pub ide_command: String,
     /// Command template to open a terminal coding agent in the repo.
     pub agent_command: String,
+    /// Extra argv appended to `agent_command` when dispatching an agent with a
+    /// task (drawer "Dispatch"). `{prompt}` is substituted as a single argument
+    /// — the default passes the task as the agent CLI's trailing prompt arg,
+    /// which is what `claude`/`aider`/`codex` expect.
+    #[serde(default = "default_agent_dispatch_args")]
+    pub agent_dispatch_args: String,
     /// GitHub OAuth app client id for the device-flow login (optional).
     #[serde(default)]
     pub github_client_id: String,
@@ -151,6 +157,10 @@ pub struct AppConfig {
     /// e.g. a review request. Layered under `notify_enabled`.
     #[serde(default = "default_true")]
     pub notify_attention: bool,
+}
+
+pub(crate) fn default_agent_dispatch_args() -> String {
+    "{prompt}".to_string()
 }
 
 pub(crate) fn default_ai_backend() -> String {

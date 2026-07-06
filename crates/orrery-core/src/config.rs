@@ -67,6 +67,7 @@ impl Default for AppConfig {
                 .collect(),
             ide_command,
             agent_command,
+            agent_dispatch_args: crate::model::default_agent_dispatch_args(),
             github_client_id: String::new(),
             gitlab_hosts: Vec::new(),
             ai_model: crate::model::default_ai_model(),
@@ -163,5 +164,18 @@ mod tests {
         assert_eq!(back.ignore, cfg.ignore);
         assert_eq!(back.ide_command, cfg.ide_command);
         assert_eq!(back.agent_command, cfg.agent_command);
+        assert_eq!(back.agent_dispatch_args, cfg.agent_dispatch_args);
+    }
+
+    #[test]
+    fn dispatch_args_default_passes_prompt() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.agent_dispatch_args, "{prompt}");
+        // Older configs without the key must default the same way.
+        let back: AppConfig = toml::from_str(
+            "roots = []\nscanDepth = 3\nignore = []\nideCommand = \"c {path}\"\nagentCommand = \"claude\"",
+        )
+        .unwrap();
+        assert_eq!(back.agent_dispatch_args, "{prompt}");
     }
 }

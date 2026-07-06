@@ -45,6 +45,9 @@ pub struct SettingsState {
     pub draft: AppConfig,
     pub ide: Entity<InputState>,
     pub agent: Entity<InputState>,
+    /// Argv appended to the agent command when dispatching with a task;
+    /// `{prompt}` is substituted as one argument.
+    pub agent_dispatch: Entity<InputState>,
     pub ollama_host: Entity<InputState>,
     pub ai_model: Entity<InputState>,
     pub embed_model: Entity<InputState>,
@@ -77,6 +80,7 @@ impl SettingsState {
         SettingsState {
             ide: field(window, cx, "code {path}", &cfg.ide_command),
             agent: field(window, cx, "agent command", &cfg.agent_command),
+            agent_dispatch: field(window, cx, "{prompt}", &cfg.agent_dispatch_args),
             ollama_host: field(window, cx, "http://localhost:11434", &cfg.ollama_host),
             ai_model: field(window, cx, "model name", &cfg.ai_model),
             embed_model: field(window, cx, "embed model", &cfg.embed_model),
@@ -303,6 +307,11 @@ fn launchers_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
     section(t, "Launchers")
         .child(labeled("IDE command", s.ide.clone(), t))
         .child(labeled("Agent command", s.agent.clone(), t))
+        .child(labeled(
+            "Agent dispatch args ({prompt} = task)",
+            s.agent_dispatch.clone(),
+            t,
+        ))
 }
 
 /// True when the configured backend string selects the llama.cpp sidecar.
