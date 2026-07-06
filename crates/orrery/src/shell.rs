@@ -256,6 +256,11 @@ pub struct OrreryApp {
     /// runtime (Settings save, New Project, Explore clone) so new paths get
     /// live change events without a restart.
     pub watcher: orrery_platform::watcher::WatcherHandle,
+    /// Active toasts, oldest first (rendered bottom-right by
+    /// `toast::toast_layer`; see `toast.rs` for the lifecycle).
+    pub toasts: Vec<crate::toast::Toast>,
+    /// Monotonic toast-id source — unique ids double as the stale-timer guard.
+    pub toast_seq: u64,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
     /// The active contextual sub-filter for the current non-Grid view (e.g. the
@@ -1399,7 +1404,16 @@ impl OrreryApp {
         };
         self.explore_cloning.insert(slug.clone());
         self.explore_errors.remove(&slug);
-        cx.notify();
+        // A keyed Progress toast tracks the clone; the completion below upserts
+        // the same key to Success/Error, so the op resolves its own toast.
+        let toast_key = SharedString::from(format!("clone:{slug}"));
+        self.upsert_toast(
+            toast_key.clone(),
+            crate::toast::ToastKind::Progress,
+            format!("Cloning {slug}…"),
+            None,
+            cx,
+        );
         let dest = orrery_core::scan::expand(&root)
             .join(name.as_ref())
             .to_string_lossy()
@@ -1418,12 +1432,33 @@ impl OrreryApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                use crate::toast::ToastKind;
                 this.rows = rows;
                 this.roots = roots;
                 this.explore_cloning.remove(&slug);
-                if let Err(e) = result {
-                    this.explore_errors
-                        .insert(slug, format!("Failed: {e}").into());
+                match result {
+                    Ok(()) => {
+                        this.upsert_toast(
+                            toast_key,
+                            ToastKind::Success,
+                            format!("Cloned {slug}"),
+                            None,
+                            cx,
+                        );
+                    }
+                    Err(e) => {
+                        let msg = SharedString::from(format!("Failed: {e}"));
+                        // Keep the inline card error AND raise a toast, so the
+                        // failure is visible even away from the Explore view.
+                        this.explore_errors.insert(slug.clone(), msg.clone());
+                        this.upsert_toast(
+                            toast_key,
+                            ToastKind::Error,
+                            format!("Clone failed: {slug}"),
+                            Some(msg),
+                            cx,
+                        );
+                    }
                 }
                 // Watch the freshly cloned repo for live changes too.
                 this.watcher.rearm();
@@ -2971,6 +3006,11 @@ impl Render for OrreryApp {
             .relative()
             .size_full()
             .child(shell);
+        // Toasts layer over the active view; the modal overlay (drawer/palette/
+        // dialog) is added after so it stays in front of them.
+        if let Some(toasts) = self.toast_layer(&t, cx) {
+            root = root.child(toasts);
+        }
         if let Some(overlay) = self.overlay_element(&t, cx) {
             root = root.child(overlay);
         }
