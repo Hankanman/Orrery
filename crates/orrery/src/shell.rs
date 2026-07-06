@@ -1523,13 +1523,15 @@ impl OrreryApp {
     }
 
     /// Drawer Changes tab: generate a commit message for the staged diff (gated
-    /// on `aiReady`). The suggestion lands in `drawer.commit_suggestion`.
+    /// on `aiReady`). The (subject, body) suggestion lands in
+    /// `drawer.commit_suggestion` and, on success, pre-fills the composer's
+    /// subject + body fields so it's editable before committing.
     pub fn drawer_generate_commit(&mut self, cx: &mut Context<Self>) {
         if !self.services.ai_ready {
             return;
         }
         let repo = self.drawer.repo.clone();
-        self.drawer.commit_suggestion = Some("Generating…".into());
+        self.drawer.commit_suggestion = Some(("Generating…".into(), "".into()));
         cx.notify();
         cx.spawn(async move |this, cx| {
             let id = repo.to_string();
@@ -1537,22 +1539,38 @@ impl OrreryApp {
                 .background_executor()
                 .spawn(async move { orrery_core::git_ops::staged_diff(&id).unwrap_or_default() })
                 .await;
-            let text = if diff.trim().is_empty() {
-                "Nothing staged — `git add` your changes first.".to_string()
+            let result = if diff.trim().is_empty() {
+                Err("Nothing staged — `git add` your changes first.".to_string())
             } else {
                 crate::task::run(async move { orrery_core::ai::commit_message(&diff).await })
                     .await
-                    // Keep only the subject line: the suggestion is rendered in a
-                    // single-line seg (GPUI panics on embedded newlines) and
-                    // "Commit this" commits it verbatim, so show == commit.
-                    .map(|m| m.trim().lines().next().unwrap_or_default().to_string())
-                    .unwrap_or_else(|e| format!("Generate failed: {e}"))
+                    .map(|m| orrery_core::ai::split_commit_message(&m))
             };
-            let _ = this.update(cx, |this, cx| {
-                if this.drawer.repo == repo {
-                    this.drawer.commit_suggestion = Some(crate::data::oneline(text).into());
-                    cx.notify();
+            // `update_in` (not `update`): populating the input fields needs the
+            // window InputState::set_value requires.
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.drawer.repo != repo {
+                    return;
                 }
+                match result {
+                    Ok((subject, body)) => {
+                        // The subject renders in a single-line seg — GPUI
+                        // panics on embedded newlines, so flatten defensively.
+                        let subject = crate::data::oneline(subject);
+                        if let Some(input) = &this.drawer.commit_input {
+                            input.update(cx, |st, cx| st.set_value(subject.clone(), window, cx));
+                        }
+                        if let Some(input) = &this.drawer.commit_body_input {
+                            input.update(cx, |st, cx| st.set_value(body.clone(), window, cx));
+                        }
+                        this.drawer.commit_suggestion = Some((subject.into(), body.into()));
+                    }
+                    Err(e) => {
+                        this.drawer.commit_suggestion =
+                            Some((crate::data::oneline(e).into(), "".into()));
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();

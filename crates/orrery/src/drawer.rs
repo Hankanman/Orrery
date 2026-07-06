@@ -114,8 +114,17 @@ pub enum DiffState {
     #[default]
     Idle,
     Loading,
-    /// The diff text ("" when the selected file has no diff on its side).
-    Ready(SharedString),
+    /// The diff's hunks (empty when the selected file has no diff on its side).
+    Ready(Vec<HunkRow>),
+}
+
+/// One hunk of the selected file's diff, render-ready
+/// ([`git_ops::Hunk`] flattened; the vec position is the stage/unstage index).
+pub struct HunkRow {
+    /// The `@@ -a,b +c,d @@ …` header line.
+    pub header: SharedString,
+    /// Body lines, origin-char prefixed (single lines by construction).
+    pub lines: Vec<SharedString>,
 }
 
 /// One pending change in the Changes tab's Unstaged/Staged lists (render-ready
@@ -154,8 +163,9 @@ pub struct DrawerData {
     pub changes: Option<Vec<ChangeRow>>,
     /// The file whose diff the pane shows, as (path, staged-side).
     pub change_sel: Option<(SharedString, bool)>,
-    /// AI-generated commit message for the staged diff, once requested.
-    pub commit_suggestion: Option<SharedString>,
+    /// AI-generated commit message for the staged diff, once requested, as
+    /// (subject, body) — the body may be empty. Errors land in the subject.
+    pub commit_suggestion: Option<(SharedString, SharedString)>,
     /// AI-generated changelog from recent commits, once requested.
     pub changelog: Option<SharedString>,
     /// Notes tab (catch-up + saved note); `None` until first shown.
@@ -163,8 +173,10 @@ pub struct DrawerData {
     /// The editable note field (gpui-component multiline input), seeded from the
     /// saved note when the Notes tab first opens.
     pub note_input: Option<Entity<gpui_component::input::InputState>>,
-    /// The commit-message field for the Changes tab, created when it first opens.
+    /// The commit-subject field for the Changes tab, created when it first opens.
     pub commit_input: Option<Entity<gpui_component::input::InputState>>,
+    /// The optional multi-line commit-body field, created with `commit_input`.
+    pub commit_body_input: Option<Entity<gpui_component::input::InputState>>,
     /// The new-worktree name field (Overview), created when the drawer opens.
     pub worktree_input: Option<Entity<gpui_component::input::InputState>>,
     /// The repo's default branch (origin/HEAD else main/master), loaded with
@@ -343,7 +355,7 @@ fn store_changes(
             this.drawer.diff = DiffState::Loading;
             load_file_diff(this.drawer.repo.clone(), path, staged, cx);
         }
-        None => this.drawer.diff = DiffState::Ready("".into()),
+        None => this.drawer.diff = DiffState::Ready(Vec::new()),
     }
     cx.notify();
 }
@@ -369,8 +381,8 @@ fn select_change(
     cx.notify();
 }
 
-/// Load one file's diff (sync git, off the UI thread). The result is dropped
-/// if the drawer moved on or the selection changed while it was in flight.
+/// Load one file's diff as hunks (sync git, off the UI thread). The result is
+/// dropped if the drawer moved on or the selection changed while in flight.
 fn load_file_diff(
     repo: SharedString,
     path: SharedString,
@@ -379,9 +391,9 @@ fn load_file_diff(
 ) {
     let (id, file) = (repo.to_string(), path.to_string());
     cx.spawn(async move |this, cx| {
-        let diff = cx
+        let hunks = cx
             .background_executor()
-            .spawn(async move { git_ops::file_diff(&id, &file, staged).unwrap_or_default() })
+            .spawn(async move { git_ops::file_hunks(&id, &file, staged).unwrap_or_default() })
             .await;
         let _ = this.update(cx, |this, cx| {
             let still_selected = this
@@ -390,8 +402,57 @@ fn load_file_diff(
                 .as_ref()
                 .is_some_and(|(p, s)| *p == path && *s == staged);
             if this.drawer.repo == repo && still_selected {
-                this.drawer.diff = DiffState::Ready(diff.into());
+                this.drawer.diff = DiffState::Ready(hunks.into_iter().map(hunk_row).collect());
                 cx.notify();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Flatten a [`git_ops::Hunk`] for rendering (all single lines — GPUI text
+/// elements panic on embedded newlines, and `lines()` guarantees none).
+fn hunk_row(h: git_ops::Hunk) -> HunkRow {
+    HunkRow {
+        header: h.header.into(),
+        lines: h.lines.into_iter().map(SharedString::from).collect(),
+    }
+}
+
+/// Stage (or unstage) one hunk of the selected file, then re-read the file
+/// lists + diff exactly like the file-level ops do. `staged` is the side the
+/// hunk was shown on (staged → unstage it). Failures surface as a toast.
+fn hunk_op(
+    repo: SharedString,
+    path: SharedString,
+    staged: bool,
+    hunk_ix: usize,
+    cx: &mut Context<OrreryApp>,
+) {
+    let (id, file) = (repo.to_string(), path.to_string());
+    cx.spawn(async move |this, cx| {
+        let (result, list) = cx
+            .background_executor()
+            .spawn(async move {
+                let result = if staged {
+                    git_ops::unstage_hunk(&id, &file, hunk_ix)
+                } else {
+                    git_ops::stage_hunk(&id, &file, hunk_ix)
+                };
+                (result, git_ops::changes(&id).unwrap_or_default())
+            })
+            .await;
+        let _ = this.update(cx, |this, cx| {
+            if let Err(e) = result {
+                let title = if staged {
+                    "Unstage hunk failed"
+                } else {
+                    "Stage hunk failed"
+                };
+                this.push_toast(ToastKind::Error, title, Some(e.into()), cx);
+            }
+            if this.drawer.repo == repo {
+                store_changes(this, list, cx);
             }
         });
     })
@@ -429,6 +490,17 @@ fn set_staged(repo: SharedString, paths: Vec<String>, stage: bool, cx: &mut Cont
         });
     })
     .detach();
+}
+
+/// Join a commit subject and optional body with the conventional blank line.
+/// Both sides are trimmed; an empty body yields just the subject.
+fn full_commit_message(subject: &str, body: &str) -> String {
+    let (subject, body) = (subject.trim(), body.trim());
+    if body.is_empty() {
+        subject.to_string()
+    } else {
+        format!("{subject}\n\n{body}")
+    }
 }
 
 /// Commit the index as-is with `message`, toast the outcome, then refresh the
@@ -921,7 +993,14 @@ fn tab_bar(
                         if this.drawer.commit_input.is_none() {
                             this.drawer.commit_input = Some(cx.new(|cx| {
                                 gpui_component::input::InputState::new(window, cx)
-                                    .placeholder("Commit message…")
+                                    .placeholder("Commit subject…")
+                            }));
+                        }
+                        if this.drawer.commit_body_input.is_none() {
+                            this.drawer.commit_body_input = Some(cx.new(|cx| {
+                                gpui_component::input::InputState::new(window, cx)
+                                    .auto_grow(2, 8)
+                                    .placeholder("Body (optional)…")
                             }));
                         }
                         load_changes(repo, cx);
@@ -1393,8 +1472,10 @@ fn changes_view(
         .as_ref()
         .is_some_and(|list| list.iter().any(|c| c.staged));
 
-    // Commit composer (the field exists once the tab has been opened).
-    if let Some(input) = &data.commit_input {
+    // Commit composer (the fields exist once the tab has been opened): a
+    // single-line subject + an optional multi-line body, joined by a blank
+    // line into the commit message.
+    if let (Some(input), Some(body_input)) = (&data.commit_input, &data.commit_body_input) {
         let mut actions = div().flex().flex_row().items_center().gap(px(6.));
         // AI: suggest a commit message for the staged diff (gated on aiReady).
         if ai_ready {
@@ -1413,17 +1494,19 @@ fn changes_view(
             let repo = row.id.clone();
             let app2 = app.clone();
             let input2 = input.clone();
+            let body2 = body_input.clone();
             actions = actions.child(pr_btn(
                 SharedString::from("commit"),
                 "Commit",
                 t,
                 move |cx: &mut gpui::App| {
                     let repo = repo.clone();
-                    let msg = input2.read(cx).value();
-                    if msg.trim().is_empty() {
+                    let subject = input2.read(cx).value();
+                    if subject.trim().is_empty() {
                         return;
                     }
-                    app2.update(cx, |_this, cx| commit_staged(repo, msg.to_string(), cx));
+                    let msg = full_commit_message(&subject, &body2.read(cx).value());
+                    app2.update(cx, |_this, cx| commit_staged(repo, msg, cx));
                 },
             ));
         } else {
@@ -1442,37 +1525,52 @@ fn changes_view(
         }
         col = col
             .child(gpui_component::input::Input::new(input))
+            .child(gpui_component::input::Input::new(body_input))
             .child(actions);
     }
 
-    // The AI commit-message suggestion, with a one-click commit using it.
-    if let Some(msg) = &data.commit_suggestion {
+    // The AI commit-message suggestion (subject + optional body), with a
+    // one-click commit using both.
+    if let Some((subject, body)) = &data.commit_suggestion {
         let repo = row.id.clone();
         let app4 = app.clone();
-        let msg2 = msg.clone();
+        let (subject2, body2) = (subject.clone(), body.clone());
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .p(px(10.))
+            .rounded(px(t.r_sm))
+            .bg(rgb(t.surface))
+            .border_1()
+            .border_color(rgb(t.border))
+            .child(seg("sparkles", subject.clone(), t.fg1));
+        if !body.is_empty() {
+            // Multi-line body → markdown (reflowed first — the renderer panics
+            // on a run's embedded newlines, see data::unwrap_soft_breaks).
+            card = card.child(
+                div()
+                    .text_size(px(t.text_small))
+                    .text_color(rgb(t.fg2))
+                    .child(gpui_component::text::markdown(
+                        crate::data::unwrap_soft_breaks(body),
+                    )),
+            );
+        }
         col = col.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .p(px(10.))
-                .rounded(px(t.r_sm))
-                .bg(rgb(t.surface))
-                .border_1()
-                .border_color(rgb(t.border))
-                .child(seg("sparkles", msg.clone(), t.fg1))
-                .child(div().flex().flex_row().justify_end().child(pr_btn(
-                    SharedString::from("commit-ai"),
-                    "Commit this",
-                    t,
-                    move |cx: &mut gpui::App| {
-                        let (repo, msg) = (repo.clone(), msg2.to_string());
-                        if msg.trim().is_empty() {
-                            return;
-                        }
-                        app4.update(cx, |_this, cx| commit_staged(repo, msg, cx));
-                    },
-                ))),
+            card.child(div().flex().flex_row().justify_end().child(pr_btn(
+                SharedString::from("commit-ai"),
+                "Commit this",
+                t,
+                move |cx: &mut gpui::App| {
+                    let repo = repo.clone();
+                    if subject2.trim().is_empty() {
+                        return;
+                    }
+                    let msg = full_commit_message(&subject2, &body2);
+                    app4.update(cx, |_this, cx| commit_staged(repo, msg, cx));
+                },
+            ))),
         );
     }
 
@@ -1551,7 +1649,7 @@ fn changes_view(
     // Unstaged / Staged file lists, then the selected file's diff.
     col = col.child(changes_section(row.id.clone(), data, false, t, app));
     col = col.child(changes_section(row.id.clone(), data, true, t, app));
-    col = col.child(diff_pane(data, t));
+    col = col.child(diff_pane(row.id.clone(), data, t, app));
 
     // AI changelog from recent commits (gated on aiReady).
     if ai_ready {
@@ -1756,7 +1854,7 @@ fn change_item(
 }
 
 /// The selected file's diff, under a header naming the file and its side.
-fn diff_pane(data: &DrawerData, t: &Theme) -> Div {
+fn diff_pane(repo: SharedString, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> Div {
     let mut head = div()
         .flex()
         .flex_row()
@@ -1782,10 +1880,15 @@ fn diff_pane(data: &DrawerData, t: &Theme) -> Div {
         (Some(list), _) if list.is_empty() => {
             placeholder("Working tree clean — nothing to commit.", t).into_any_element()
         }
-        (_, DiffState::Ready(d)) if d.trim().is_empty() => {
+        (_, DiffState::Ready(hunks)) if hunks.is_empty() => {
             placeholder("No diff for this file.", t).into_any_element()
         }
-        (_, DiffState::Ready(d)) => diff_block(d, t).into_any_element(),
+        (_, DiffState::Ready(hunks)) => match &data.change_sel {
+            Some((path, staged)) => {
+                diff_block(repo, path.clone(), *staged, hunks, t, app).into_any_element()
+            }
+            None => placeholder("No diff for this file.", t).into_any_element(),
+        },
         _ => placeholder("Loading…", t).into_any_element(),
     };
     div()
@@ -1796,14 +1899,24 @@ fn diff_pane(data: &DrawerData, t: &Theme) -> Div {
         .child(body)
 }
 
-/// Cap on rendered diff lines. The whole app re-renders on any `cx.notify()`
-/// (agents poll, attention poll, appearance signals), so an unbounded diff
-/// would rebuild thousands of elements on every background tick.
+/// Cap on rendered diff *content* lines. The whole app re-renders on any
+/// `cx.notify()` (agents poll, attention poll, appearance signals), so an
+/// unbounded diff would rebuild thousands of elements on every background
+/// tick. Hunk headers don't count against the cap.
 const DIFF_MAX_LINES: usize = 500;
 
-/// Render a unified diff with per-line sentiment colouring, truncated to
-/// [`DIFF_MAX_LINES`] with a muted "… n more lines" footer.
-fn diff_block(diff: &str, t: &Theme) -> impl IntoElement {
+/// Render the selected file's hunks: each gets a header row — the `@@` line
+/// plus a "Stage hunk"/"Unstage hunk" affordance matching the pane's side —
+/// then its sentiment-coloured body lines. Content is truncated to
+/// [`DIFF_MAX_LINES`] total with a muted "… n more" footer.
+fn diff_block(
+    repo: SharedString,
+    path: SharedString,
+    staged: bool,
+    hunks: &[HunkRow],
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
     let mut block = div()
         .flex()
         .flex_col()
@@ -1814,28 +1927,76 @@ fn diff_block(diff: &str, t: &Theme) -> impl IntoElement {
         .border_color(rgb(t.border))
         .font_family(MONO)
         .text_size(px(t.text_data_sm));
-    let mut lines = diff.lines();
-    for line in lines.by_ref().take(DIFF_MAX_LINES) {
-        let color = match line.as_bytes().first() {
-            Some(b'+') => t.clean,
-            Some(b'-') => t.behind,
-            Some(b'@') => t.accent_bright,
-            _ => t.fg2,
-        };
-        block = block.child(
+    let mut budget = DIFF_MAX_LINES;
+    for (ix, hunk) in hunks.iter().enumerate() {
+        if budget == 0 {
+            // Cap hit: one muted footer counting everything left.
+            let lines: usize = hunks[ix..].iter().map(|h| h.lines.len()).sum();
+            let hunks_left = hunks.len() - ix;
+            block = block.child(
+                div()
+                    .pt(px(6.))
+                    .text_color(rgb(t.fg3))
+                    .child(SharedString::from(format!(
+                        "… {lines} more lines in {hunks_left} more hunks"
+                    ))),
+            );
+            break;
+        }
+
+        // Hunk header: the @@ line + the stage/unstage-this-hunk affordance.
+        let action = {
+            let (app, repo, path) = (app.clone(), repo.clone(), path.clone());
+            let label = if staged { "Unstage hunk" } else { "Stage hunk" };
             div()
-                .text_color(rgb(color))
-                .child(SharedString::from(line.to_string())),
-        );
-    }
-    let hidden = lines.count();
-    if hidden > 0 {
-        block = block.child(
-            div()
-                .pt(px(6.))
+                .id(SharedString::from(format!("hunk-act-{staged}-{ix}")))
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(t.r_xs))
                 .text_color(rgb(t.fg3))
-                .child(SharedString::from(format!("… {hidden} more lines"))),
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(t.surface_hover)).text_color(rgb(t.fg1)))
+                .child(SharedString::from(label))
+                .on_click(move |_ev, _win, cx| {
+                    let (repo, path) = (repo.clone(), path.clone());
+                    app.update(cx, |_this, cx| hunk_op(repo, path, staged, ix, cx));
+                })
+        };
+        let mut header_row = div().flex().flex_row().items_center().gap(px(6.));
+        if ix > 0 {
+            header_row = header_row.mt(px(6.));
+        }
+        block = block.child(
+            header_row
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_color(rgb(t.accent_bright))
+                        .child(hunk.header.clone()),
+                )
+                .child(action),
         );
+
+        for line in hunk.lines.iter().take(budget) {
+            let color = match line.as_bytes().first() {
+                Some(b'+') => t.clean,
+                Some(b'-') => t.behind,
+                _ => t.fg2,
+            };
+            block = block.child(div().text_color(rgb(color)).child(line.clone()));
+        }
+        if hunk.lines.len() > budget {
+            let hidden = hunk.lines.len() - budget;
+            block = block.child(
+                div()
+                    .pt(px(6.))
+                    .text_color(rgb(t.fg3))
+                    .child(SharedString::from(format!("… {hidden} more lines"))),
+            );
+        }
+        budget = budget.saturating_sub(hunk.lines.len());
     }
     block
 }

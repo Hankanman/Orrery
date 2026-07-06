@@ -340,14 +340,31 @@ fn clamp_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
-/// Prompt to write a Conventional Commit message from a staged diff.
+/// Prompt to write a Conventional Commit message from a staged diff. The
+/// output shape (subject, blank line, optional body) is parsed back apart by
+/// [`split_commit_message`].
 pub fn commit_prompt(diff: &str) -> String {
     format!(
         "Write a single Conventional Commit message (e.g. `feat(scope): summary`) for these staged \
-changes. Output ONLY the message — no code fences, no explanation. Subject under 72 chars; add a \
-short body only if it genuinely helps.\n\nDiff:\n{}\n\nCommit message:",
+changes. Output ONLY the message — no code fences, no explanation. Subject under 72 chars on the \
+first line; if a short body genuinely helps, add it after one blank line.\n\nDiff:\n{}\n\nCommit message:",
         clamp_chars(diff, 6000)
     )
+}
+
+/// Split an AI commit message into (subject, body): the first non-empty line
+/// (stripped of wrapping quotes/backticks) is the subject, everything after it
+/// is the body. Both come back trimmed; either may be empty.
+pub fn split_commit_message(text: &str) -> (String, String) {
+    let mut lines = text.trim().lines();
+    let subject = lines
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(['"', '`'])
+        .to_string();
+    let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    (subject, body)
 }
 
 /// Prompt to summarize commits into a changelog / PR description.
@@ -547,6 +564,22 @@ mod tests {
             ("feat: quoted".to_string(), String::new())
         );
         assert!(split_pr_draft("   \n").is_none());
+    }
+
+    #[test]
+    fn split_commit_message_separates_subject_and_body() {
+        let (s, b) = split_commit_message("feat(x): add y\n\nLonger reasoning.\nSecond line.");
+        assert_eq!(s, "feat(x): add y");
+        assert_eq!(b, "Longer reasoning.\nSecond line.");
+        // Subject-only messages give an empty body; wrapping quotes/backticks drop.
+        assert_eq!(
+            split_commit_message("`fix: subject only`\n"),
+            ("fix: subject only".to_string(), String::new())
+        );
+        // A body directly after the subject (no blank line) still splits.
+        let (s, b) = split_commit_message("fix: a\nbody line");
+        assert_eq!((s.as_str(), b.as_str()), ("fix: a", "body line"));
+        assert_eq!(split_commit_message("  "), (String::new(), String::new()));
     }
 
     #[test]

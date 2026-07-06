@@ -59,6 +59,23 @@ pub struct FileChange {
     pub staged: bool,
 }
 
+/// One hunk of a single file's diff, for hunk-level staging. Its position in
+/// the [`file_hunks`] vec is the `hunk_ix` that [`stage_hunk`] /
+/// [`unstage_hunk`] take — valid only against the diff it was read from, so
+/// recompute after every staging op (the UI reloads anyway).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hunk {
+    /// The `@@ -a,b +c,d @@ …` header line (no trailing newline).
+    pub header: String,
+    /// Body lines, each prefixed with its origin char (` `, `+`, `-`).
+    pub lines: Vec<String>,
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+}
+
 /// Credentials callback: SSH agent for ssh remotes, the git credential helper
 /// (or a token via helper) for HTTPS. Best-effort — failures surface as errors.
 fn remote_callbacks() -> RemoteCallbacks<'static> {
@@ -736,14 +753,19 @@ pub fn staged_diff(path: &str) -> Result<String, String> {
     Ok(diff_to_string(&diff))
 }
 
-/// Unified diff for a single file (repo-relative pathspec): index vs HEAD when
-/// `staged`, else working tree vs index (with untracked content shown as an
-/// add). Backs the drawer's per-file diff pane.
-pub fn file_diff(path: &str, file: &str, staged: bool) -> Result<String, String> {
-    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+/// Build the libgit2 diff behind [`file_diff`] / [`file_hunks`]: one file
+/// (repo-relative pathspec), index vs HEAD when `staged`, else working tree vs
+/// index (with untracked content shown as an add). `reverse` flips old/new —
+/// hunk order is preserved, which [`unstage_hunk`] relies on.
+fn file_diff_raw<'r>(
+    repo: &'r Repository,
+    file: &str,
+    staged: bool,
+    reverse: bool,
+) -> Result<git2::Diff<'r>, String> {
     let mut opts = DiffOptions::new();
-    opts.pathspec(file);
-    let diff = if staged {
+    opts.pathspec(file).reverse(reverse);
+    if staged {
         let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
         repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
     } else {
@@ -752,8 +774,102 @@ pub fn file_diff(path: &str, file: &str, staged: bool) -> Result<String, String>
             .show_untracked_content(true);
         repo.diff_index_to_workdir(None, Some(&mut opts))
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+}
+
+/// Unified diff for a single file (repo-relative pathspec): index vs HEAD when
+/// `staged`, else working tree vs index (with untracked content shown as an
+/// add). Backs the drawer's per-file diff pane.
+pub fn file_diff(path: &str, file: &str, staged: bool) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let diff = file_diff_raw(&repo, file, staged, false)?;
     Ok(diff_to_string(&diff))
+}
+
+/// A single file's diff split into hunks (same sides as [`file_diff`]). The
+/// vec position of each hunk is the `hunk_ix` for [`stage_hunk`] /
+/// [`unstage_hunk`]. Binary files yield no hunks.
+pub fn file_hunks(path: &str, file: &str, staged: bool) -> Result<Vec<Hunk>, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let diff = file_diff_raw(&repo, file, staged, false)?;
+    let mut out = Vec::new();
+    for delta_ix in 0..diff.deltas().len() {
+        let Some(patch) = git2::Patch::from_diff(&diff, delta_ix).map_err(|e| e.to_string())?
+        else {
+            continue; // unchanged or binary
+        };
+        for h in 0..patch.num_hunks() {
+            let (hunk, line_count) = patch.hunk(h).map_err(|e| e.to_string())?;
+            let mut lines = Vec::with_capacity(line_count);
+            for l in 0..line_count {
+                let line = patch.line_in_hunk(h, l).map_err(|e| e.to_string())?;
+                let content = String::from_utf8_lossy(line.content());
+                let content = content.trim_end_matches(['\n', '\r']);
+                match line.origin() {
+                    o @ (' ' | '+' | '-') => lines.push(format!("{o}{content}")),
+                    // "\ No newline at end of file" and friends.
+                    _ => lines.push(content.to_string()),
+                }
+            }
+            out.push(Hunk {
+                header: String::from_utf8_lossy(hunk.header())
+                    .trim_end()
+                    .to_string(),
+                lines,
+                old_start: hunk.old_start(),
+                old_lines: hunk.old_lines(),
+                new_start: hunk.new_start(),
+                new_lines: hunk.new_lines(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Stage one hunk of `file`'s *unstaged* diff into the index (`git add -p`,
+/// one hunk). `hunk_ix` indexes [`file_hunks`]`(path, file, false)`.
+pub fn stage_hunk(path: &str, file: &str, hunk_ix: usize) -> Result<(), String> {
+    apply_file_hunk(path, file, hunk_ix, true)
+}
+
+/// Unstage one hunk of `file`'s *staged* diff, resetting that region of the
+/// index back toward HEAD (`git restore --staged -p`, one hunk). `hunk_ix`
+/// indexes [`file_hunks`]`(path, file, true)`.
+pub fn unstage_hunk(path: &str, file: &str, hunk_ix: usize) -> Result<(), String> {
+    apply_file_hunk(path, file, hunk_ix, false)
+}
+
+/// Apply a single hunk to the index via `git_apply` (`ApplyLocation::Index`),
+/// filtering every other hunk out with the hunk callback. Staging applies the
+/// index→workdir diff; unstaging applies the HEAD→index diff *reversed* —
+/// either way the patch's pre-image is the current index, which is what
+/// index-only application requires. Reversal preserves hunk order, so the UI's
+/// forward-diff indices stay valid on both sides.
+fn apply_file_hunk(path: &str, file: &str, hunk_ix: usize, stage: bool) -> Result<(), String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    // Untracked files aren't in the index, and `git_apply` refuses a patch for
+    // a file the index doesn't know. Their whole content is one hunk anyway,
+    // so staging hunk 0 of an untracked file is exactly `git add`.
+    if stage
+        && repo
+            .status_file(std::path::Path::new(file))
+            .is_ok_and(|s| s.is_wt_new())
+    {
+        if hunk_ix != 0 {
+            return Err(format!("untracked file has one hunk, not {}", hunk_ix + 1));
+        }
+        return stage_paths(path, &[file.to_string()]);
+    }
+    let diff = file_diff_raw(&repo, file, !stage, !stage)?;
+    let mut ix = 0usize;
+    let mut opts = git2::ApplyOptions::new();
+    opts.hunk_callback(move |_hunk| {
+        let keep = ix == hunk_ix;
+        ix += 1;
+        keep
+    });
+    repo.apply(&diff, git2::ApplyLocation::Index, Some(&mut opts))
+        .map_err(|e| e.to_string())
 }
 
 /// Every pending change in the repo, split per file into staged (index vs
@@ -1335,6 +1451,132 @@ mod tests {
         let untracked = file_diff(&path, "new.txt", false).unwrap();
         assert!(untracked.contains("+untracked line"), "got: {untracked}");
         assert!(file_diff(&path, "new.txt", true).unwrap().is_empty());
+    }
+
+    /// A committed 20-line file with two well-separated unstaged edits (lines
+    /// 2 and 19) — far enough apart that the diff splits into two hunks.
+    fn two_hunk_setup() -> (tempfile::TempDir, String) {
+        let (dir, path) = init_repo();
+        let orig: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        fs::write(dir.path().join("f.txt"), &orig).unwrap();
+        stage_paths(&path, &["f.txt".into()]).unwrap();
+        commit(&path, "add f").unwrap();
+        let modified = orig
+            .replace("line 2\n", "line 2 changed\n")
+            .replace("line 19\n", "line 19 changed\n");
+        fs::write(dir.path().join("f.txt"), modified).unwrap();
+        (dir, path)
+    }
+
+    /// The HEAD-tree content of `file`.
+    fn committed_content(path: &str, file: &str) -> String {
+        let repo = Repository::open(path).unwrap();
+        let tree = repo.head().unwrap().peel_to_tree().unwrap();
+        let entry = tree.get_name(file).unwrap();
+        let blob = entry.to_object(&repo).unwrap().peel_to_blob().unwrap();
+        String::from_utf8(blob.content().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn file_hunks_splits_separated_edits() {
+        let (_dir, path) = two_hunk_setup();
+        let hunks = file_hunks(&path, "f.txt", false).unwrap();
+        assert_eq!(hunks.len(), 2, "two separated edits → two hunks");
+        assert!(
+            hunks[0].header.starts_with("@@ "),
+            "got: {}",
+            hunks[0].header
+        );
+        assert!(hunks[0].lines.iter().any(|l| l == "+line 2 changed"));
+        assert!(hunks[0].lines.iter().any(|l| l == "-line 2"));
+        assert!(hunks[1].lines.iter().any(|l| l == "+line 19 changed"));
+        assert!(hunks[0].old_start > 0 && hunks[1].new_start > hunks[0].new_start);
+        // Nothing staged yet → no hunks on the staged side.
+        assert!(file_hunks(&path, "f.txt", true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stage_hunk_commits_only_that_hunk() {
+        let (dir, path) = two_hunk_setup();
+        stage_hunk(&path, "f.txt", 0).unwrap();
+
+        // The first edit moved to the index; the second stayed unstaged.
+        let staged = file_hunks(&path, "f.txt", true).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert!(staged[0].lines.iter().any(|l| l == "+line 2 changed"));
+        let unstaged = file_hunks(&path, "f.txt", false).unwrap();
+        assert_eq!(unstaged.len(), 1);
+        assert!(unstaged[0].lines.iter().any(|l| l == "+line 19 changed"));
+
+        commit(&path, "first hunk only").unwrap();
+        let content = committed_content(&path, "f.txt");
+        assert!(content.contains("line 2 changed"), "staged hunk landed");
+        assert!(
+            content.contains("line 19\n"),
+            "unstaged hunk did not: {content}"
+        );
+        // The working tree still carries the second edit, untouched.
+        let wt = fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert!(wt.contains("line 19 changed"));
+        assert_eq!(
+            change_tuples(&path),
+            vec![("f.txt".into(), ChangeKind::Modified, false)]
+        );
+    }
+
+    #[test]
+    fn unstage_hunk_mirrors_stage() {
+        let (_dir, path) = two_hunk_setup();
+        stage_paths(&path, &["f.txt".into()]).unwrap();
+        assert_eq!(file_hunks(&path, "f.txt", true).unwrap().len(), 2);
+
+        unstage_hunk(&path, "f.txt", 1).unwrap();
+        let staged = file_hunks(&path, "f.txt", true).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert!(staged[0].lines.iter().any(|l| l == "+line 2 changed"));
+        let unstaged = file_hunks(&path, "f.txt", false).unwrap();
+        assert_eq!(unstaged.len(), 1);
+        assert!(unstaged[0].lines.iter().any(|l| l == "+line 19 changed"));
+
+        commit(&path, "kept hunk only").unwrap();
+        let content = committed_content(&path, "f.txt");
+        assert!(content.contains("line 2 changed"));
+        assert!(content.contains("line 19\n"), "unstaged hunk stayed out");
+    }
+
+    #[test]
+    fn hunk_indices_recompute_after_partial_stage() {
+        let (_dir, path) = two_hunk_setup();
+        stage_hunk(&path, "f.txt", 0).unwrap();
+        // After the partial stage the remaining unstaged hunk re-indexes to 0.
+        stage_hunk(&path, "f.txt", 0).unwrap();
+        assert!(file_hunks(&path, "f.txt", false).unwrap().is_empty());
+        assert_eq!(file_hunks(&path, "f.txt", true).unwrap().len(), 2);
+        // Out-of-range index errors rather than silently no-opping… by staging
+        // nothing (the callback never matches), which libgit2 treats as OK.
+        // Recomputing indices after every op is the contract; this documents
+        // that a stale index is at worst a no-op, never a wrong hunk.
+        stage_hunk(&path, "f.txt", 5).unwrap();
+        assert_eq!(file_hunks(&path, "f.txt", true).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn stage_hunk_on_untracked_file_stages_it_whole() {
+        let (dir, path) = init_repo();
+        fs::write(dir.path().join("new.txt"), "hello\n").unwrap();
+        let hunks = file_hunks(&path, "new.txt", false).unwrap();
+        assert_eq!(hunks.len(), 1, "untracked content is one add hunk");
+        assert!(hunks[0].lines.iter().any(|l| l == "+hello"));
+
+        assert!(
+            stage_hunk(&path, "new.txt", 1).is_err(),
+            "only hunk 0 exists for an untracked file"
+        );
+        stage_hunk(&path, "new.txt", 0).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Added, true)]
+        );
     }
 
     /// Add `origin` pointing at a fresh bare repo (a local-path remote needs no
