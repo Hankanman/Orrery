@@ -681,6 +681,17 @@ fn notifications_section(
                 }
             },
         ))
+        .child(toggle(
+            "Agent finished",
+            s.draft.notify_agent_finished,
+            t,
+            app,
+            |a| {
+                if let Some(s) = &mut a.settings {
+                    s.draft.notify_agent_finished = !s.draft.notify_agent_finished;
+                }
+            },
+        ))
 }
 
 fn save_footer(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {

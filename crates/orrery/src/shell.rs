@@ -286,11 +286,21 @@ pub struct OrreryApp {
     /// Whether the Agents-view poll loop is running (guards against duplicates).
     pub agents_polling: bool,
     /// Worktree path whose Agents "Remove worktree" button is armed, awaiting a
-    /// confirming second click (the cleanup-confirm pattern).
+    /// confirming second click (the cleanup-confirm pattern). Discard arms the
+    /// same slot with a `discard:`-prefixed key so the two destructive buttons
+    /// can't confirm each other.
     pub agents_confirm: Option<SharedString>,
     /// Bumped each time a worktree-remove confirm is armed, so a stale revert
     /// timer from an earlier arm can't clear a newer one.
     pub agents_confirm_gen: u64,
+    /// Worktree path whose finished-session review diff is expanded on the
+    /// Agents view, if any (one at a time — the diff is the heavy part).
+    pub agents_review: Option<SharedString>,
+    /// The loaded review diff for [`Self::agents_review`]; `None` while the
+    /// background branch-diff load is in flight.
+    pub agents_review_diff: Option<SharedString>,
+    /// Worktree paths with an Open-PR flow in flight (re-click guard).
+    pub agents_pr_busy: std::collections::HashSet<SharedString>,
     /// Slugs currently being cloned from the Explore view.
     pub explore_cloning: std::collections::HashSet<SharedString>,
     /// Explore clone failures keyed by slug, shown on the card; cleared on retry.
@@ -506,31 +516,16 @@ impl OrreryApp {
                 .collect(),
             _ => Vec::new(),
         };
-        // Only live sessions are detectable (the /proc scan can't see one that
-        // already exited), so every agent fact is `running: true` for now. A
-        // live dispatched-worktree session counts against its *origin* repo —
-        // the worktree itself isn't a scanned repo.
-        let agents: Vec<AgentFact> =
-            match &self.agents {
-                crate::views::agents::AgentsState::Ready(data) => {
-                    data.sessions
-                        .iter()
-                        .map(|a| AgentFact {
-                            repo_id: a.repo.to_string(),
-                            program: a.program(),
-                            running: true,
-                        })
-                        .chain(data.dispatched.iter().filter(|d| d.pid.is_some()).map(|d| {
-                            AgentFact {
-                                repo_id: d.origin.to_string(),
-                                program: d.program.to_string(),
-                                running: true,
-                            }
-                        }))
-                        .collect()
-                }
-                _ => Vec::new(),
-            };
+        // Live sessions raise running facts; dispatched worktrees whose
+        // session finished with commits to review (detected + persisted by
+        // the agents scan, #185) raise finished facts against their origin
+        // repo — see `views::agents::agent_facts` for the full mapping.
+        let agents: Vec<AgentFact> = match &self.agents {
+            crate::views::agents::AgentsState::Ready(data) => {
+                crate::views::agents::agent_facts(data)
+            }
+            _ => Vec::new(),
+        };
         let ci = orrery_core::ci::facts(&self.ci_states, &self.repos);
         self.attention_items = attention::compute(&self.repos, inbox, &ci, &prunable, &agents);
         // Items are severity-sorted (Urgent first), so a repo's first
@@ -2190,7 +2185,7 @@ impl OrreryApp {
         let rows = self.rows.clone();
         let agent_command = self.config.agent_command.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
+            let mut result = cx
                 .background_executor()
                 .spawn(async move { crate::views::agents::scan(&rows, &agent_command) })
                 .await;
@@ -2210,11 +2205,58 @@ impl OrreryApp {
                     )
                     .collect();
                 let changed = active != this.active_agents;
+                let supervising = result.dispatched.iter().any(|d| d.pid.is_some());
+                let finished = std::mem::take(&mut result.finished_now);
+                // Collapse the review panel if its worktree vanished (e.g.
+                // discarded from another surface).
+                if let Some(open) = &this.agents_review
+                    && !result.dispatched.iter().any(|d| d.worktree_path == *open)
+                {
+                    this.agents_review = None;
+                    this.agents_review_diff = None;
+                }
                 this.active_agents = active;
                 this.agents = AgentsState::Ready(result);
                 // Fresh agent facts → refresh the attention surfaces (cheap;
                 // the notify below only fires when something visible changed).
                 this.recompute_attention();
+                // Surface the one-shot finish events (#185): always a toast;
+                // a desktop notification when config allows. AgentFinished is
+                // Attention-tier (not Urgent, so the urgent-diff notifier
+                // skips it), but a finished dispatch is the whole point of
+                // the session — it notifies from the transition itself,
+                // gated by `notify_agent_finished`. The persisted
+                // `finished_at` means each finish fires exactly once, across
+                // polls and restarts alike.
+                for f in finished {
+                    let commits = if f.commits == 1 {
+                        "1 commit".to_string()
+                    } else {
+                        format!("{} commits", f.commits)
+                    };
+                    let title = format!("Agent finished on {}", f.origin_name);
+                    let body = format!("{commits} on {} — review in Agents", f.branch);
+                    this.push_toast(
+                        crate::toast::ToastKind::Info,
+                        title.clone(),
+                        Some(body.clone().into()),
+                        cx,
+                    );
+                    if this.config.notify_enabled
+                        && this.config.notify_attention
+                        && this.config.notify_agent_finished
+                    {
+                        crate::task::spawn_detached(async move {
+                            let _ = orrery_platform::notify::send(&title, &body).await;
+                        });
+                    }
+                }
+                // Keep supervising live dispatched sessions even when the
+                // Agents view isn't open, so the finish transition is
+                // observed promptly (no-op if the poll is already running).
+                if supervising {
+                    this.start_agents_poll(cx);
+                }
                 if changed || this.view == View::Agents {
                     cx.notify();
                 }
@@ -2223,9 +2265,22 @@ impl OrreryApp {
         .detach();
     }
 
-    /// Re-scan agents every 5s while the Agents view is open, so the list stays
-    /// live (terminated sessions drop off, new ones appear). Exits when the view
-    /// changes; restarted on re-entry by `maybe_load_view`.
+    /// Launch-time outcome sweep (#185): scan agent sessions once so a
+    /// dispatched session that ended while Orrery was closed is detected
+    /// right away (persisted `last_seen_alive` + no live process = finished),
+    /// and — via the scan's self-healing poll start — keep supervising any
+    /// dispatched session that is still running.
+    pub fn agents_startup(&mut self, cx: &mut Context<Self>) {
+        self.scan_agents(false, cx);
+    }
+
+    /// Re-scan agents every 5s while the Agents view is open — so the list
+    /// stays live (terminated sessions drop off, new ones appear) — or while
+    /// a dispatched-worktree session is running, so its finish transition is
+    /// observed even with the view closed (#185: the attention item and
+    /// notification must not depend on the user watching the Agents view).
+    /// Exits when neither holds; restarted by `maybe_load_view` on re-entry
+    /// and by any scan that sees a live dispatched session.
     fn start_agents_poll(&mut self, cx: &mut Context<Self>) {
         if self.agents_polling {
             return;
@@ -2236,10 +2291,12 @@ impl OrreryApp {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(5))
                     .await;
-                let on_view = this
-                    .update(cx, |this, _| this.view == View::Agents)
+                let keep = this
+                    .update(cx, |this, _| {
+                        this.view == View::Agents || this.supervising_dispatch()
+                    })
                     .unwrap_or(false);
-                if !on_view {
+                if !keep {
                     let _ = this.update(cx, |this, _| this.agents_polling = false);
                     break;
                 }
@@ -2252,6 +2309,17 @@ impl OrreryApp {
             }
         })
         .detach();
+    }
+
+    /// Is a dispatched-worktree agent session currently alive? While true the
+    /// agents poll keeps running off-view to catch the finish transition.
+    fn supervising_dispatch(&self) -> bool {
+        match &self.agents {
+            crate::views::agents::AgentsState::Ready(data) => {
+                data.dispatched.iter().any(|d| d.pid.is_some())
+            }
+            _ => false,
+        }
     }
 
     /// Terminate an agent process by pid, then re-scan the list.
@@ -2354,6 +2422,10 @@ impl OrreryApp {
                             worktree_name: name,
                             prompt: prompt2,
                             created_at: now,
+                            last_seen_alive: 0,
+                            finished_at: 0,
+                            commits_ahead: 0,
+                            pr_url: String::new(),
                         },
                     )?;
                     Ok(wt_path)
@@ -2477,6 +2549,257 @@ impl OrreryApp {
                         cx,
                     ),
                 };
+                this.scan_agents(false, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Toggle the inline review diff for a finished dispatched worktree
+    /// (#185): the `agent/…` branch's changes vs the origin's default branch
+    /// (merge-base scoped — see `git_ops::branch_diff`), loaded off the UI
+    /// thread and rendered with the drawer's capped diff renderer. One panel
+    /// at a time; toggling another card's Review replaces it.
+    pub fn toggle_agent_review(
+        &mut self,
+        path: SharedString,
+        origin: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agents_review.as_ref() == Some(&path) {
+            self.agents_review = None;
+            self.agents_review_diff = None;
+            cx.notify();
+            return;
+        }
+        self.agents_review = Some(path.clone());
+        self.agents_review_diff = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (p, o) = (path.to_string(), origin.to_string());
+            let diff = cx
+                .background_executor()
+                .spawn(async move {
+                    let base = orrery_core::git_ops::default_branch(&o)
+                        .ok_or("origin has no default branch")?;
+                    orrery_core::git_ops::branch_diff(&p, &base)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Dropped if the panel moved to another card meanwhile.
+                if this.agents_review.as_ref() == Some(&path) {
+                    this.agents_review_diff =
+                        Some(diff.unwrap_or_else(|e| format!("Diff failed: {e}")).into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Land a finished dispatched worktree as a PR (#185): push the `agent/…`
+    /// branch from the worktree (its HEAD — sets the upstream on first push),
+    /// draft a title/body from the commit range (AI when `aiReady`, fallback
+    /// otherwise), create the PR against the origin's default branch, and
+    /// persist the PR URL on the pairing row — which clears the worktree's
+    /// AgentFinished attention item (the work is handed off). Mirrors
+    /// [`Self::drawer_open_pr`], re-targeted at the worktree.
+    pub fn open_worktree_pr(
+        &mut self,
+        path: SharedString,
+        origin: SharedString,
+        branch: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agents_pr_busy.contains(&path) {
+            return;
+        }
+        let Some(row) = self.rows.iter().find(|r| r.id == origin) else {
+            self.push_toast(
+                ToastKind::Error,
+                "Open PR failed",
+                Some("origin repo is not in the fleet".into()),
+                cx,
+            );
+            return;
+        };
+        let Some(slug) = crate::drawer::github_slug(row) else {
+            self.push_toast(
+                ToastKind::Error,
+                "Open PR failed",
+                Some("origin has no GitHub remote".into()),
+                cx,
+            );
+            return;
+        };
+        let slug = slug.to_string();
+        let ai_ready = self.services.ai_ready;
+        self.agents_pr_busy.insert(path.clone());
+        let key = format!("wt-pr:{path}");
+        self.upsert_toast(
+            key.clone(),
+            ToastKind::Progress,
+            "Opening PR…",
+            Some(branch.clone()),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            // 1. Resolve the base and push the branch from the worktree.
+            let (p, o) = (path.to_string(), origin.to_string());
+            let pushed: Result<String, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let base = orrery_core::git_ops::default_branch(&o)
+                        .ok_or("origin has no default branch")?;
+                    orrery_core::git_ops::push(&p)?;
+                    Ok(base)
+                })
+                .await;
+            let base = match pushed {
+                Ok(base) => base,
+                Err(e) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.agents_pr_busy.remove(&path);
+                        this.upsert_toast(key, ToastKind::Error, "Push failed", Some(e.into()), cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            // 2. The branch's commit range, for drafting the title/body.
+            let (p2, base2) = (path.to_string(), base.clone());
+            let commits: Vec<String> = cx
+                .background_executor()
+                .spawn(async move {
+                    orrery_core::git_ops::commits_ahead_of(&p2, &base2, 30)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| c.summary)
+                        .collect()
+                })
+                .await;
+            // 3. Title/body: AI-drafted when available, else the fallback.
+            let head = branch.to_string();
+            let drafted = if ai_ready && !commits.is_empty() {
+                let (h, c) = (head.clone(), commits.clone());
+                crate::task::run(async move { orrery_core::ai::pr_description(&h, &c).await })
+                    .await
+                    .ok()
+                    .and_then(|d| orrery_core::ai::split_pr_draft(&d))
+            } else {
+                None
+            };
+            let (title, body) =
+                drafted.unwrap_or_else(|| orrery_core::ai::fallback_pr_draft(&head, &commits));
+            // 4. Create the PR (network → the shared tokio runtime).
+            let (s, h, b) = (slug.clone(), head.clone(), base.clone());
+            let (t2, b2) = (title.clone(), body.clone());
+            let result = crate::task::run(async move {
+                let token =
+                    orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
+                orrery_core::forge::create_pr(&s, &h, &b, &t2, &b2, &token).await
+            })
+            .await;
+            // 5. Persist the hand-off so the attention item clears (and stays
+            //    cleared across restarts), then refresh the cards.
+            if let Ok(url) = &result {
+                let (p3, u) = (path.to_string(), url.clone());
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = orrery_core::cache::set_agent_worktree_pr(&p3, &u);
+                    })
+                    .await;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.agents_pr_busy.remove(&path);
+                match result {
+                    Ok(url) => {
+                        this.upsert_toast_link(
+                            key,
+                            ToastKind::Success,
+                            "PR opened",
+                            Some(title.into()),
+                            url.into(),
+                            cx,
+                        );
+                        this.scan_agents(false, cx);
+                    }
+                    Err(e) => {
+                        this.upsert_toast(
+                            key,
+                            ToastKind::Error,
+                            "Open PR failed",
+                            Some(e.into()),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Discard a finished dispatched worktree's outcome (#185): remove the
+    /// worktree AND delete its `agent/…` branch — the commits go with it,
+    /// which is the point (contrast [`Self::remove_dispatch_worktree`], which
+    /// keeps the branch). Refused while the worktree has uncommitted changes,
+    /// like the plain removal. Only reached via the two-stage confirm
+    /// (`arm_worktree_remove` with the `discard:`-prefixed key). Dropping the
+    /// cache row clears the AgentFinished attention item.
+    pub fn discard_dispatch_worktree(
+        &mut self,
+        path: SharedString,
+        origin: SharedString,
+        name: SharedString,
+        branch: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.agents_confirm = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (p, o, n, b) = (
+                path.to_string(),
+                origin.to_string(),
+                name.to_string(),
+                branch.to_string(),
+            );
+            let result: Result<(), String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let dirty = !orrery_core::git_ops::changes(&p)
+                        .map_err(|e| format!("can't inspect worktree: {e}"))?
+                        .is_empty();
+                    if dirty {
+                        return Err("the worktree has uncommitted changes".into());
+                    }
+                    // Unlink first so the branch is no longer checked out
+                    // anywhere (delete_branch refuses otherwise), then drop
+                    // the branch, the directory (ours, under the app data
+                    // dir), and the pairing row.
+                    orrery_core::git_ops::remove_worktree(&o, &n)?;
+                    orrery_core::git_ops::delete_branch(&o, &b)?;
+                    std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
+                    orrery_core::cache::remove_agent_worktree(&p)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                use crate::toast::ToastKind;
+                match result {
+                    Ok(()) => this.push_toast(
+                        ToastKind::Success,
+                        "Worktree discarded",
+                        Some(branch.clone()),
+                        cx,
+                    ),
+                    Err(e) => {
+                        this.push_toast(ToastKind::Error, "Discard failed", Some(e.into()), cx)
+                    }
+                };
+                if this.agents_review.as_ref() == Some(&path) {
+                    this.agents_review = None;
+                    this.agents_review_diff = None;
+                }
                 this.scan_agents(false, cx);
             });
         })
@@ -3668,6 +3991,9 @@ impl OrreryApp {
                 &self.agents,
                 self.view_filter.as_deref(),
                 self.agents_confirm.as_deref(),
+                self.agents_review
+                    .as_deref()
+                    .map(|p| (p, self.agents_review_diff.as_deref())),
                 t,
                 &cx.entity(),
             )

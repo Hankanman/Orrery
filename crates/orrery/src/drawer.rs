@@ -931,7 +931,7 @@ fn header(row: &Row, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
 }
 
 /// The owner/name slug if this repo is a usable GitHub remote, else `None`.
-fn github_slug(row: &Row) -> Option<SharedString> {
+pub(crate) fn github_slug(row: &Row) -> Option<SharedString> {
     (row.host.as_ref() == "github" && row.slug.as_ref() != "no remote").then(|| row.slug.clone())
 }
 

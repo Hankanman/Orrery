@@ -157,6 +157,12 @@ pub struct AppConfig {
     /// e.g. a review request. Layered under `notify_enabled`.
     #[serde(default = "default_true")]
     pub notify_attention: bool,
+    /// Notify when a dispatched agent session finishes with commits to review
+    /// (#185). Attention-tier rather than urgent, but the finish is the whole
+    /// point of a dispatch, so it defaults on; layered under `notify_enabled`
+    /// + `notify_attention` like the urgent model kinds.
+    #[serde(default = "default_true")]
+    pub notify_agent_finished: bool,
 }
 
 pub(crate) fn default_agent_dispatch_args() -> String {

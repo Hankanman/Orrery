@@ -141,6 +141,9 @@ fn main() {
                             agents_polling: false,
                             agents_confirm: None,
                             agents_confirm_gen: 0,
+                            agents_review: None,
+                            agents_review_diff: None,
+                            agents_pr_busy: Default::default(),
                             explore_cloning: Default::default(),
                             explore_errors: Default::default(),
                             settings: None,
@@ -183,6 +186,10 @@ fn main() {
                         this.enrich_hosts(cx);
                         this.refresh_ci(cx);
                         this.load_activity(cx);
+                        // Detect dispatched-agent sessions that ended while
+                        // Orrery was closed, and resume supervising live ones
+                        // (#185) — see `OrreryApp::agents_startup`.
+                        this.agents_startup(cx);
                     });
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();

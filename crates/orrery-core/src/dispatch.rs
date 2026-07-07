@@ -85,9 +85,63 @@ pub fn worktree_dest(repo_id: &str, worktree_name: &str) -> Option<PathBuf> {
     )
 }
 
+/// What one agents-poll observation means for a dispatched worktree's
+/// lifecycle, given the persisted state (see `cache::AgentWorktree`). Pure —
+/// the caller applies the matching cache write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTransition {
+    /// Nothing to record: never observed alive (dispatch may have failed to
+    /// launch, or the app never saw the session), or already marked finished.
+    None,
+    /// A session is alive — record the sighting.
+    SeenAlive,
+    /// A session is alive again in a worktree already marked finished — the
+    /// outcome is back in flight (e.g. "Resume"); clear the finished state.
+    Resumed,
+    /// A session that WAS observed alive is now gone — the finish event.
+    /// Fires exactly once: after the caller persists `finished_at`, later
+    /// polls fall into [`SessionTransition::None`]. Because `last_seen_alive`
+    /// is persisted, this also catches sessions that ended while Orrery was
+    /// closed (detected on the first poll of the next launch).
+    Finished,
+}
+
+/// Classify one poll observation: `alive` is whether an agent process is
+/// currently running inside the worktree; the other two are the persisted
+/// `AgentWorktree` fields.
+pub fn session_transition(
+    alive: bool,
+    last_seen_alive: i64,
+    finished_at: i64,
+) -> SessionTransition {
+    match (alive, last_seen_alive > 0, finished_at > 0) {
+        (true, _, true) => SessionTransition::Resumed,
+        (true, _, false) => SessionTransition::SeenAlive,
+        (false, true, false) => SessionTransition::Finished,
+        (false, _, _) => SessionTransition::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_transitions_cover_the_lifecycle() {
+        use SessionTransition::*;
+        // Never observed alive and not running now → nothing to record (a
+        // failed launch must not look like a finished session).
+        assert_eq!(session_transition(false, 0, 0), None);
+        // Running → record the sighting.
+        assert_eq!(session_transition(true, 0, 0), SeenAlive);
+        assert_eq!(session_transition(true, 100, 0), SeenAlive);
+        // Was alive, now gone, not yet marked → the finish event.
+        assert_eq!(session_transition(false, 100, 0), Finished);
+        // Already marked finished → no repeat finish event.
+        assert_eq!(session_transition(false, 100, 200), None);
+        // Alive again after a finish → resumed (clear the finished state).
+        assert_eq!(session_transition(true, 100, 200), Resumed);
+    }
 
     #[test]
     fn slugify_kebabs_and_caps() {

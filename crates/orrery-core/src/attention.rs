@@ -157,8 +157,16 @@ pub struct AgentFact {
     /// Display label for the agent program (e.g. "claude").
     pub program: String,
     /// True while the session is alive; false for a session the caller
-    /// observed finishing since its last poll.
+    /// observed finishing (dispatched-worktree outcome detection, #185).
     pub running: bool,
+    /// The `agent/…` branch a dispatched session works on, when the fact
+    /// comes from a dispatched worktree (None for plain detected sessions).
+    pub branch: Option<String>,
+    /// Commits ahead of the origin's default branch — the "work to review"
+    /// size for a finished dispatched session (0 for running sessions; the
+    /// caller only raises finished facts when there is work, so this is
+    /// nonzero whenever `running` is false).
+    pub commits: u32,
 }
 
 /// Score everything into one prioritized list. Pure: same inputs, same
@@ -258,11 +266,20 @@ pub fn compute(
         } else {
             (AttentionKind::AgentFinished, "finished")
         };
+        // A finished dispatched session carries its review size + branch so
+        // the item reads as a call to action ("review this"), not a log line.
+        let detail = a.branch.as_ref().map(|b| {
+            if a.commits > 0 {
+                format!("{} on {b}", count(a.commits, "commit", "commits"))
+            } else {
+                format!("on {b}")
+            }
+        });
         items.push(item(
             id_ref(repos, &a.repo_id),
             kind,
             format!("Agent {verb}: {}", a.program),
-            None,
+            detail,
         ));
     }
 
@@ -597,6 +614,8 @@ mod tests {
             repo_id: "/a".into(),
             program: "claude".into(),
             running,
+            branch: None,
+            commits: 0,
         };
         let items = compute(&repos, &[], &[], &[], &[fact(true), fact(false)]);
         assert_eq!(items.len(), 2);
@@ -604,9 +623,49 @@ mod tests {
         assert_eq!(items[0].kind, AttentionKind::AgentFinished);
         assert_eq!(items[0].severity, Severity::Attention);
         assert_eq!(items[0].summary, "Agent finished: claude");
+        assert_eq!(items[0].detail, None);
         assert_eq!(items[1].kind, AttentionKind::AgentRunning);
         assert_eq!(items[1].severity, Severity::Info);
         assert_eq!(items[1].summary, "Agent running: claude");
+    }
+
+    #[test]
+    fn finished_dispatch_carries_branch_and_commit_detail() {
+        let items = compute(
+            &[repo("/a")],
+            &[],
+            &[],
+            &[],
+            &[AgentFact {
+                repo_id: "/a".into(),
+                program: "claude".into(),
+                running: false,
+                branch: Some("agent/fix-x-ab12".into()),
+                commits: 3,
+            }],
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, AttentionKind::AgentFinished);
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("3 commits on agent/fix-x-ab12")
+        );
+
+        // A running dispatched session shows just the branch.
+        let items = compute(
+            &[repo("/a")],
+            &[],
+            &[],
+            &[],
+            &[AgentFact {
+                repo_id: "/a".into(),
+                program: "claude".into(),
+                running: true,
+                branch: Some("agent/fix-x-ab12".into()),
+                commits: 0,
+            }],
+        );
+        assert_eq!(items[0].detail.as_deref(), Some("on agent/fix-x-ab12"));
     }
 
     #[test]
@@ -620,6 +679,8 @@ mod tests {
                 repo_id: "/home/dev/mystery".into(),
                 program: "claude".into(),
                 running: true,
+                branch: None,
+                commits: 0,
             }],
         );
         assert_eq!(items[0].repo.name, "mystery");

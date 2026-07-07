@@ -82,6 +82,7 @@ impl Default for AppConfig {
             notify_review_requested: true,
             notify_ci_failure: true,
             notify_attention: true,
+            notify_agent_finished: true,
         }
     }
 }

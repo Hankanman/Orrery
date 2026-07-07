@@ -81,12 +81,53 @@ pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
              branch TEXT NOT NULL,
              worktree_name TEXT NOT NULL,
              prompt TEXT NOT NULL,
-             created_at INTEGER NOT NULL);",
+             created_at INTEGER NOT NULL,
+             last_seen_alive INTEGER NOT NULL DEFAULT 0,
+             finished_at INTEGER NOT NULL DEFAULT 0,
+             commits_ahead INTEGER NOT NULL DEFAULT 0,
+             pr_url TEXT NOT NULL DEFAULT '');",
     )?;
+    // Outcome columns added for #185 session-finish detection. Unlike
+    // host_cache/embeddings (disposable caches, dropped on a CACHE_SCHEMA
+    // bump), agent_worktrees holds durable worktree↔repo pairings that must
+    // survive schema evolution — so it grows via additive, idempotent ALTERs
+    // instead. Detection state is persisted (not kept on the app) so a session
+    // that finishes while Orrery is closed is still detected on the next
+    // launch: `last_seen_alive > 0` + no live process = finished.
+    for (col, ddl) in [
+        ("last_seen_alive", "INTEGER NOT NULL DEFAULT 0"),
+        ("finished_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("commits_ahead", "INTEGER NOT NULL DEFAULT 0"),
+        ("pr_url", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        add_column_if_missing(conn, "agent_worktrees", col, ddl)?;
+    }
     conn.execute_batch(HOST_CACHE_DDL)?;
     conn.execute_batch(EMBEDDINGS_DDL)?;
     conn.execute_batch(CI_CACHE_DDL)?;
     migrate(conn)
+}
+
+/// Idempotent `ALTER TABLE … ADD COLUMN` — the migration path for tables whose
+/// rows are durable state (can't be dropped and recreated on a schema bump).
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let existing: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .flatten()
+        .collect();
+    if !existing.iter().any(|c| c == column) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 /// Drop schema-sensitive cached payloads when CACHE_SCHEMA changes — today
@@ -591,20 +632,39 @@ pub struct AgentWorktree {
     pub prompt: String,
     /// Unix time of the dispatch.
     pub created_at: i64,
+    /// Unix time an agent process was last observed alive inside the worktree
+    /// (0 = never observed). Persisted so a session that ends while Orrery is
+    /// closed is still recognized as finished on the next launch.
+    pub last_seen_alive: i64,
+    /// Unix time the session was observed to have finished (0 = not finished).
+    /// Cleared when a session resumes in the worktree.
+    pub finished_at: i64,
+    /// Commits ahead of the origin repo's default branch, measured when the
+    /// session finished — the "has work to review" signal.
+    pub commits_ahead: u32,
+    /// URL of the PR opened from this worktree's branch ("" = none). Once set,
+    /// the finished state stops raising attention — the work has been handed
+    /// off to review.
+    pub pr_url: String,
 }
 
 fn record_agent_worktree_on(conn: &Connection, wt: &AgentWorktree) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO agent_worktrees
-         (worktree_path, repo_id, branch, worktree_name, prompt, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         (worktree_path, repo_id, branch, worktree_name, prompt, created_at,
+          last_seen_alive, finished_at, commits_ahead, pr_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             wt.worktree_path,
             wt.repo_id,
             wt.branch,
             wt.worktree_name,
             wt.prompt,
-            wt.created_at
+            wt.created_at,
+            wt.last_seen_alive,
+            wt.finished_at,
+            wt.commits_ahead,
+            wt.pr_url
         ],
     )?;
     Ok(())
@@ -612,7 +672,8 @@ fn record_agent_worktree_on(conn: &Connection, wt: &AgentWorktree) -> rusqlite::
 
 fn agent_worktrees_on(conn: &Connection) -> Vec<AgentWorktree> {
     let Ok(mut stmt) = conn.prepare(
-        "SELECT worktree_path, repo_id, branch, worktree_name, prompt, created_at
+        "SELECT worktree_path, repo_id, branch, worktree_name, prompt, created_at,
+                last_seen_alive, finished_at, commits_ahead, pr_url
          FROM agent_worktrees ORDER BY created_at DESC",
     ) else {
         return Vec::new();
@@ -625,12 +686,61 @@ fn agent_worktrees_on(conn: &Connection) -> Vec<AgentWorktree> {
             worktree_name: r.get(3)?,
             prompt: r.get(4)?,
             created_at: r.get(5)?,
+            last_seen_alive: r.get(6)?,
+            finished_at: r.get(7)?,
+            commits_ahead: r.get(8)?,
+            pr_url: r.get(9)?,
         })
     });
     match rows {
         Ok(iter) => iter.flatten().collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// Record a live-session sighting: bump `last_seen_alive` and clear any
+/// finished state (a session running again means the outcome is back in
+/// flight — e.g. the user hit "Resume").
+fn mark_agent_worktree_alive_on(
+    conn: &Connection,
+    worktree_path: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_worktrees
+         SET last_seen_alive = ?2, finished_at = 0, commits_ahead = 0
+         WHERE worktree_path = ?1",
+        rusqlite::params![worktree_path, now],
+    )?;
+    Ok(())
+}
+
+/// Mark a session finished, with the commits-ahead count measured at finish.
+fn mark_agent_worktree_finished_on(
+    conn: &Connection,
+    worktree_path: &str,
+    finished_at: i64,
+    commits_ahead: u32,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_worktrees SET finished_at = ?2, commits_ahead = ?3
+         WHERE worktree_path = ?1",
+        rusqlite::params![worktree_path, finished_at, commits_ahead],
+    )?;
+    Ok(())
+}
+
+/// Record the PR opened from this worktree's branch (clears its attention).
+fn set_agent_worktree_pr_on(
+    conn: &Connection,
+    worktree_path: &str,
+    pr_url: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_worktrees SET pr_url = ?2 WHERE worktree_path = ?1",
+        rusqlite::params![worktree_path, pr_url],
+    )?;
+    Ok(())
 }
 
 fn remove_agent_worktree_on(conn: &Connection, worktree_path: &str) -> rusqlite::Result<()> {
@@ -659,6 +769,29 @@ pub fn agent_worktrees() -> Vec<AgentWorktree> {
 pub fn remove_agent_worktree(worktree_path: &str) -> Result<(), String> {
     let conn = open()?;
     remove_agent_worktree_on(&conn, worktree_path).map_err(|e| e.to_string())
+}
+
+/// Record a live-session sighting (bumps `last_seen_alive`, clears finished).
+pub fn mark_agent_worktree_alive(worktree_path: &str, now: i64) -> Result<(), String> {
+    let conn = open()?;
+    mark_agent_worktree_alive_on(&conn, worktree_path, now).map_err(|e| e.to_string())
+}
+
+/// Mark a dispatched session finished with its commits-ahead count.
+pub fn mark_agent_worktree_finished(
+    worktree_path: &str,
+    finished_at: i64,
+    commits_ahead: u32,
+) -> Result<(), String> {
+    let conn = open()?;
+    mark_agent_worktree_finished_on(&conn, worktree_path, finished_at, commits_ahead)
+        .map_err(|e| e.to_string())
+}
+
+/// Record the PR opened from a dispatched worktree's branch.
+pub fn set_agent_worktree_pr(worktree_path: &str, pr_url: &str) -> Result<(), String> {
+    let conn = open()?;
+    set_agent_worktree_pr_on(&conn, worktree_path, pr_url).map_err(|e| e.to_string())
 }
 
 fn clear_ai_on(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
@@ -747,6 +880,10 @@ mod tests {
             worktree_name: "agent-x-1111".into(),
             prompt: "fix x".into(),
             created_at: 100,
+            last_seen_alive: 0,
+            finished_at: 0,
+            commits_ahead: 0,
+            pr_url: String::new(),
         };
         let b = AgentWorktree {
             worktree_path: "/data/worktrees/repo-agent-y-2222".into(),
@@ -755,6 +892,10 @@ mod tests {
             worktree_name: "agent-y-2222".into(),
             prompt: "do y".into(),
             created_at: 200,
+            last_seen_alive: 0,
+            finished_at: 0,
+            commits_ahead: 0,
+            pr_url: String::new(),
         };
         record_agent_worktree_on(&conn, &a).unwrap();
         record_agent_worktree_on(&conn, &b).unwrap();
@@ -777,6 +918,84 @@ mod tests {
         assert_eq!(agent_worktrees_on(&conn), vec![b]);
         // Removing an unknown path is a no-op, not an error.
         remove_agent_worktree_on(&conn, "/nope").unwrap();
+    }
+
+    #[test]
+    fn agent_worktree_outcome_lifecycle() {
+        let conn = mem();
+        let wt = AgentWorktree {
+            worktree_path: "/data/worktrees/repo-agent-x-1111".into(),
+            repo_id: "/dev/repo".into(),
+            branch: "agent/x-1111".into(),
+            worktree_name: "agent-x-1111".into(),
+            prompt: "fix x".into(),
+            created_at: 100,
+            last_seen_alive: 0,
+            finished_at: 0,
+            commits_ahead: 0,
+            pr_url: String::new(),
+        };
+        record_agent_worktree_on(&conn, &wt).unwrap();
+
+        // Sighting → last_seen_alive set, not finished.
+        mark_agent_worktree_alive_on(&conn, &wt.worktree_path, 150).unwrap();
+        let row = &agent_worktrees_on(&conn)[0];
+        assert_eq!((row.last_seen_alive, row.finished_at), (150, 0));
+
+        // Finish → finished_at + commits_ahead recorded.
+        mark_agent_worktree_finished_on(&conn, &wt.worktree_path, 300, 4).unwrap();
+        let row = &agent_worktrees_on(&conn)[0];
+        assert_eq!((row.finished_at, row.commits_ahead), (300, 4));
+
+        // Resume → finished state clears, sighting updates.
+        mark_agent_worktree_alive_on(&conn, &wt.worktree_path, 400).unwrap();
+        let row = &agent_worktrees_on(&conn)[0];
+        assert_eq!(
+            (row.last_seen_alive, row.finished_at, row.commits_ahead),
+            (400, 0, 0)
+        );
+
+        // Opened PR persists (and survives an alive-mark: hand-off is done).
+        set_agent_worktree_pr_on(&conn, &wt.worktree_path, "https://github.com/o/r/pull/1")
+            .unwrap();
+        mark_agent_worktree_alive_on(&conn, &wt.worktree_path, 500).unwrap();
+        let row = &agent_worktrees_on(&conn)[0];
+        assert_eq!(row.pr_url, "https://github.com/o/r/pull/1");
+
+        // Updates to an unknown path are no-ops, not errors.
+        mark_agent_worktree_alive_on(&conn, "/nope", 1).unwrap();
+        mark_agent_worktree_finished_on(&conn, "/nope", 1, 1).unwrap();
+        set_agent_worktree_pr_on(&conn, "/nope", "u").unwrap();
+    }
+
+    #[test]
+    fn agent_worktrees_migrates_pre_outcome_schema() {
+        // A database created before the outcome columns existed (#197's shape)
+        // must gain them via the additive ALTERs without losing rows.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_worktrees (
+                 worktree_path TEXT PRIMARY KEY,
+                 repo_id TEXT NOT NULL,
+                 branch TEXT NOT NULL,
+                 worktree_name TEXT NOT NULL,
+                 prompt TEXT NOT NULL,
+                 created_at INTEGER NOT NULL);
+             INSERT INTO agent_worktrees VALUES ('/wt', '/repo', 'agent/x', 'agent-x', 'p', 9);",
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        let rows = agent_worktrees_on(&conn);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].worktree_path, "/wt");
+        assert_eq!(rows[0].created_at, 9);
+        assert_eq!(rows[0].last_seen_alive, 0);
+        assert_eq!(rows[0].finished_at, 0);
+        assert_eq!(rows[0].commits_ahead, 0);
+        assert_eq!(rows[0].pr_url, "");
+        // Idempotent: a second init leaves the shape intact.
+        init(&conn).unwrap();
+        assert_eq!(agent_worktrees_on(&conn).len(), 1);
     }
 
     #[test]

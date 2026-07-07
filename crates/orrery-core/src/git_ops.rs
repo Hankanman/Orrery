@@ -731,6 +731,52 @@ fn diff_to_string(diff: &git2::Diff) -> String {
     buf
 }
 
+/// Unified diff of HEAD vs its merge base with `base` (a branch name) — the
+/// review view for a dispatched agent's branch: exactly the changes the branch
+/// would land, unaffected by base moving forward. `base` resolves to the local
+/// branch, falling back to `origin/<base>`. Works from a worktree path (its
+/// HEAD is the worktree's checked-out branch).
+pub fn branch_diff(path: &str, base: &str) -> Result<String, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let head = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map_err(|e| e.to_string())?;
+    let base_oid = repo
+        .find_branch(base, BranchType::Local)
+        .ok()
+        .and_then(|b| b.get().target())
+        .or_else(|| {
+            repo.find_reference(&format!("refs/remotes/origin/{base}"))
+                .ok()
+                .and_then(|r| r.target())
+        })
+        .ok_or_else(|| format!("no branch '{base}' to diff against"))?;
+    let merge_base = repo
+        .merge_base(head.id(), base_oid)
+        .map_err(|e| e.to_string())?;
+    let base_tree = repo
+        .find_commit(merge_base)
+        .and_then(|c| c.tree())
+        .map_err(|e| e.to_string())?;
+    let head_tree = head.tree().map_err(|e| e.to_string())?;
+    let diff = repo
+        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+        .map_err(|e| e.to_string())?;
+    Ok(diff_to_string(&diff))
+}
+
+/// Delete a local branch by name. Refused by libgit2 while the branch is
+/// checked out anywhere (HEAD of the repo or any worktree) — callers removing
+/// an agent worktree must unlink it first.
+pub fn delete_branch(path: &str, name: &str) -> Result<(), String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let mut branch = repo
+        .find_branch(name, BranchType::Local)
+        .map_err(|e| e.to_string())?;
+    branch.delete().map_err(|e| e.to_string())
+}
+
 /// Unified diff of the working tree + index vs HEAD (for the diff peek).
 pub fn working_diff(path: &str) -> Result<String, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
@@ -1710,6 +1756,61 @@ mod tests {
         // On the default branch itself, nothing is ahead.
         switch_branch(&path, &default).unwrap();
         assert!(commits_ahead_of(&path, &default, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn branch_diff_is_merge_base_scoped() {
+        let (_dir, path) = init_repo();
+        let default = {
+            let repo = Repository::open(&path).unwrap();
+            let default = repo.head().unwrap().shorthand().unwrap().to_string();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.branch("agent/x", &head, false).unwrap();
+            default
+        };
+        switch_branch(&path, "agent/x").unwrap();
+        commit_file(&path, "agent.txt", "agent work\n", "agent: work");
+
+        let diff = branch_diff(&path, &default).unwrap();
+        assert!(diff.contains("agent.txt"), "{diff}");
+        assert!(diff.contains("+agent work"), "{diff}");
+
+        // The base moving forward must not leak its changes into the branch's
+        // review diff (three-dot semantics via the merge base).
+        switch_branch(&path, &default).unwrap();
+        commit_file(&path, "base.txt", "base\n", "base: move");
+        switch_branch(&path, "agent/x").unwrap();
+        let diff = branch_diff(&path, &default).unwrap();
+        assert!(diff.contains("agent.txt"), "{diff}");
+        assert!(!diff.contains("base.txt"), "{diff}");
+
+        // An unknown base is an error, not an empty diff.
+        assert!(branch_diff(&path, "nope").is_err());
+    }
+
+    #[test]
+    fn delete_branch_refuses_checked_out_then_deletes() {
+        let (_dir, path) = init_repo();
+        let default = {
+            let repo = Repository::open(&path).unwrap();
+            let default = repo.head().unwrap().shorthand().unwrap().to_string();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.branch("agent/x", &head, false).unwrap();
+            default
+        };
+        switch_branch(&path, "agent/x").unwrap();
+        assert!(delete_branch(&path, "agent/x").is_err(), "checked out");
+        switch_branch(&path, &default).unwrap();
+        delete_branch(&path, "agent/x").unwrap();
+        assert!(
+            Repository::open(&path)
+                .unwrap()
+                .find_branch("agent/x", BranchType::Local)
+                .is_err(),
+            "branch should be gone"
+        );
+        // Deleting an unknown branch is an error, not a panic.
+        assert!(delete_branch(&path, "agent/x").is_err());
     }
 
     #[test]
