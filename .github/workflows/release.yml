@@ -30,6 +30,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
 
+      # Don't ship from a commit that fails the suite, even if the tag was
+      # pushed by hand.
+      - name: Test
+        run: cargo test --workspace
+
       - name: Build release binary
         run: cargo build --release -p orrery
 

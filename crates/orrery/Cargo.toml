@@ -3,7 +3,7 @@
 # that the legacy Tauri shell (src-tauri/) and React frontend are gone.
 [package]
 name = "orrery"
-version = "0.2.0"
+version = "2026.7.1"
 edition = "2024"
 publish = false
 description = "every repo in orbit — a Linux-native command center for your git repos"

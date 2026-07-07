@@ -4645,7 +4645,7 @@ dependencies = [
 
 [[package]]
 name = "orrery"
-version = "0.2.0"
+version = "2026.7.1"
 dependencies = [
  "async-channel 2.5.0",
  "base64",
@@ -4668,7 +4668,7 @@ dependencies = [
 
 [[package]]
 name = "orrery-core"
-version = "0.2.0"
+version = "2026.7.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -4689,7 +4689,7 @@ dependencies = [
 
 [[package]]
 name = "orrery-platform"
-version = "0.2.0"
+version = "2026.7.1"
 dependencies = [
  "ashpd",
  "dirs",
