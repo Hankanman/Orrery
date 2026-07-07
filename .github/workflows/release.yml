@@ -78,7 +78,8 @@ jobs:
           mkdir -p dist
           cp target/debian/*.deb dist/
           cp target/generate-rpm/*.rpm dist/
-          cp dist-appimage/*.AppImage dist/
+          # Orrery-* only: appimage.sh also downloads linuxdeploy into dist-appimage.
+          cp dist-appimage/Orrery-*.AppImage dist/
           ls -la dist
 
       - name: Publish release
