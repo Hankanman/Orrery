@@ -62,8 +62,10 @@ jobs:
           tar xzf "$work/llama.tar.gz" -C "$work"
           mkdir -p packaging/llama-runtime
           # Archive layout varies by tag; flatten llama-server + its shared libs.
-          find "$work" -type f -name 'llama-server' -exec cp {} packaging/llama-runtime/ \;
-          find "$work" -type f -name '*.so*' -exec cp {} packaging/llama-runtime/ \;
+          # Keep symlinks (-type l, cp -P): the sonames (libllama.so.0 → …) are
+          # same-directory relative links, and linuxdeploy fails without them.
+          find "$work" \( -type f -o -type l \) -name 'llama-server' -exec cp -P {} packaging/llama-runtime/ \;
+          find "$work" \( -type f -o -type l \) -name '*.so*' -exec cp -P {} packaging/llama-runtime/ \;
           chmod +x packaging/llama-runtime/llama-server
           rm -rf "$work"
           ls -la packaging/llama-runtime
