@@ -17,7 +17,7 @@ serde_json = "1"         # attention-snapshot dedupe
 zbus = "5"               # D-Bus: appearance portal + desktop notifications
 futures-util = "0.3"     # signal stream
 tokio = { version = "1", features = ["rt", "time"] }  # drive the poll interval (+ reqwest) off the UI thread
-notify-debouncer-mini = "0.4"                 # inotify live-watch (debounced)
+notify-debouncer-mini = "0.5"                 # inotify live-watch (debounced)
 # StatusNotifierItem tray (pure D-Bus, no GTK). async-io backend to match gpui's
 # zbus (its portal/accessibility connections); the tokio backend would force
 # every zbus connection in the process — including gpui's — through tokio and
