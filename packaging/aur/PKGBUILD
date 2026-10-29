@@ -1,14 +1,17 @@
 # Maintainer: Seb Burrell <sebburrell@outlook.com>
 pkgname=orrery-git
 _pkgname=orrery
-pkgver=0.2.0.r0.g0000000
+pkgver=2026.7.1.r0.g0000000
 pkgrel=1
 pkgdesc="every repo in orbit — a Linux-native command center for your git repos"
-arch=('x86_64' 'aarch64')
+arch=('x86_64')
 url="https://github.com/Hankanman/Orrery"
 license=('MIT')
-# Native GPUI app: GPU (Vulkan) rendering + Wayland/X11 + fontconfig. No webview.
-depends=('vulkan-icd-loader' 'fontconfig' 'libxkbcommon' 'hicolor-icon-theme')
+# Native GPUI app: GPU (Vulkan) rendering + Wayland/X11 + fontconfig, and
+# OpenSSL (libgit2 HTTPS). x86_64 only: that is the only arch built and tested.
+depends=('vulkan-icd-loader' 'fontconfig' 'libxkbcommon' 'openssl' 'hicolor-icon-theme')
+optdepends=('ripgrep: code search across your repos'
+            'ollama: local AI backend (summaries, semantic search)')
 makedepends=('git' 'rust' 'cargo' 'cmake' 'pkgconf' 'vulkan-headers')
 provides=('orrery')
 conflicts=('orrery')
