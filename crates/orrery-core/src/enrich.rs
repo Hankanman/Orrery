@@ -100,12 +100,13 @@ pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> usize {
         .collect::<Vec<_>>()
         .await;
 
-    let mut updated = 0;
-    for (domain, slug, info) in results.into_iter().flatten() {
-        cache::store_host_info(&domain, &slug, &info, now);
-        updated += 1;
+    let fetched: Vec<_> = results.into_iter().flatten().collect();
+    // One connection + one transaction for the whole batch.
+    if let Err(e) = cache::store_host_infos(&fetched, now) {
+        eprintln!("[enrich] failed to persist host info: {e}");
+        return 0;
     }
-    updated
+    fetched.len()
 }
 
 /// Refresh enrichment for the current cached repo snapshot, honoring the TTL.
