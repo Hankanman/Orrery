@@ -3,7 +3,8 @@
 //! always present on a dev machine. Results are capped so the palette stays
 //! responsive across hundreds of repos.
 
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
@@ -48,16 +49,34 @@ pub fn search(query: &str, paths: &[String], limit: usize) -> Result<Vec<SearchH
         }
     }
 
-    let out = cmd.output().map_err(|e| e.to_string())?;
-    // rg exits 1 when there are simply no matches — not an error for us.
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Stream rg's output and stop once we have `limit` hits, rather than
+    // waiting for it to search every repo in full.
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().ok_or("rg stdout unavailable")?;
+    let hits = collect_hits(BufReader::new(stdout), paths, limit);
+    // Done (or capped): stop rg if it's still running, then reap it. rg exits
+    // 1 when there are simply no matches — not an error for us, so the exit
+    // status is ignored.
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(hits)
+}
 
+/// Parse rg `--json` lines into hits, stopping after `limit`.
+fn collect_hits(mut reader: impl BufRead, paths: &[String], limit: usize) -> Vec<SearchHit> {
     let mut hits = Vec::new();
-    for line in stdout.lines() {
-        if hits.len() >= limit {
-            break;
+    let mut buf = Vec::new();
+    while hits.len() < limit {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) else {
             continue;
         };
         if v.get("type").and_then(|t| t.as_str()) != Some("match") {
@@ -95,7 +114,7 @@ pub fn search(query: &str, paths: &[String], limit: usize) -> Result<Vec<SearchH
             text,
         });
     }
-    Ok(hits)
+    hits
 }
 
 #[cfg(test)]
@@ -122,6 +141,41 @@ mod tests {
         assert_eq!(hits[0].repo, root);
         assert_eq!(hits[0].line, 2);
         assert!(hits[0].text.contains("needle"));
+    }
+
+    #[test]
+    fn stops_reading_at_the_limit() {
+        if which::which("rg").is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            fs::write(dir.path().join(format!("f{i}.txt")), "needle\n").unwrap();
+        }
+        let root = dir.path().to_string_lossy().into_owned();
+        assert_eq!(search("needle", &[root], 3).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn collect_hits_skips_non_match_lines_and_caps() {
+        let root = "/r".to_string();
+        let line = |n: u32| {
+            format!(
+                r#"{{"type":"match","data":{{"path":{{"text":"/r/a.txt"}},"lines":{{"text":"hit {n}\n"}},"line_number":{n}}}}}"#
+            )
+        };
+        let input = format!(
+            "{{\"type\":\"begin\"}}\n{}\nnot json\n{}\n{}\n",
+            line(1),
+            line(2),
+            line(3)
+        );
+        let hits = collect_hits(input.as_bytes(), std::slice::from_ref(&root), 2);
+        assert_eq!(hits.len(), 2);
+        assert_eq!((hits[0].line, hits[1].line), (1, 2));
+        assert_eq!(hits[0].file, "a.txt");
+        assert_eq!(hits[0].repo, root);
+        assert_eq!(hits[1].text, "hit 2");
     }
 
     #[test]
