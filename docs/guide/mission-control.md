@@ -22,16 +22,16 @@ The toolbar and chip row narrow the grid:
 - **Visibility** — `All` / `Public` / `Private`. Public means a non-private remote; private covers private remotes *and* local-only repos (which aren't published anywhere).
 - **Chips** — `Dirty`, `Ahead`, `Starred`, `Stale` (multi-select).
 - **Attention** — a quick toggle for repos that need it: uncommitted work, unpushed/behind commits, or no recent activity.
-- **Sort** — by Activity, Name, or Stars.
+- **Sort** — by Activity or Name. *(Planned: sort by Stars.)*
 - **Roots & Languages** — the sidebar filters by workspace root and detected language.
 
 The activity graph at the top summarises recent commit activity across the visible repos; toggle it from the toolbar.
 
-### Projects & saved views
+### Saved views & projects
 
-The sidebar adds two ways to carve up a large workspace:
+The sidebar helps carve up a large workspace:
 
-- **Projects** — tag repos to group related work, then filter the grid to one tag.
+- **Projects** *(planned, not yet implemented)* — tag repos to group related work, then filter the grid to one tag.
 - **Saved views** — capture the current filter/sort/visibility combination as a named preset and jump back to it in one click. Presets persist locally.
 
 ## Selecting repos

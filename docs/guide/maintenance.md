@@ -24,4 +24,4 @@ The **Dev Tools** view is an offline utility belt — the small conversions and 
 | **Convert** | Timestamp converter, Number base converter, Colour converter |
 | **Text** | Case converter, Regex tester |
 
-Everything runs locally in the webview — no input ever leaves your machine, which matters when you're pasting a token into a JWT decoder.
+Everything runs locally, in-process — no input ever leaves your machine, which matters when you're pasting a token into a JWT decoder.

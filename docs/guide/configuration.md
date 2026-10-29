@@ -11,7 +11,7 @@ The Settings screen switches sections from the sidebar:
 - **GitHub** — connect for higher rate limits and private-repo enrichment.
 - **AI & search** — inference backend (Ollama or the bundled llama.cpp engine), models, and the cache control (see [Local AI](./local-ai)).
 - **Notifications** — which background events raise a desktop notification (see [Notifications & tray](./notifications)).
-- **Motion** — a reduce-motion toggle that disables all UI animation.
+- **Motion** *(planned, not yet implemented)* — a reduce-motion toggle that disables all UI animation.
 
 ## Workspace roots
 

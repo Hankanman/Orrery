@@ -1,0 +1,13 @@
+# Explicit runtime requires for the .rpm, layered over
+# [package.metadata.generate-rpm] in crates/orrery/Cargo.toml via
+#   cargo generate-rpm -p orrery --metadata-overwrite packaging/rpm-requires.toml
+# cargo-generate-rpm's auto-req already adds soname requires from ldd; these name
+# the (Fedora) packages behind libraries the app needs at runtime: the Vulkan
+# loader (dlopened by GPUI, so ldd can't see it), xkbcommon, OpenSSL (libgit2
+# HTTPS) and fontconfig. Kept explicit so dnf pulls them in on minimal installs.
+# The table merges with the Cargo.toml one, so keep fontconfig listed in both.
+[requires]
+fontconfig = "*"
+vulkan-loader = "*"
+libxkbcommon = "*"
+openssl-libs = "*"
