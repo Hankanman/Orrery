@@ -34,13 +34,17 @@ if [[ -f packaging/llama-runtime/llama-server ]]; then
   echo "  bundled llama-runtime"
 fi
 
-# Fetch linuxdeploy (cached between runs if present).
+# Fetch a pinned linuxdeploy release (not `continuous`, which changes under us)
+# and verify it. Bump LINUXDEPLOY_TAG and LINUXDEPLOY_SHA256 together; the
+# digest is on the release page (`gh api
+# repos/linuxdeploy/linuxdeploy/releases/tags/<tag> --jq '.assets[] | [.name, .digest] | @tsv'`).
+LINUXDEPLOY_TAG="1-alpha-20251107-1"
+LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
 LD="$OUT/linuxdeploy-x86_64.AppImage"
-if [[ ! -x "$LD" ]]; then
-  curl -fsSL -o "$LD" \
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
-  chmod +x "$LD"
-fi
+curl -fsSL -o "$LD" \
+  "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_TAG}/linuxdeploy-x86_64.AppImage"
+echo "${LINUXDEPLOY_SHA256}  $LD" | sha256sum -c -
+chmod +x "$LD"
 
 # Extract-and-run avoids needing a working FUSE mount in CI containers. NO_STRIP
 # because the bundled strip chokes on the .relr.dyn section modern linkers emit.

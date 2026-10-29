@@ -1,0 +1,109 @@
+name: Package
+
+# Reusable: builds the release binary and every Linux package (.deb, .rpm,
+# AppImage + bundled llama runtime), writes SHA256SUMS, and uploads them as the
+# `dist` workflow artifact. Never publishes anything.
+#
+# Called by release.yml (on a tag, then published) and by ci.yml (on every PR and
+# push to main, as a dry run), so packaging bugs like #204 / #205 fail on the PR
+# instead of at tag time.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2026.7.1) that must match the crate version; empty to only check the crates agree."
+        type: string
+        default: ""
+      retention-days:
+        description: "How long to keep the dist artifact."
+        type: number
+        default: 3
+
+permissions:
+  contents: read
+
+env:
+  # Pinned packaging tools. Bump deliberately (and check the release still builds).
+  CARGO_DEB_VERSION: "3.8.0"
+  CARGO_GENERATE_RPM_VERSION: "0.21.0"
+
+jobs:
+  package:
+    name: Build packages (Linux x86_64)
+    # 22.04 rather than ubuntu-latest: the binary (and the .deb's $auto depends)
+    # inherit the build host's glibc as their floor, so build on the oldest
+    # supported runner to run on more distros.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: bash packaging/check-version.sh "$TAG"
+
+      # GPUI build deps (Vulkan/Wayland/xkbcommon/fontconfig) + tools the
+      # packagers need (file for cargo-deb, desktop-file-utils + fuse for the
+      # AppImage).
+      - name: Install build & packaging deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvulkan-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libfontconfig1-dev libssl-dev \
+            build-essential cmake pkg-config \
+            file desktop-file-utils libfuse2
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: package
+          # Only main writes the (large) release cache; PRs and tags restore it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build release binary
+        run: cargo build --release --locked -p orrery
+
+      - name: Install packaging tools
+        run: |
+          cargo install --locked \
+            "cargo-deb@${CARGO_DEB_VERSION}" \
+            "cargo-generate-rpm@${CARGO_GENERATE_RPM_VERSION}"
+
+      - name: Build .deb
+        run: cargo deb -p orrery --no-build
+
+      - name: Build .rpm
+        run: cargo generate-rpm -p crates/orrery --metadata-overwrite packaging/rpm-requires.toml
+
+      # Pinned + checksum-verified llama.cpp build for the AppImage only; deb/rpm
+      # stay lean (Ollama / user-installed llama). Bump in packaging/fetch-llama.sh.
+      - name: Fetch llama-server runtime (AppImage only)
+        run: bash packaging/fetch-llama.sh
+
+      - name: Build AppImage
+        run: bash packaging/appimage.sh
+
+      - name: Collect artifacts + SHA256SUMS
+        run: bash packaging/collect-artifacts.sh
+
+      - name: Inspect packages
+        run: |
+          set -euo pipefail
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+          # The AppImage must carry the llama runtime with its soname links intact.
+          appimage="$(realpath dist/Orrery-*.AppImage)"
+          cd "$(mktemp -d)"
+          "$appimage" --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/orrery
+          test -x squashfs-root/usr/lib/orrery/llama-runtime/llama-server
+          test -z "$(find squashfs-root/usr/lib/orrery/llama-runtime -xtype l)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
