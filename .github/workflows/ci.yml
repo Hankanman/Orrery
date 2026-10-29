@@ -16,7 +16,9 @@ permissions:
 
 jobs:
   rust:
-    name: Rust (fmt + build + clippy + test)
+    # Keep this name stable: the `main` ruleset requires a check with exactly
+    # this context, so renaming it silently blocks every PR.
+    name: Rust (fmt + clippy + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
