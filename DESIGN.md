@@ -81,10 +81,15 @@ Match by parsing the **remote URL host** → route to the right provider. The ca
 
 ## Roadmap
 
-- **Phase 1 — Local-first grid (current).** Config · scanner (depth + ignore globs, worktree-aware) · git metadata · dark dense grid · sort/filter/search · command palette · IDE/agent launcher · heuristic language/type/activity. Zero external deps, usable daily.
-- **Phase 2 — Multi-host sync.** `GitForge` (GitHub + GitLab/self-hosted), device-flow auth, stars/topics/releases/issues on cards, offline cache.
-- **Phase 3 — Local AI summaries.** Bundled llama.cpp, per-repo "what is this / recent activity" blurbs.
-- **Phase 4 — Starred / followed browser.** Separate view for discovering starred + followed repos across hosts.
+The original four phases have all shipped; the native GPUI rewrite replaced the
+Tauri/React shell along the way.
+
+- **Phase 1 — Local-first grid (shipped).** Config · scanner (depth + ignore globs, worktree-aware) · git metadata · dark dense grid · sort/filter/search · command palette · IDE/agent launcher · heuristic language/type/activity.
+- **Phase 2 — Multi-host sync (shipped).** `GitForge` (GitHub + GitLab/self-hosted) enrichment, GitHub device-flow auth, stars/topics/releases/issues on cards, offline cache.
+- **Phase 3 — Local AI (shipped).** Ollama or a bundled llama.cpp engine (AppImage); repo summaries, commit messages, changelogs, briefing, Ollama-backed semantic search.
+- **Phase 4 — Starred / followed browser (shipped).** Inbox / Feed / Explore views (GitHub).
+- **Since then (shipped).** Native GPUI rewrite · inotify live-watch · tray + notifications · attention engine (one ranked "needs you now" list behind badges, tray and notifications) · central CI pass · fleet bulk actions · Agents view (`/proc` session detection, dispatched worktrees, outcome detection) · hunk-level staging + commit composer · Cleanup and Dev Tools views.
+- **Planned.** GitLab in Inbox / Feed / CI / notifications (enrichment only today) · project tags · light mode · Gitea / Codeberg / Bitbucket forges.
 
 ## Settled defaults
 
@@ -93,7 +98,7 @@ Match by parsing the **remote URL host** → route to the right provider. The ca
 - Configurable scan **depth** (default 3) and **ignore globs** (`node_modules`, `.cache`, `vendor`, `target`, …).
 - Support **multiple root directories**.
 - **Worktree-aware** — surface worktrees under their parent repo, not as duplicates.
-- Manual **refresh** for MVP; `inotify` live-watch is a Phase 1.5 addition.
+- `inotify` **live-watch** (targeted: roots, repo roots and `.git` dirs, debounced) triggers a rescan; manual **refresh** stays available.
 
 **Config & data (XDG)**
 - Config: `~/.config/orrery/config.toml`

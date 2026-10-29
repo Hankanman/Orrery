@@ -7,18 +7,21 @@ Install a packaged build, or build from source. Both are covered below.
 Grab the latest artifact for your distro from the [releases page](https://github.com/Hankanman/Orrery/releases):
 
 ```sh
+# Optional: verify the download against the release's SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+
 # AppImage — portable, no install
-chmod +x Orrery_*_amd64.AppImage
-./Orrery_*_amd64.AppImage
+chmod +x Orrery-x86_64.AppImage
+./Orrery-x86_64.AppImage
 
 # Debian / Ubuntu
-sudo apt install ./Orrery_*_amd64.deb
+sudo apt install ./orrery_*_amd64.deb
 
-# Fedora / RHEL
-sudo dnf install ./Orrery-*.x86_64.rpm
+# Fedora
+sudo dnf install ./orrery-*.x86_64.rpm
 ```
 
-Release builds ship a bundled `llama.cpp` engine, so the [local-AI](./local-ai) features work out of the box once you download a model — no separate install required.
+The **AppImage** bundles a `llama.cpp` engine, so the [local-AI](./local-ai) features work out of the box once you download a model. The `.deb` and `.rpm` don't; use Ollama or a `llama-server` on your `PATH` (see [Local AI](./local-ai)). Code search needs [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) installed.
 
 ## Prerequisites
 
@@ -68,12 +71,17 @@ On first launch, open **Settings → Workspace roots** and point Orrery at the d
 Tagged releases (`v*`) build the bundles in CI. To produce them locally:
 
 ```sh
-cargo build --release -p orrery
-cargo install cargo-deb cargo-generate-rpm
+cargo build --release --locked -p orrery
+cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.0
 cargo deb -p orrery --no-build          # → target/debian/*.deb
-cargo generate-rpm -p crates/orrery     # → target/generate-rpm/*.rpm
-bash packaging/appimage.sh              # → dist-appimage/*.AppImage (needs linuxdeploy)
+cargo generate-rpm -p crates/orrery \
+  --metadata-overwrite packaging/rpm-requires.toml   # → target/generate-rpm/*.rpm
+bash packaging/fetch-llama.sh           # optional: bundle llama-server in the AppImage
+bash packaging/appimage.sh              # → dist-appimage/Orrery-x86_64.AppImage (fetches pinned linuxdeploy)
+bash packaging/collect-artifacts.sh     # → dist/ + SHA256SUMS
 ```
+
+CI runs this same sequence as a dry run on every pull request (`.github/workflows/package.yml`), so packaging breakage shows up before a tag.
 
 ## Useful commands
 

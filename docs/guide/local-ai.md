@@ -15,7 +15,7 @@ Orrery's AI features run entirely **on-device** — nothing leaves your machine.
 
 | | **Ollama** | **llama.cpp (bundled)** |
 |---|---|---|
-| Setup | Install Ollama separately | Ships with release builds — download a model |
+| Setup | Install Ollama separately | Bundled in the AppImage — download a model |
 | Models | Any Ollama model | A GGUF you download in Settings |
 | Embeddings / semantic search | ✅ | — (generation only) |
 | Best for | Existing Ollama users, semantic search | Zero-dependency, out-of-the-box generation |
@@ -42,13 +42,13 @@ A small model like `qwen3:0.6b` is plenty for the short summaries Orrery generat
 
 ## Setup — llama.cpp (bundled)
 
-Release builds bundle a local `llama-server` engine, so there's nothing to install separately.
+The **AppImage** bundles a local `llama-server` engine, so there's nothing to install separately. The `.deb`, `.rpm` and AUR packages stay lean and don't ship one — install [llama.cpp](https://github.com/ggml-org/llama.cpp) yourself (so `llama-server` is on your `PATH`) or use the Ollama backend.
 
 1. In **Settings → AI & search**, choose the **llama.cpp** backend.
 2. Click **Download model** to fetch a small default GGUF (≈400 MB) into `~/.local/share/orrery/models/`. You can also point it at any GGUF URL.
 3. Enable AI and generate a summary — the engine starts on demand and shuts down with the app.
 
-The engine binary is discovered in this order: an explicit path you set in Settings, the bundled copy unpacked into `~/.local/share/orrery/bin/`, then `llama-server` on your `PATH`. If you build from source rather than installing a release, supply a [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` by any of those routes.
+The engine binary is discovered in this order: an explicit path you set in Settings, then `~/.local/share/orrery/bin/`, then `llama-server` on your `PATH`. A bundled runtime lives at `<prefix>/lib/orrery/llama-runtime/`, resolved relative to the installed binary (inside the AppImage, `usr/lib/orrery/llama-runtime/`); on first use Orrery copies it into `~/.local/share/orrery/bin/` so the same lookup finds it, even from the AppImage's read-only mount. If you build from source or install the deb/rpm, supply a `llama-server` by any of those routes.
 
 ::: tip Generation only
 The llama.cpp backend serves text generation. Embeddings — and therefore semantic search — stay on the Ollama backend, so that one feature is hidden while llama.cpp is selected.
