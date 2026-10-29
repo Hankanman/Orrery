@@ -20,7 +20,7 @@ globset = "0.4"                                           # ignore-glob matching
 toml = "1"                                                # config file
 dirs = "6"                                                # XDG config/data paths
 which = "8"                                               # detect IDE/terminal on PATH
-rusqlite = { version = "0.32", features = ["bundled"] }   # cache (SQLite bundled)
+rusqlite = { version = "0.40", features = ["bundled"] }   # cache (SQLite bundled)
 
 # Git host providers + AI HTTP.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
