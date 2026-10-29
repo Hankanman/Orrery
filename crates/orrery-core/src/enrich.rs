@@ -41,18 +41,33 @@ type Job = (Host, String, String);
 /// Pure (no I/O): `fresh` comes from [`cache::fresh_host_keys`], empty when
 /// forcing. Unit-tested below.
 fn build_jobs(repos: &[Repo], fresh: &HashSet<(String, String)>) -> Vec<Job> {
+    stale_remotes(repos, fresh, |r| r.host.is_some())
+        .into_iter()
+        .filter_map(|(r, domain, slug)| Some((r.host?, domain, slug)))
+        .collect()
+}
+
+/// The shared work-list core of the enrich and CI passes: repos accepted by
+/// `keep` that have a slug, keyed `(remote domain, slug)` (empty domain when
+/// unparsed), minus keys in `fresh`, deduped so each remote appears once —
+/// the first repo for a key wins. Returns `(repo, domain, slug)`.
+pub(crate) fn stale_remotes<'a>(
+    repos: &'a [Repo],
+    fresh: &HashSet<(String, String)>,
+    keep: impl Fn(&Repo) -> bool,
+) -> Vec<(&'a Repo, String, String)> {
     let mut seen = HashSet::new();
     repos
         .iter()
+        .filter(|r| keep(r))
         .filter_map(|r| {
-            let host = r.host?;
             let slug = r.slug.clone()?;
             let domain = r.remote_host.clone().unwrap_or_default();
             let key = (domain.clone(), slug.clone());
             if fresh.contains(&key) || !seen.insert(key) {
                 return None;
             }
-            Some((host, domain, slug))
+            Some((r, domain, slug))
         })
         .collect()
 }
@@ -65,8 +80,9 @@ fn build_jobs(repos: &[Repo], fresh: &HashSet<(String, String)>) -> Vec<Job> {
 /// `force` ignores the TTL and re-fetches every repo (the manual "Fetch all").
 pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> usize {
     let cfg = config::load();
-    let github = oauth::github_token();
-    let gitlab = oauth::gitlab_token();
+    // Resolved once per pass (each may spawn a CLI), off the async workers.
+    let (github, gitlab) =
+        futures_util::future::join(oauth::github_token_async(), oauth::gitlab_token_async()).await;
     let fresh = if force {
         HashSet::new()
     } else {
@@ -100,12 +116,13 @@ pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> usize {
         .collect::<Vec<_>>()
         .await;
 
-    let mut updated = 0;
-    for (domain, slug, info) in results.into_iter().flatten() {
-        cache::store_host_info(&domain, &slug, &info, now);
-        updated += 1;
+    let fetched: Vec<_> = results.into_iter().flatten().collect();
+    // One connection + one transaction for the whole batch.
+    if let Err(e) = cache::store_host_infos(&fetched, now) {
+        eprintln!("[enrich] failed to persist host info: {e}");
+        return 0;
     }
-    updated
+    fetched.len()
 }
 
 /// Refresh enrichment for the current cached repo snapshot, honoring the TTL.
@@ -122,12 +139,12 @@ pub async fn refresh_cached_all(now: i64) -> usize {
     refresh(&repos, now, true).await
 }
 
+/// Repo fixtures shared by the enrich and CI pass tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{Activity, GitStatus};
+pub(crate) mod test_support {
+    use crate::model::{Activity, GitStatus, Host, Repo};
 
-    fn sample(id: &str, host: Host, domain: &str, slug: &str) -> Repo {
+    pub(crate) fn sample(id: &str, host: Host, domain: &str, slug: &str) -> Repo {
         Repo {
             id: id.to_string(),
             display_name: "Test".into(),
@@ -150,6 +167,12 @@ mod tests {
             ai_summary: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::sample;
+    use super::*;
 
     fn key(domain: &str, slug: &str) -> (String, String) {
         (domain.into(), slug.into())

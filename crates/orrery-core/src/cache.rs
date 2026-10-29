@@ -1,15 +1,19 @@
 //! SQLite-backed cache (`~/.local/share/orrery/cache.sqlite`): persists user
 //! favorites and a snapshot of scanned repos so the grid paints instantly on
-//! launch and survives offline. Connections are opened per call — these are
-//! low-frequency operations and SQLite handles the locking.
+//! launch and survives offline. Connections are opened per call (cheap: the
+//! schema init/migrate runs once per process, see [`open`]); the database is
+//! in WAL mode with a busy timeout so concurrent background writers wait
+//! rather than fail with "database is locked".
 //!
 //! The `*_on(conn)` helpers take a connection so the logic is unit-testable
 //! against an in-memory database (see the tests module).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Row, Transaction, TransactionBehavior};
 
 use crate::model::{HostInfo, Repo};
 
@@ -68,7 +72,20 @@ const CI_CACHE_DDL: &str = "CREATE TABLE IF NOT EXISTS ci_cache (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (host, slug));";
 
+/// Create/upgrade the schema. Runs in one `BEGIN IMMEDIATE` transaction so two
+/// first-launch connections (two processes, or two threads before the
+/// per-process [`open`] guard) can't interleave the `PRAGMA table_info` probe
+/// and the `ALTER TABLE` and fail with "duplicate column": the second waits
+/// for the write lock, then sees the column already there.
 pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
+    // `new_unchecked` because we only hold `&Connection`; nothing else is in a
+    // transaction on this connection at this point. Drop rolls back on error.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    init_schema(&tx)?;
+    tx.commit()
+}
+
+fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS favorites (id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -161,17 +178,56 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Open (and initialize) the on-disk cache. `pub(crate)` so `crate::semantic`'s
-/// public wrappers can follow the same open-per-call pattern for the
-/// `embeddings` table without cache.rs owning its row logic.
+/// Database paths whose schema this process has already initialized, so
+/// [`open`] runs [`init`] once per process rather than on every call.
+static INITIALIZED: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// How long a connection waits on another writer's lock before erroring.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Open the on-disk cache, initializing/migrating the schema on the first open
+/// of `path` in this process. `pub(crate)` so `crate::semantic`'s public
+/// wrappers can follow the same open-per-call pattern for the `embeddings`
+/// table without cache.rs owning its row logic.
 pub(crate) fn open() -> Result<Connection, String> {
     let path = db_path().ok_or("no data directory")?;
+    open_at(&path).map_err(|e| e.to_string())
+}
+
+fn open_at(path: &std::path::Path) -> Result<Connection, Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-    init(&conn).map_err(|e| e.to_string())?;
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    // Held across init so concurrent first opens in this process serialize;
+    // a failed init isn't recorded, so the next open retries it.
+    let mut done = INITIALIZED.lock().unwrap_or_else(|e| e.into_inner());
+    if !done.contains(path) {
+        // WAL is persistent in the file and can't be switched inside a
+        // transaction, so set it here, before init's transaction.
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+        init(&conn)?;
+        done.insert(path.to_path_buf());
+    }
     Ok(conn)
+}
+
+/// Run `f` on a fresh cache connection, or return `default` if the cache can't
+/// be opened — the shape of every infallible public wrapper below.
+fn with_conn<T>(default: T, f: impl FnOnce(&Connection) -> T) -> T {
+    match open() {
+        Ok(conn) => f(&conn),
+        Err(_) => default,
+    }
+}
+
+/// Run a fallible `f` on a fresh cache connection, stringifying any error —
+/// the shape of every `Result`-returning public wrapper below.
+fn try_with_conn<T>(f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T, String> {
+    let conn = open()?;
+    f(&conn).map_err(|e| e.to_string())
 }
 
 fn favorites_on(conn: &Connection) -> HashSet<String> {
@@ -237,16 +293,12 @@ fn load_repos_on(conn: &Connection) -> Vec<Repo> {
 
 /// The set of repo ids the user has favorited.
 pub fn favorites() -> HashSet<String> {
-    match open() {
-        Ok(conn) => favorites_on(&conn),
-        Err(_) => HashSet::new(),
-    }
+    with_conn(HashSet::new(), favorites_on)
 }
 
 /// Toggle a repo's favorite flag, returning the new state.
 pub fn set_favorite(id: &str, favorite: bool) -> Result<bool, String> {
-    let conn = open()?;
-    set_favorite_on(&conn, id, favorite).map_err(|e| e.to_string())?;
+    try_with_conn(|c| set_favorite_on(c, id, favorite))?;
     Ok(favorite)
 }
 
@@ -258,81 +310,71 @@ pub fn store_repos(repos: &[Repo]) -> Result<(), String> {
 
 /// Load the cached repo snapshot (for instant paint before a fresh scan).
 pub fn load_repos() -> Vec<Repo> {
-    match open() {
-        Ok(conn) => load_repos_on(&conn),
+    with_conn(Vec::new(), load_repos_on)
+}
+
+/// Run `sql` — whose first two columns are (host, slug) — and pair each row's
+/// key with the value `value` reads from the remaining columns. Unreadable
+/// rows are skipped: it's a cache. Shared by the host- and CI-cache readers,
+/// which are both keyed (host domain, slug) per the #159 lesson.
+fn keyed_rows_on<T>(
+    conn: &Connection,
+    sql: &str,
+    value: impl Fn(&Row) -> rusqlite::Result<T>,
+) -> Vec<((String, String), T)> {
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+            value(row)?,
+        ))
+    });
+    match rows {
+        Ok(iter) => iter.flatten().collect(),
         Err(_) => Vec::new(),
     }
 }
 
-/// Cached host enrichment for a (host domain, slug) pair, if newer than
-/// `max_age_secs`.
-pub fn cached_host_info(host: &str, slug: &str, max_age_secs: i64, now: i64) -> Option<HostInfo> {
-    let conn = open().ok()?;
-    let mut stmt = conn
-        .prepare("SELECT data, fetched_at FROM host_cache WHERE host = ?1 AND slug = ?2")
-        .ok()?;
-    let (json, fetched_at): (String, i64) = stmt
-        .query_row([host, slug], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()?;
-    if now.saturating_sub(fetched_at) > max_age_secs {
-        return None;
-    }
-    serde_json::from_str(&json).ok()
+/// Keys from `sql` (selecting host, slug, timestamp) no older than `max_age_secs`.
+fn fresh_keys_on(
+    conn: &Connection,
+    sql: &str,
+    max_age_secs: i64,
+    now: i64,
+) -> HashSet<(String, String)> {
+    keyed_rows_on(conn, sql, |row| row.get::<_, i64>(2))
+        .into_iter()
+        .filter(|(_, at)| now.saturating_sub(*at) <= max_age_secs)
+        .map(|(key, _)| key)
+        .collect()
 }
 
 fn fresh_host_keys_on(conn: &Connection, max_age_secs: i64, now: i64) -> HashSet<(String, String)> {
-    let Ok(mut stmt) = conn.prepare("SELECT host, slug, fetched_at FROM host_cache") else {
-        return HashSet::new();
-    };
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    });
-    match rows {
-        Ok(iter) => iter
-            .flatten()
-            .filter(|(_, _, fetched_at)| now.saturating_sub(*fetched_at) <= max_age_secs)
-            .map(|(host, slug, _)| (host, slug))
-            .collect(),
-        Err(_) => HashSet::new(),
-    }
+    fresh_keys_on(
+        conn,
+        "SELECT host, slug, fetched_at FROM host_cache",
+        max_age_secs,
+        now,
+    )
 }
 
 /// (host domain, slug) pairs whose cached host enrichment is still within
 /// `max_age_secs` — the enrich pass skips these so a rescan within the TTL
-/// costs no host-API calls. One query, unlike calling [`cached_host_info`]
-/// per repo. Keyed per host so the same slug on two hosts is tracked
-/// independently.
+/// costs no host-API calls. One query for the whole fleet. Keyed per host so
+/// the same slug on two hosts is tracked independently.
 pub fn fresh_host_keys(max_age_secs: i64, now: i64) -> HashSet<(String, String)> {
-    match open() {
-        Ok(conn) => fresh_host_keys_on(&conn, max_age_secs, now),
-        Err(_) => HashSet::new(),
-    }
+    with_conn(HashSet::new(), |c| fresh_host_keys_on(c, max_age_secs, now))
 }
 
 fn all_host_info_on(conn: &Connection) -> HashMap<(String, String), HostInfo> {
-    let mut map = HashMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT host, slug, data FROM host_cache") else {
-        return map;
-    };
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    });
-    if let Ok(rows) = rows {
-        for (host, slug, json) in rows.flatten() {
-            if let Ok(info) = serde_json::from_str::<HostInfo>(&json) {
-                map.insert((host, slug), info);
-            }
-        }
-    }
-    map
+    keyed_rows_on(conn, "SELECT host, slug, data FROM host_cache", |row| {
+        row.get::<_, String>(2)
+    })
+    .into_iter()
+    .filter_map(|(key, json)| Some((key, serde_json::from_str::<HostInfo>(&json).ok()?)))
+    .collect()
 }
 
 /// Overlay persisted host enrichment onto repos (by remote host domain + slug,
@@ -361,9 +403,7 @@ fn apply_host_info_on(conn: &Connection, repos: &mut [Repo]) {
 
 /// Rehydrate `private`/`stars`/etc. on a repo snapshot from the host cache.
 pub fn apply_host_info(repos: &mut [Repo]) {
-    if let Ok(conn) = open() {
-        apply_host_info_on(&conn, repos);
-    }
+    with_conn((), |c| apply_host_info_on(c, repos));
 }
 
 fn store_host_info_on(conn: &Connection, host: &str, slug: &str, info: &HostInfo, now: i64) {
@@ -375,11 +415,40 @@ fn store_host_info_on(conn: &Connection, host: &str, slug: &str, info: &HostInfo
     }
 }
 
-/// Persist host enrichment for a (host domain, slug) pair.
+/// Persist host enrichment for one (host domain, slug) pair. For a batch (the
+/// enrich pass) prefer [`store_host_infos`]: one connection, one transaction.
 pub fn store_host_info(host: &str, slug: &str, info: &HostInfo, now: i64) {
-    if let Ok(conn) = open() {
-        store_host_info_on(&conn, host, slug, info, now);
+    with_conn((), |c| store_host_info_on(c, host, slug, info, now));
+}
+
+/// Persist a batch of (host domain, slug, info) enrichment results in a single
+/// transaction, all stamped `now`. Rows that fail to serialize are skipped.
+fn store_host_infos_on(
+    conn: &Connection,
+    entries: &[(String, String, HostInfo)],
+    now: i64,
+) -> rusqlite::Result<()> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO host_cache (host, slug, data, fetched_at) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (host, slug, info) in entries {
+            if let Ok(json) = serde_json::to_string(info) {
+                stmt.execute(rusqlite::params![host, slug, json, now])?;
+            }
+        }
     }
+    tx.commit()
+}
+
+/// Persist a batch of host enrichment results — one connection and one
+/// transaction instead of one per repo.
+pub fn store_host_infos(entries: &[(String, String, HostInfo)], now: i64) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    try_with_conn(|c| store_host_infos_on(c, entries, now))
 }
 
 /// One cached CI result: the shared four-state vocabulary from `inbox`
@@ -411,67 +480,41 @@ pub(crate) fn fresh_ci_keys_on(
     max_age_secs: i64,
     now: i64,
 ) -> HashSet<(String, String)> {
-    let Ok(mut stmt) = conn.prepare("SELECT host, slug, updated_at FROM ci_cache") else {
-        return HashSet::new();
-    };
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    });
-    match rows {
-        Ok(iter) => iter
-            .flatten()
-            .filter(|(_, _, at)| now.saturating_sub(*at) <= max_age_secs)
-            .map(|(host, slug, _)| (host, slug))
-            .collect(),
-        Err(_) => HashSet::new(),
-    }
+    fresh_keys_on(
+        conn,
+        "SELECT host, slug, updated_at FROM ci_cache",
+        max_age_secs,
+        now,
+    )
 }
 
 /// (host domain, slug) pairs whose cached CI state is still within
 /// `max_age_secs` — the CI pass skips these (the `fresh_host_keys` pattern).
 pub fn fresh_ci_keys(max_age_secs: i64, now: i64) -> HashSet<(String, String)> {
-    match open() {
-        Ok(conn) => fresh_ci_keys_on(&conn, max_age_secs, now),
-        Err(_) => HashSet::new(),
-    }
+    with_conn(HashSet::new(), |c| fresh_ci_keys_on(c, max_age_secs, now))
 }
 
 pub(crate) fn all_ci_states_on(conn: &Connection) -> HashMap<(String, String), CiEntry> {
-    let mut map = HashMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT host, slug, state, url, updated_at FROM ci_cache")
-    else {
-        return map;
-    };
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-            CiEntry {
+    keyed_rows_on(
+        conn,
+        "SELECT host, slug, state, url, updated_at FROM ci_cache",
+        |row| {
+            Ok(CiEntry {
                 state: row.get(2)?,
                 url: row.get(3)?,
                 updated_at: row.get(4)?,
-            },
-        ))
-    });
-    if let Ok(rows) = rows {
-        for (key, entry) in rows.flatten() {
-            map.insert(key, entry);
-        }
-    }
-    map
+            })
+        },
+    )
+    .into_iter()
+    .collect()
 }
 
 /// Every cached CI state, keyed (host domain, slug) — the app's `CiFact`
 /// source and the drawer's Overview CI line. One query; stale entries are
 /// included (last known state beats no state — the pass refreshes them).
 pub fn all_ci_states() -> HashMap<(String, String), CiEntry> {
-    match open() {
-        Ok(conn) => all_ci_states_on(&conn),
-        Err(_) => HashMap::new(),
-    }
+    with_conn(HashMap::new(), all_ci_states_on)
 }
 
 fn apply_summaries_on(conn: &Connection, repos: &mut [Repo]) {
@@ -508,47 +551,47 @@ fn apply_summaries_on(conn: &Connection, repos: &mut [Repo]) {
 
 /// Overlay cached AI summaries onto a repo snapshot (by id, current commit only).
 pub fn apply_summaries(repos: &mut [Repo]) {
-    if let Ok(conn) = open() {
-        apply_summaries_on(&conn, repos);
-    }
+    with_conn((), |c| apply_summaries_on(c, repos));
 }
 
 /// Cached AI summary for a repo, valid only while the last commit is unchanged
 /// (so it regenerates after new work lands).
 pub fn cached_summary(id: &str, last_commit: i64) -> Option<String> {
-    let conn = open().ok()?;
-    let mut stmt = conn
-        .prepare("SELECT summary, last_commit FROM ai_cache WHERE id = ?1")
-        .ok()?;
-    let (summary, cached_commit): (String, i64) = stmt
-        .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()?;
-    (cached_commit == last_commit).then_some(summary)
+    with_conn(None, |conn| {
+        let mut stmt = conn
+            .prepare("SELECT summary, last_commit FROM ai_cache WHERE id = ?1")
+            .ok()?;
+        let (summary, cached_commit): (String, i64) = stmt
+            .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .ok()?;
+        (cached_commit == last_commit).then_some(summary)
+    })
 }
 
 /// Persist an AI summary keyed to the repo's current last commit.
 pub fn store_summary(id: &str, summary: &str, last_commit: i64) {
-    if let Ok(conn) = open() {
+    with_conn((), |conn| {
         let _ = conn.execute(
             "INSERT OR REPLACE INTO ai_cache (id, summary, last_commit) VALUES (?1, ?2, ?3)",
             rusqlite::params![id, summary, last_commit],
         );
-    }
+    });
 }
 
 pub fn get_meta(key: &str) -> Option<String> {
-    let conn = open().ok()?;
-    let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1").ok()?;
-    stmt.query_row([key], |row| row.get::<_, String>(0)).ok()
+    with_conn(None, |conn| {
+        let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1").ok()?;
+        stmt.query_row([key], |row| row.get::<_, String>(0)).ok()
+    })
 }
 
 pub fn set_meta(key: &str, value: &str) {
-    if let Ok(conn) = open() {
+    with_conn((), |conn| {
         let _ = conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
             rusqlite::params![key, value],
         );
-    }
+    });
 }
 
 // ── Per-repo notes + last-seen cursor (#69) ────────────────────────────────
@@ -589,27 +632,22 @@ fn set_seen_on(conn: &Connection, id: &str, sha: &str, unix: i64) -> rusqlite::R
 
 /// The markdown note pinned to a repo (empty string if none).
 pub fn note(id: &str) -> String {
-    open()
-        .ok()
-        .and_then(|c| note_on(&c, id))
-        .unwrap_or_default()
+    with_conn(None, |c| note_on(c, id)).unwrap_or_default()
 }
 
 /// Persist a repo's markdown note.
 pub fn set_note(id: &str, text: &str) -> Result<(), String> {
-    let conn = open()?;
-    set_note_on(&conn, id, text).map_err(|e| e.to_string())
+    try_with_conn(|c| set_note_on(c, id, text))
 }
 
 /// The full SHA of the commit the user had seen last for this repo, if any.
 pub fn seen_sha(id: &str) -> Option<String> {
-    open().ok().and_then(|c| seen_sha_on(&c, id))
+    with_conn(None, |c| seen_sha_on(c, id))
 }
 
 /// Record the commit the user has now caught up to.
 pub fn set_seen(id: &str, sha: &str, unix: i64) -> Result<(), String> {
-    let conn = open()?;
-    set_seen_on(&conn, id, sha, unix).map_err(|e| e.to_string())
+    try_with_conn(|c| set_seen_on(c, id, sha, unix))
 }
 
 // ── Dispatched agent worktrees (#185) ──────────────────────────────────────
@@ -753,28 +791,22 @@ fn remove_agent_worktree_on(conn: &Connection, worktree_path: &str) -> rusqlite:
 
 /// Record a dispatched agent worktree (upserts on the worktree path).
 pub fn record_agent_worktree(wt: &AgentWorktree) -> Result<(), String> {
-    let conn = open()?;
-    record_agent_worktree_on(&conn, wt).map_err(|e| e.to_string())
+    try_with_conn(|c| record_agent_worktree_on(c, wt))
 }
 
 /// All recorded agent-worktree dispatches, newest first.
 pub fn agent_worktrees() -> Vec<AgentWorktree> {
-    match open() {
-        Ok(conn) => agent_worktrees_on(&conn),
-        Err(_) => Vec::new(),
-    }
+    with_conn(Vec::new(), agent_worktrees_on)
 }
 
 /// Forget a dispatched worktree (after it's removed on disk).
 pub fn remove_agent_worktree(worktree_path: &str) -> Result<(), String> {
-    let conn = open()?;
-    remove_agent_worktree_on(&conn, worktree_path).map_err(|e| e.to_string())
+    try_with_conn(|c| remove_agent_worktree_on(c, worktree_path))
 }
 
 /// Record a live-session sighting (bumps `last_seen_alive`, clears finished).
 pub fn mark_agent_worktree_alive(worktree_path: &str, now: i64) -> Result<(), String> {
-    let conn = open()?;
-    mark_agent_worktree_alive_on(&conn, worktree_path, now).map_err(|e| e.to_string())
+    try_with_conn(|c| mark_agent_worktree_alive_on(c, worktree_path, now))
 }
 
 /// Mark a dispatched session finished with its commits-ahead count.
@@ -783,15 +815,12 @@ pub fn mark_agent_worktree_finished(
     finished_at: i64,
     commits_ahead: u32,
 ) -> Result<(), String> {
-    let conn = open()?;
-    mark_agent_worktree_finished_on(&conn, worktree_path, finished_at, commits_ahead)
-        .map_err(|e| e.to_string())
+    try_with_conn(|c| mark_agent_worktree_finished_on(c, worktree_path, finished_at, commits_ahead))
 }
 
 /// Record the PR opened from a dispatched worktree's branch.
 pub fn set_agent_worktree_pr(worktree_path: &str, pr_url: &str) -> Result<(), String> {
-    let conn = open()?;
-    set_agent_worktree_pr_on(&conn, worktree_path, pr_url).map_err(|e| e.to_string())
+    try_with_conn(|c| set_agent_worktree_pr_on(c, worktree_path, pr_url))
 }
 
 fn clear_ai_on(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
@@ -805,8 +834,7 @@ fn clear_ai_on(conn: &Connection) -> rusqlite::Result<(usize, usize)> {
 /// Clear cached AI summaries and embeddings (and their index-skip signatures).
 /// Returns the number of summaries and embeddings removed.
 pub fn clear_ai() -> Result<(usize, usize), String> {
-    let conn = open()?;
-    clear_ai_on(&conn).map_err(|e| e.to_string())
+    try_with_conn(clear_ai_on)
 }
 
 #[cfg(test)]
@@ -1316,6 +1344,103 @@ mod tests {
             )
             .unwrap();
         assert_eq!((keep, sig), (1, 0));
+    }
+
+    #[test]
+    fn store_host_infos_batches_in_one_transaction() {
+        let conn = mem();
+        let entries = vec![
+            (
+                "github.com".to_string(),
+                "o/a".to_string(),
+                HostInfo {
+                    stars: 1,
+                    ..HostInfo::default()
+                },
+            ),
+            (
+                "gitlab.acme.io".to_string(),
+                "o/a".to_string(),
+                HostInfo {
+                    private: true,
+                    ..HostInfo::default()
+                },
+            ),
+        ];
+        store_host_infos_on(&conn, &entries, 1_000).unwrap();
+        let all = all_host_info_on(&conn);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[&("github.com".into(), "o/a".into())].stars, 1);
+        assert!(all[&("gitlab.acme.io".into(), "o/a".into())].private);
+        // Stamped `now`, so both read as fresh; a re-store replaces, not appends.
+        assert_eq!(fresh_host_keys_on(&conn, 10, 1_005).len(), 2);
+        store_host_infos_on(&conn, &entries[..1], 2_000).unwrap();
+        assert_eq!(all_host_info_on(&conn).len(), 2);
+        assert_eq!(fresh_host_keys_on(&conn, 10, 2_005).len(), 1);
+        // The connection is usable (no transaction left open) afterwards.
+        assert!(conn.is_autocommit());
+    }
+
+    #[test]
+    fn all_host_info_skips_unparseable_rows() {
+        let conn = mem();
+        store_host_info_on(&conn, "github.com", "o/ok", &HostInfo::default(), 1);
+        conn.execute(
+            "INSERT INTO host_cache (host, slug, data, fetched_at) VALUES ('github.com', 'o/bad', 'nope', 1)",
+            [],
+        )
+        .unwrap();
+        let all = all_host_info_on(&conn);
+        assert_eq!(all.len(), 1);
+        assert!(all.contains_key(&("github.com".into(), "o/ok".into())));
+    }
+
+    #[test]
+    fn open_at_enables_wal_and_inits_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("cache.sqlite");
+        let conn = open_at(&path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        set_favorite_on(&conn, "/a", true).unwrap();
+        assert!(INITIALIZED.lock().unwrap().contains(&path));
+        // A second open skips init but sees the same, initialized schema.
+        let again = open_at(&path).unwrap();
+        assert!(favorites_on(&again).contains("/a"));
+    }
+
+    #[test]
+    fn concurrent_first_init_does_not_race_the_alter() {
+        // Two connections initializing a pre-#185 database at once must not
+        // both see the column missing and both ALTER ("duplicate column").
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE agent_worktrees (
+                     worktree_path TEXT PRIMARY KEY, repo_id TEXT NOT NULL,
+                     branch TEXT NOT NULL, worktree_name TEXT NOT NULL,
+                     prompt TEXT NOT NULL, created_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(&path).unwrap();
+                    conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+                    init(&conn)
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        assert!(agent_worktrees_on(&conn).is_empty());
     }
 
     #[test]

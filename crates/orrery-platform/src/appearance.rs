@@ -7,8 +7,10 @@
 //!   `kdeglobals` when present — what Qt apps actually paint.
 //!
 //! Everything degrades gracefully: no bus, no portal, or no kdeglobals just
-//! means fewer fields are populated. This module has no UI and no Tauri — the
-//! Tauri app wraps it in a command + event; the GPUI app reads it directly.
+//! means fewer fields are populated. This module has no UI; the GPUI app reads
+//! it directly (`read_blocking` at startup, `watch` for live changes).
+
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -16,6 +18,10 @@ use zbus::zvariant::Value;
 use zbus::Connection;
 
 const APPEARANCE_NS: &str = "org.freedesktop.appearance";
+
+/// Upper bound on the startup read. A wedged or slow-activating portal would
+/// otherwise stall launch for zbus's ~25s method-call timeout.
+const STARTUP_READ_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// An 8-bit sRGB colour.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -204,37 +210,59 @@ pub async fn read() -> Appearance {
 }
 
 /// Blocking convenience for synchronous callers (e.g. app startup): drives
-/// [`read`] to completion on a throwaway current-thread runtime.
+/// [`read`] to completion on a throwaway current-thread runtime, giving up
+/// after [`STARTUP_READ_TIMEOUT`] and falling back to kdeglobals alone (the
+/// live [`watch`] still delivers the portal values once it answers).
 pub fn read_blocking() -> Appearance {
-    match tokio::runtime::Builder::new_current_thread().build() {
-        Ok(rt) => rt.block_on(read()),
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(rt) => rt
+            .block_on(tokio::time::timeout(STARTUP_READ_TIMEOUT, read()))
+            .unwrap_or_else(|_| {
+                eprintln!("[orrery appearance] portal read timed out; using defaults");
+                kdeglobals_appearance()
+            }),
         // Can't drive the async portal read — kdeglobals needs no runtime.
         Err(_) => kdeglobals_appearance(),
     }
 }
 
 /// Spawn a background thread that calls `on_change` with the current appearance
-/// immediately and again on every desktop theme/accent change. No-ops (and the
-/// thread exits) if the portal is unavailable. UI-agnostic: the Tauri app emits
-/// an event from the callback; the native app updates its theme.
+/// immediately and again on every desktop theme/accent change. Exits (logging
+/// why) if the portal is unavailable. UI-agnostic: the native app updates its
+/// theme from the callback.
 pub fn watch(on_change: impl Fn(Appearance) + Send + 'static) {
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().build() else {
             return;
         };
         rt.block_on(async move {
-            let Ok(conn) = Connection::session().await else {
-                return;
+            let conn = match Connection::session().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("[orrery appearance] live theme disabled: no session bus: {e}");
+                    return;
+                }
             };
-            let Ok(proxy) = SettingsProxy::new(&conn).await else {
-                return;
+            let proxy = match SettingsProxy::new(&conn).await {
+                Ok(proxy) => proxy,
+                Err(e) => {
+                    eprintln!("[orrery appearance] live theme disabled: no settings portal: {e}");
+                    return;
+                }
             };
 
             // Current state immediately so callers are correct on launch.
             on_change(read_appearance(&proxy).await);
 
-            let Ok(mut changes) = proxy.receive_setting_changed().await else {
-                return;
+            let mut changes = match proxy.receive_setting_changed().await {
+                Ok(changes) => changes,
+                Err(e) => {
+                    eprintln!("[orrery appearance] live theme disabled: can't subscribe: {e}");
+                    return;
+                }
             };
             // Re-read on any settings change; applying identical values is a
             // no-op downstream, so we don't filter by namespace. Also re-reads

@@ -81,6 +81,10 @@ fn main() {
             // so its components match the rest of the UI.
             gpui_component::init(cx);
             theme::apply_gpui_component_theme(&theme, cx);
+            // Kill the llama.cpp sidecar on quit so it (and its loaded model's
+            // RAM/VRAM) doesn't outlive the app.
+            cx.on_app_quit(|_| async { orrery_core::llama::shutdown() })
+                .detach();
             // Esc closes the active overlay (drawer/palette/dialog).
             cx.bind_keys([KeyBinding::new("escape", CloseOverlay, None)]);
             // Command palette: Ctrl/Cmd+K opens from anywhere; arrows/enter are

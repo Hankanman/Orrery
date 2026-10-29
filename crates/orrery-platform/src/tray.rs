@@ -323,7 +323,9 @@ pub fn spawn(on_action: impl Fn(TrayAction) + Send + Sync + 'static) -> Option<T
     // handle it here and forward the rest to the app.
     let on_action: Arc<dyn Fn(TrayAction) + Send + Sync> = Arc::new(move |action| {
         if let TrayAction::Open(id) = &action {
-            let _ = launch::launch(&config::load().ide_command, id);
+            if let Err(e) = launch::launch(&config::load().ide_command, id) {
+                eprintln!("[orrery tray] failed to open {id}: {e}");
+            }
         } else {
             on_action(action);
         }
@@ -359,6 +361,15 @@ mod tests {
             attention_line(&a(3, 2)).as_deref(),
             Some("3 need attention · 2 urgent")
         );
+    }
+
+    #[test]
+    fn embedded_tray_glyphs_decode() {
+        for bytes in [TRAY_LIGHT, TRAY_DARK] {
+            let icon = decode_argb(bytes).expect("tray PNG decodes");
+            assert!(icon.width > 0 && icon.height > 0);
+            assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
+        }
     }
 
     #[test]

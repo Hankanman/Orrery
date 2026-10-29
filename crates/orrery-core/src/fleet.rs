@@ -9,6 +9,8 @@
 //! dependency, and results land in a fixed slot per input index so the report
 //! is always in input order regardless of completion order.
 
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -54,7 +56,9 @@ pub struct FleetReport {
     pub results: Vec<RepoResult>,
     /// Ops actually invoked (repos skipped by cancellation are never started).
     pub started: usize,
-    /// Ops that ran to completion (equals `started` unless a worker panicked).
+    /// Ops that returned normally. Equals `started` unless an op panicked; a
+    /// panicking op is caught and reported as `Outcome::Failed`, and the run
+    /// carries on.
     pub completed: usize,
     /// The cancel flag was set at some point during the run.
     pub cancelled: bool,
@@ -87,7 +91,9 @@ pub fn default_workers() -> usize {
 /// Run `op` across `repos` (repo ids, i.e. absolute paths) on up to `workers`
 /// threads. Cancellation is checked *between* repos — an in-flight git op is
 /// never interrupted; repos not yet started report `Skipped("cancelled")`.
-/// `progress` fires once per completed repo (from a worker thread).
+/// `progress` fires once per completed repo (from a worker thread). A panic in
+/// `op` is caught per repo and reported as `Failed`, so one bad repo can't
+/// take down the run (or, via `thread::scope`'s re-panic, the caller).
 pub fn run<F>(
     repos: &[String],
     workers: usize,
@@ -120,9 +126,15 @@ where
                     Outcome::Skipped("cancelled".into())
                 } else {
                     started.fetch_add(1, Ordering::SeqCst);
-                    let out = op(repo);
-                    completed.fetch_add(1, Ordering::SeqCst);
-                    out
+                    // AssertUnwindSafe: the op only borrows shared state, and a
+                    // panicked op's partial work is reported, never reused.
+                    match catch_unwind(AssertUnwindSafe(|| op(repo))) {
+                        Ok(out) => {
+                            completed.fetch_add(1, Ordering::SeqCst);
+                            out
+                        }
+                        Err(payload) => Outcome::Failed(panic_message(payload.as_ref())),
+                    }
                 };
                 let result = RepoResult {
                     repo: repo.clone(),
@@ -151,6 +163,16 @@ where
         completed: completed.into_inner(),
         cancelled: cancel.load(Ordering::SeqCst),
     }
+}
+
+/// A readable message from a caught panic payload.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic");
+    format!("panicked: {detail}")
 }
 
 /// Fleet fetch: `git_ops::fetch` per repo, summarising the refreshed status.
@@ -182,27 +204,41 @@ pub fn pull_op() -> impl Fn(&str) -> Outcome + Sync {
 /// Fleet prune, delegating to `git_ops::prune_branches` (merged /
 /// upstream-gone local branches only — never HEAD, main, or master; see
 /// `git_ops::prunable`). Repos with nothing prunable are skips, so the report
-/// says exactly which repos were touched. Branch deletion is irreversible —
-/// callers must gate this behind an explicit confirm (the #173 pattern).
+/// says exactly which repos were touched. A branch that fails to delete makes
+/// the repo `Failed`, with the message still counting what was pruned. Branch
+/// deletion is irreversible — callers must gate this behind an explicit
+/// confirm (the #173 pattern).
 pub fn prune_op() -> impl Fn(&str) -> Outcome + Sync {
     |path| match git_ops::prune_branches(path) {
-        Ok(names) if names.is_empty() => Outcome::Skipped("nothing prunable".into()),
-        Ok(names) => Outcome::Ok(format!(
-            "pruned {} {}",
-            names.len(),
-            if names.len() == 1 {
-                "branch"
-            } else {
-                "branches"
-            }
-        )),
+        Ok(r) if r.deleted.is_empty() && r.failed.is_empty() => {
+            Outcome::Skipped("nothing prunable".into())
+        }
+        Ok(r) if r.failed.is_empty() => Outcome::Ok(pruned_summary(r.deleted.len())),
+        Ok(r) => {
+            let failures: Vec<String> = r
+                .failed
+                .iter()
+                .map(|(name, err)| format!("{name}: {err}"))
+                .collect();
+            Outcome::Failed(format!(
+                "{}; failed {} ({})",
+                pruned_summary(r.deleted.len()),
+                r.failed.len(),
+                failures.join("; ")
+            ))
+        }
         Err(e) => Outcome::Failed(e),
     }
+}
+
+fn pruned_summary(n: usize) -> String {
+    format!("pruned {n} {}", if n == 1 { "branch" } else { "branches" })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git_ops::test_support::init_repo;
     use std::sync::Barrier;
     use std::time::Duration;
 
@@ -336,31 +372,40 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_op_is_reported_as_failed_and_the_run_continues() {
+        let repos = repo_names(3);
+        let cancel = AtomicBool::new(false);
+        let events = AtomicUsize::new(0);
+        let report = run(
+            &repos,
+            2,
+            &cancel,
+            |_| {
+                events.fetch_add(1, Ordering::SeqCst);
+            },
+            |repo| {
+                if repo == "repo-1" {
+                    panic!("boom in {repo}");
+                }
+                Outcome::Ok(repo.to_string())
+            },
+        );
+        assert_eq!(report.results.len(), 3);
+        assert_eq!(report.results[0].outcome, Outcome::Ok("repo-0".into()));
+        assert_eq!(
+            report.results[1].outcome,
+            Outcome::Failed("panicked: boom in repo-1".into())
+        );
+        assert_eq!(report.results[2].outcome, Outcome::Ok("repo-2".into()));
+        assert_eq!(report.started, 3);
+        assert_eq!(report.completed, 2, "the panicked op didn't complete");
+        assert_eq!(events.load(Ordering::SeqCst), 3, "progress still fires");
+    }
+
+    #[test]
     fn default_workers_is_bounded() {
         let w = default_workers();
         assert!((1..=8).contains(&w));
-    }
-
-    /// Init a temp repo with one commit; return (tempdir, path). Mirrors the
-    /// fixture in `git_ops::tests`.
-    fn init_repo() -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(dir.path()).unwrap();
-        {
-            let mut cfg = repo.config().unwrap();
-            cfg.set_str("user.name", "t").unwrap();
-            cfg.set_str("user.email", "t@t").unwrap();
-        }
-        std::fs::write(dir.path().join("README.md"), "# Test").unwrap();
-        let mut index = repo.index().unwrap();
-        index.add_path(std::path::Path::new("README.md")).unwrap();
-        index.write().unwrap();
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = repo.signature().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-        let path = dir.path().to_string_lossy().into_owned();
-        (dir, path)
     }
 
     /// Grow `path`'s history by one commit and return the *previous* tip, so

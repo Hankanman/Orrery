@@ -1,16 +1,58 @@
 //! Local AI summaries (#23). A `Backend` seam selects the inference engine:
 //! the Ollama HTTP path (default, GPU-accelerated) or the bundled llama.cpp
 //! sidecar (#21). The public entry points (`available`, `installed_models`,
-//! `generate`, `embed`, `pull`) dispatch on the configured backend; everything
+//! `generate`/`generate_with`, `embed`/`embed_batch`, `pull`) dispatch on the
+//! configured backend, sharing one [`GenParams`] budget type; everything
 //! backend-agnostic (prompts, `pick_model`) stays free-standing; vector
 //! similarity lives in `crate::semantic`.
 //!
 //! Everything degrades gracefully: if the active backend isn't reachable,
 //! summaries are simply unavailable and the UI shows nothing.
 
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
 use serde::Deserialize;
 
 use crate::model::Repo;
+
+/// Generation parameters shared by both backends — Ollama maps them onto
+/// `options.{num_predict,temperature}`, llama.cpp onto `n_predict` /
+/// `temperature` — so a caller's budget means the same thing on either.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenParams {
+    /// Max tokens to generate. Thinking models spend part of this on hidden
+    /// reasoning, so long outputs need real headroom.
+    pub max_tokens: u32,
+    pub temperature: f32,
+}
+
+impl GenParams {
+    /// One-line outputs: repo summaries, the Settings ping.
+    pub const SHORT: Self = Self {
+        max_tokens: 120,
+        temperature: 0.2,
+    };
+    /// A few sentences: commit messages (subject + short body), catch-ups.
+    pub const MEDIUM: Self = Self {
+        max_tokens: 384,
+        temperature: 0.2,
+    };
+    /// Multi-paragraph markdown: PR bodies, changelogs.
+    pub const LONG: Self = Self {
+        max_tokens: 1024,
+        temperature: 0.2,
+    };
+}
+
+/// Per-read timeout for the AI HTTP clients. Not an overall request timeout —
+/// a long (non-streamed) generation or a model pull must not be cut off — but a
+/// server that goes silent this long is wedged, and without it one stuck
+/// request would hang `summarize::run` (and the UI's AI busy state) forever.
+/// Generous because CPU inference of a [`GenParams::LONG`] budget is slow and a
+/// non-streamed response sends nothing until it finishes.
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The inference engine serving AI features, from `config.ai_backend`.
 enum Backend {
@@ -47,12 +89,19 @@ pub async fn installed_models() -> Vec<(String, u64)> {
     }
 }
 
-/// Generate text from `prompt` using `model` on the active backend. The
-/// llama.cpp backend serves the configured GGUF, so it ignores `model`.
+/// Generate text from `prompt` using `model` on the active backend, with the
+/// short ([`GenParams::SHORT`]) budget. See [`generate_with`].
 pub async fn generate(model: &str, prompt: &str) -> Result<String, String> {
+    generate_with(model, prompt, GenParams::SHORT).await
+}
+
+/// Generate text from `prompt` using `model` on the active backend, within
+/// `params`' token budget. The llama.cpp backend serves the configured GGUF,
+/// so it ignores `model`.
+pub async fn generate_with(model: &str, prompt: &str, params: GenParams) -> Result<String, String> {
     match active_backend() {
-        Backend::Ollama => ollama_generate(model, prompt).await,
-        Backend::LlamaCpp => crate::llama::generate(prompt).await,
+        Backend::Ollama => ollama_generate(model, prompt, params).await,
+        Backend::LlamaCpp => crate::llama::generate(prompt, params).await,
     }
 }
 
@@ -66,8 +115,22 @@ pub fn embeddings_supported() -> bool {
 /// Embed `text` with `model` on the active backend. Embeddings are Ollama-only
 /// for now — semantic search stays hidden on the llama.cpp backend.
 pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
+    embed_batch(model, &[text.to_string()])
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "model returned no embedding".to_string())
+}
+
+/// Embed several texts in one request (Ollama's `/api/embed` takes an array
+/// `input`), returning one vector per input, in order. Errors unless every
+/// input got a non-empty vector — callers store a whole source or nothing.
+pub async fn embed_batch(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
     match active_backend() {
-        Backend::Ollama => ollama_embed(model, text).await,
+        Backend::Ollama => ollama_embed(model, texts).await,
         Backend::LlamaCpp => Err("embeddings are not supported on the llama.cpp backend".into()),
     }
 }
@@ -76,7 +139,12 @@ pub async fn embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
 /// llama.cpp model download has its own command (`download_llama_model`).
 pub async fn pull(model: &str, on_progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
     match active_backend() {
-        Backend::Ollama => ollama_pull(model, on_progress).await,
+        Backend::Ollama => {
+            let res = ollama_pull(model, on_progress).await;
+            // A newly pulled model must be pickable right away.
+            invalidate_model_cache();
+            res
+        }
         Backend::LlamaCpp => {
             Err("use the model download in Settings for the llama.cpp backend".into())
         }
@@ -92,13 +160,15 @@ fn base() -> String {
 /// Shared HTTP client so the many Ollama calls (status, per-repo summaries and
 /// embeddings) reuse one connection pool. reqwest::Client is Arc-backed.
 ///
-/// Only a `connect_timeout` is set — a dead/unreachable host fails fast — but no
-/// overall request timeout, because generation and model pulls legitimately
-/// stream for minutes and must not be cut off.
+/// A `connect_timeout` makes a dead/unreachable host fail fast and
+/// [`READ_TIMEOUT`] catches a wedged one, but there's no overall request
+/// timeout, because generation and model pulls legitimately run for minutes
+/// and must not be cut off.
 fn client() -> reqwest::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(8))
+            .connect_timeout(Duration::from_secs(8))
+            .read_timeout(READ_TIMEOUT)
             .build()
             .unwrap_or_default()
     });
@@ -185,22 +255,48 @@ Summary:",
     )
 }
 
-/// Generate a summary via Ollama.
+/// Models seen returning an empty response until retried with `think:false`.
+/// Remembered for the process lifetime so later calls go straight to the
+/// request that works instead of paying for a wasted generation every time.
+static NEEDS_NO_THINK: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Generate text via Ollama.
 ///
 /// Tries normally first. If the model returns an empty response — the signature
 /// of a "thinking" model (qwen3, gemma3, …) that spent its whole token budget
-/// on hidden reasoning — it retries once with `think:false`. This way the
-/// `think` field is only ever sent to a model that actually needs it, so plain
-/// models that might reject the field are never hit with it.
-async fn ollama_generate(model: &str, prompt: &str) -> Result<String, String> {
-    let first = generate_once(model, prompt, false).await?;
+/// on hidden reasoning — it retries once with `think:false` and remembers that
+/// the model needs it. This way the `think` field is only ever sent to a model
+/// that actually needs it, so plain models that might reject the field are
+/// never hit with it.
+async fn ollama_generate(model: &str, prompt: &str, params: GenParams) -> Result<String, String> {
+    let known = NEEDS_NO_THINK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(model);
+    if known {
+        return generate_once(model, prompt, params, true).await;
+    }
+    let first = generate_once(model, prompt, params, false).await?;
     if !first.is_empty() {
         return Ok(first);
     }
-    generate_once(model, prompt, true).await
+    let second = generate_once(model, prompt, params, true).await?;
+    if !second.is_empty() {
+        NEEDS_NO_THINK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(model.to_string());
+    }
+    Ok(second)
 }
 
-async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Result<String, String> {
+async fn generate_once(
+    model: &str,
+    prompt: &str,
+    params: GenParams,
+    suppress_think: bool,
+) -> Result<String, String> {
     #[derive(Deserialize)]
     struct GenResp {
         #[serde(default)]
@@ -210,7 +306,7 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
         "model": model,
         "prompt": prompt,
         "stream": false,
-        "options": { "temperature": 0.2, "num_predict": 120 }
+        "options": { "temperature": params.temperature, "num_predict": params.max_tokens }
     });
     if suppress_think {
         body["think"] = serde_json::Value::Bool(false);
@@ -230,7 +326,7 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
 
 /// Pull a model via Ollama (`/api/pull`), streaming NDJSON progress. `on_progress`
 /// is called with (status, completed_bytes, total_bytes) for each update — kept
-/// as a callback so this module stays free of Tauri's event machinery.
+/// as a callback so this module stays free of any UI/event machinery.
 async fn ollama_pull(
     model: &str,
     mut on_progress: impl FnMut(&str, u64, u64),
@@ -307,14 +403,15 @@ async fn ollama_error(resp: reqwest::Response) -> String {
     }
 }
 
-/// Embed `text` with an embedding model via Ollama (`/api/embed`).
-async fn ollama_embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
+/// Embed `texts` with an embedding model via Ollama (`/api/embed`), batched
+/// into one request.
+async fn ollama_embed(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     #[derive(Deserialize)]
     struct Resp {
         #[serde(default)]
         embeddings: Vec<Vec<f32>>,
     }
-    let body = serde_json::json!({ "model": model, "input": text });
+    let body = serde_json::json!({ "model": model, "input": texts });
     let resp = client()
         .post(format!("{}/api/embed", base()))
         .json(&body)
@@ -325,12 +422,10 @@ async fn ollama_embed(model: &str, text: &str) -> Result<Vec<f32>, String> {
         return Err(ollama_error(resp).await);
     }
     let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
-    parsed
-        .embeddings
-        .into_iter()
-        .next()
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| "model returned no embedding".to_string())
+    if parsed.embeddings.len() != texts.len() || parsed.embeddings.iter().any(|v| v.is_empty()) {
+        return Err("model returned no embedding".to_string());
+    }
+    Ok(parsed.embeddings)
 }
 
 fn clamp_chars(s: &str, max: usize) -> String {
@@ -428,46 +523,84 @@ Commits:\n{}\n\nWhat changed:",
     )
 }
 
-/// Run `prompt` through the configured chat model on the active backend.
-/// Picks the configured model if installed, else the smallest non-embed —
-/// returns an error when AI is unreachable or no model is installed, so callers
-/// degrade gracefully (the `aiReady` contract).
-async fn generate_with_model(prompt: &str) -> Result<String, String> {
-    let cfg = crate::config::load();
+/// How long an installed-models listing is reused before re-querying the
+/// backend. Short: just enough that a burst of AI actions (or a summary pass)
+/// doesn't hit `/api/tags` before every single generation.
+const MODEL_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Cached installed-models listing: (fetched at, backend key, models). The key
+/// is (backend, Ollama host), so a config change never serves a stale list.
+type ModelCache = Option<(Instant, String, Vec<(String, u64)>)>;
+static MODEL_CACHE: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(None));
+
+fn model_cache_key() -> String {
+    match active_backend() {
+        Backend::Ollama => format!("ollama\u{1f}{}", base()),
+        Backend::LlamaCpp => "llama".to_string(),
+    }
+}
+
+fn invalidate_model_cache() {
+    *MODEL_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// [`installed_models`], reused for [`MODEL_CACHE_TTL`]. Empty listings are
+/// never cached, so a just-started server or just-installed model is picked up
+/// on the next call.
+async fn installed_models_cached() -> Vec<(String, u64)> {
+    let key = model_cache_key();
+    {
+        let guard = MODEL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, k, models)) = guard.as_ref() {
+            if *k == key && at.elapsed() < MODEL_CACHE_TTL {
+                return models.clone();
+            }
+        }
+    }
     let models = installed_models().await;
-    let model = pick_model(&cfg.ai_model, &models).ok_or("no AI model installed")?;
-    generate(&model, prompt).await
+    if !models.is_empty() {
+        *MODEL_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((Instant::now(), key, models.clone()));
+    }
+    models
+}
+
+/// The chat model to use on the active backend: the configured one if
+/// installed, else the smallest non-embedding model ([`pick_model`]). `None`
+/// when AI is unreachable or no usable model is installed.
+pub async fn chat_model() -> Option<String> {
+    let cfg = crate::config::load();
+    pick_model(&cfg.ai_model, &installed_models_cached().await)
+}
+
+/// Run `prompt` through the configured chat model on the active backend,
+/// within `params`' budget. Returns an error when AI is unreachable or no model
+/// is installed, so callers degrade gracefully (the `aiReady` contract).
+async fn generate_with_model(prompt: &str, params: GenParams) -> Result<String, String> {
+    let model = chat_model().await.ok_or("no AI model installed")?;
+    generate_with(&model, prompt, params).await
 }
 
 /// Generate a Conventional Commit message for a staged diff.
 pub async fn commit_message(diff: &str) -> Result<String, String> {
-    generate_with_model(&commit_prompt(diff)).await
+    generate_with_model(&commit_prompt(diff), GenParams::MEDIUM).await
 }
 
 /// Summarize commit subjects into a markdown changelog.
 pub async fn changelog(commits: &[String]) -> Result<String, String> {
-    generate_with_model(&changelog_prompt(commits)).await
+    generate_with_model(&changelog_prompt(commits), GenParams::LONG).await
 }
 
 /// A 2–3 sentence catch-up on what changed in a repo since the last look.
 pub async fn resume(repo_name: &str, commits: &[String]) -> Result<String, String> {
-    generate_with_model(&resume_prompt(repo_name, commits)).await
+    generate_with_model(&resume_prompt(repo_name, commits), GenParams::MEDIUM).await
 }
 
 /// Draft a PR title + body from a branch's commit range (first line = title —
 /// see [`pr_prompt`] / [`split_pr_draft`]). Callers fall back to
 /// [`fallback_pr_draft`] when AI is unavailable (the `aiReady` contract).
 pub async fn pr_description(branch: &str, commits: &[String]) -> Result<String, String> {
-    generate_with_model(&pr_prompt(branch, commits)).await
-}
-
-/// Prompt for a short daily briefing across recently-active repos.
-pub fn briefing_prompt(lines: &[String]) -> String {
-    format!(
-        "You are a dev's morning briefing. In 2–4 short sentences, summarize what changed across these \
-repositories. Be specific and factual, no preamble.\n\n{}\n\nBriefing:",
-        lines.join("\n")
-    )
+    generate_with_model(&pr_prompt(branch, commits), GenParams::LONG).await
 }
 
 #[cfg(test)]

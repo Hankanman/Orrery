@@ -120,16 +120,15 @@ pub(crate) fn ahead_behind(repo: &Repository) -> Option<(u32, u32)> {
 /// Branch + ahead/behind + dirty count for a repo. The canonical git-status
 /// reader, shared by `scan` (grid snapshot) and the drawer's refresh ops.
 pub(crate) fn status_of(repo: &Repository) -> GitStatus {
-    let branch = repo
-        .head()
-        .ok()
-        .and_then(|h| h.shorthand().map(String::from))
-        .unwrap_or_else(|| "HEAD".to_string());
+    let branch = head_branch_name(repo).unwrap_or_else(|| "HEAD".to_string());
     let (ahead, behind) = ahead_behind(repo).unwrap_or((0, 0));
     let mut opts = git2::StatusOptions::new();
+    // Submodules are skipped: diffing each one's workdir is slow and their
+    // state isn't part of this repo's dirty count.
     opts.include_untracked(true)
         .recurse_untracked_dirs(false)
-        .include_ignored(false);
+        .include_ignored(false)
+        .exclude_submodules(true);
     let dirty = repo
         .statuses(Some(&mut opts))
         .map(|s| s.iter().filter(|e| !e.status().is_ignored()).count() as u32)
@@ -142,42 +141,79 @@ pub(crate) fn status_of(repo: &Repository) -> GitStatus {
     }
 }
 
+/// The current branch name. Unlike `head().shorthand()`, this also works on
+/// an unborn HEAD (a fresh repo with no commits), where it reads the symbolic
+/// target (`refs/heads/main` → `main`). A detached HEAD yields `"HEAD"`.
+fn head_branch_name(repo: &Repository) -> Option<String> {
+    match repo.head() {
+        Ok(h) => h.shorthand().map(String::from),
+        Err(_) => repo.find_reference("HEAD").ok().and_then(|r| {
+            r.symbolic_target()
+                .map(|t| t.strip_prefix("refs/heads/").unwrap_or(t).to_string())
+        }),
+    }
+}
+
+/// Fetch `origin` (when the repo has one) with the shared credential callbacks.
+fn fetch_origin(repo: &Repository) -> Result<(), String> {
+    let Ok(mut remote) = repo.find_remote("origin") else {
+        return Ok(());
+    };
+    let mut opts = FetchOptions::new();
+    opts.remote_callbacks(remote_callbacks());
+    let refspecs: Vec<String> = remote
+        .fetch_refspecs()
+        .map(|r| r.iter().flatten().map(String::from).collect())
+        .unwrap_or_default();
+    remote
+        .fetch(&refspecs, Some(&mut opts), None)
+        .map_err(|e| e.to_string())
+}
+
 /// Fetch the `origin` remote, then return refreshed git status.
 pub fn fetch(path: &str) -> Result<GitStatus, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    if let Ok(mut remote) = repo.find_remote("origin") {
-        let mut opts = FetchOptions::new();
-        opts.remote_callbacks(remote_callbacks());
-        let refspecs: Vec<String> = remote
-            .fetch_refspecs()
-            .map(|r| r.iter().flatten().map(String::from).collect())
-            .unwrap_or_default();
-        remote
-            .fetch(&refspecs, Some(&mut opts), None)
-            .map_err(|e| e.to_string())?;
-    }
+    fetch_origin(&repo)?;
     Ok(status_of(&repo))
 }
 
-/// Resolve the tip of the default branch (main/master) for merged checks.
+/// The local and `origin/` remote-tracking tips of branch `base`, either of
+/// which may be missing.
+fn base_oids(repo: &Repository, base: &str) -> (Option<git2::Oid>, Option<git2::Oid>) {
+    let local = repo
+        .find_branch(base, BranchType::Local)
+        .ok()
+        .and_then(|b| b.get().target());
+    let remote = repo
+        .find_reference(&format!("refs/remotes/origin/{base}"))
+        .ok()
+        .and_then(|r| r.target());
+    (local, remote)
+}
+
+/// Resolve the tip of the default branch (see [`default_branch_name`]) for
+/// merged checks: the local branch, else its `origin/` tracking ref, else HEAD.
 fn default_branch_oid(repo: &Repository) -> Option<git2::Oid> {
-    for name in ["main", "master"] {
-        if let Ok(b) = repo.find_branch(name, BranchType::Local) {
-            if let Some(oid) = b.get().target() {
-                return Some(oid);
-            }
-        }
-    }
-    repo.head().ok().and_then(|h| h.target())
+    default_branch_name(repo)
+        .and_then(|name| {
+            let (local, remote) = base_oids(repo, &name);
+            local.or(remote)
+        })
+        .or_else(|| repo.head().ok().and_then(|h| h.target()))
 }
 
 pub fn branches(path: &str) -> Result<Vec<BranchInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    branches_in(&repo)
+}
+
+fn branches_in(repo: &Repository) -> Result<Vec<BranchInfo>, String> {
     let head_name = repo
         .head()
         .ok()
         .and_then(|h| h.shorthand().map(String::from));
-    let default_oid = default_branch_oid(&repo);
+    let default_oid = default_branch_oid(repo);
+    let config = repo.config().ok();
 
     let mut out = Vec::new();
     let iter = repo
@@ -195,15 +231,15 @@ pub fn branches(path: &str) -> Result<Vec<BranchInfo>, String> {
             .as_ref()
             .and_then(|u| u.name().ok().flatten().map(String::from));
         // Upstream configured in .git/config but the tracking ref is missing.
-        let has_upstream_cfg = repo
-            .config()
-            .ok()
-            .map(|c| c.get_string(&format!("branch.{name}.merge")).is_ok())
-            .unwrap_or(false);
+        let has_upstream_cfg = config
+            .as_ref()
+            .is_some_and(|c| c.get_string(&format!("branch.{name}.merge")).is_ok());
         let gone = has_upstream_cfg && upstream.is_none();
 
+        // A tip equal to the default's is trivially contained in it.
         let merged = match (tip, default_oid) {
-            (Some(t), Some(d)) if t != d => repo
+            (Some(t), Some(d)) if t == d => true,
+            (Some(t), Some(d)) => repo
                 .graph_ahead_behind(t, d)
                 .map(|(a, _)| a == 0)
                 .unwrap_or(false),
@@ -254,17 +290,7 @@ pub const SKIP_DIRTY: &str = "uncommitted changes";
 /// are reported as skips, not errors, so a fleet pull is safe by default.
 pub fn pull(path: &str) -> Result<OpOutcome, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    if let Ok(mut remote) = repo.find_remote("origin") {
-        let mut opts = FetchOptions::new();
-        opts.remote_callbacks(remote_callbacks());
-        let refspecs: Vec<String> = remote
-            .fetch_refspecs()
-            .map(|r| r.iter().flatten().map(String::from).collect())
-            .unwrap_or_default();
-        remote
-            .fetch(&refspecs, Some(&mut opts), None)
-            .map_err(|e| e.to_string())?;
-    }
+    fetch_origin(&repo)?;
 
     let (branch, local_oid) = {
         let head = repo.head().map_err(|e| e.to_string())?;
@@ -312,24 +338,6 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
     Ok(OpOutcome::Done(format!("fast-forwarded {behind}")))
 }
 
-/// Stash uncommitted changes (including untracked). A clean tree is a skip.
-pub fn stash(path: &str) -> Result<OpOutcome, String> {
-    let mut repo = Repository::open(path).map_err(|e| e.to_string())?;
-    if status_of(&repo).dirty == 0 {
-        return Ok(OpOutcome::Skipped("clean".into()));
-    }
-    let sig = repo
-        .signature()
-        .map_err(|_| "set git user.name and user.email first".to_string())?;
-    repo.stash_save(
-        &sig,
-        "orrery: fleet stash",
-        Some(git2::StashFlags::INCLUDE_UNTRACKED),
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(OpOutcome::Done("stashed".into()))
-}
-
 /// The repo's default branch name (`origin/HEAD`, else a local main/master) —
 /// the base branch for "Open PR" and the merged checks.
 pub fn default_branch(path: &str) -> Option<String> {
@@ -341,7 +349,11 @@ pub fn default_branch(path: &str) -> Option<String> {
 /// The default branch name, preferring `origin/HEAD`, then a local main/master.
 fn default_branch_name(repo: &Repository) -> Option<String> {
     if let Ok(r) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(name) = r.symbolic_target().and_then(|t| t.rsplit('/').next()) {
+        // Strip the exact prefix: `rsplit('/')` would turn `release/v1` into `v1`.
+        if let Some(name) = r
+            .symbolic_target()
+            .and_then(|t| t.strip_prefix("refs/remotes/origin/"))
+        {
             return Some(name.to_string());
         }
     }
@@ -351,109 +363,64 @@ fn default_branch_name(repo: &Repository) -> Option<String> {
         .map(String::from)
 }
 
-/// Switch to the default branch. A dirty tree is skipped (don't clobber work).
-pub fn checkout_default(path: &str) -> Result<OpOutcome, String> {
-    let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    if status_of(&repo).dirty > 0 {
-        return Ok(OpOutcome::Skipped(SKIP_DIRTY.into()));
-    }
-    let branch = default_branch_name(&repo).ok_or("no default branch")?;
-    let on_default = repo
-        .head()
-        .ok()
-        .and_then(|h| h.shorthand().map(String::from))
-        .as_deref()
-        == Some(branch.as_str());
-    if on_default {
-        return Ok(OpOutcome::Skipped(format!("already on {branch}")));
-    }
-    drop(repo); // switch_branch reopens the repo
-    switch_branch(path, &branch)?;
-    Ok(OpOutcome::Done(format!("on {branch}")))
-}
-
-/// Result of running a command in a repo (captured, not streamed live).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CmdResult {
-    pub code: Option<i32>,
-    pub ok: bool,
-    /// Last few lines of combined stdout+stderr.
-    pub output_tail: String,
-}
-
-/// The last `n` non-empty-trimmed lines of `s`, capped for display.
-fn tail_lines(s: &str, n: usize) -> String {
-    let lines: Vec<&str> = s.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    let tail = lines[start..].join("\n");
-    if tail.chars().count() > 400 {
-        tail.chars()
-            .rev()
-            .take(400)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
-    } else {
-        tail
-    }
-}
-
-/// Run a command in a repo's directory and capture its result. The command is
-/// NOT shell-interpreted: the first whitespace token is the executable, the
-/// rest are literal args — so there's no pipe/`&&`/glob/injection surface.
-pub fn run_command(path: &str, command: &str) -> Result<CmdResult, String> {
-    let mut parts = command.split_whitespace();
-    let program = parts.next().ok_or("empty command")?;
-    let args: Vec<&str> = parts.collect();
-    let output = std::process::Command::new(program)
-        .args(&args)
-        .current_dir(path)
-        .output()
-        .map_err(|e| format!("{program}: {e}"))?;
-    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    Ok(CmdResult {
-        code: output.status.code(),
-        ok: output.status.success(),
-        output_tail: tail_lines(&combined, 6),
-    })
-}
-
+/// Branches prune must never touch: main/master, the `origin/HEAD` default,
+/// HEAD, and any branch checked out in a linked worktree (e.g. a dispatched
+/// agent's branch, which starts at the default's tip and so reads as merged).
 fn protected_branches(repo: &Repository) -> Vec<String> {
-    ["main", "master"]
-        .iter()
-        .map(|s| s.to_string())
-        .chain(
-            repo.head()
+    let mut out: Vec<String> = ["main", "master"].iter().map(|s| s.to_string()).collect();
+    out.extend(default_branch_name(repo));
+    out.extend(head_branch_name(repo));
+    if let Ok(names) = repo.worktrees() {
+        for name in names.iter().flatten() {
+            let head = repo
+                .find_worktree(name)
                 .ok()
-                .and_then(|h| h.shorthand().map(String::from)),
-        )
-        .collect()
+                .and_then(|wt| Repository::open_from_worktree(&wt).ok())
+                .and_then(|r| head_branch_name(&r));
+            out.extend(head);
+        }
+    }
+    out
 }
 
 /// Branches that are safe to prune: merged into the default branch, or with a
-/// gone upstream — never HEAD, main, or master.
+/// gone upstream — never a protected branch (see [`protected_branches`]).
 pub fn prunable(path: &str) -> Result<Vec<BranchInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    let protected = protected_branches(&repo);
-    Ok(branches(path)?
+    prunable_in(&repo)
+}
+
+fn prunable_in(repo: &Repository) -> Result<Vec<BranchInfo>, String> {
+    let protected = protected_branches(repo);
+    Ok(branches_in(repo)?
         .into_iter()
         .filter(|b| !b.is_head && !protected.contains(&b.name) && (b.merged || b.gone))
         .collect())
 }
 
-/// Delete the prunable branches (see `prunable`). Returns the names deleted.
-pub fn prune_branches(path: &str) -> Result<Vec<String>, String> {
+/// What [`prune_branches`] did, per branch: one failure doesn't stop the rest,
+/// and the branches already deleted are still reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub deleted: Vec<String>,
+    /// `(branch, error)` for each branch that could not be deleted.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Delete the prunable branches (see [`prunable`]), reporting each outcome.
+pub fn prune_branches(path: &str) -> Result<PruneReport, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    let to_prune: Vec<String> = prunable(path)?.into_iter().map(|b| b.name).collect();
-    for name in &to_prune {
-        if let Ok(mut b) = repo.find_branch(name, BranchType::Local) {
-            b.delete().map_err(|e| e.to_string())?;
+    let mut report = PruneReport::default();
+    for b in prunable_in(&repo)? {
+        let res = repo
+            .find_branch(&b.name, BranchType::Local)
+            .and_then(|mut br| br.delete());
+        match res {
+            Ok(()) => report.deleted.push(b.name),
+            Err(e) => report.failed.push((b.name, e.to_string())),
         }
     }
-    Ok(to_prune)
+    Ok(report)
 }
 
 pub fn worktrees(path: &str) -> Result<Vec<WorktreeInfo>, String> {
@@ -533,30 +500,41 @@ pub fn head_sha(path: &str) -> Result<String, String> {
 /// e.g. it was rewritten by a rebase — so the caller still gets a useful diff.
 pub fn log_since_sha(path: &str, since_sha: &str, max: usize) -> Result<Vec<CommitInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
-    let since = repo.revparse_single(since_sha).map(|o| o.id()).ok();
     let mut walk = repo.revwalk().map_err(|e| e.to_string())?;
     walk.set_sorting(git2::Sort::TIME)
         .map_err(|e| e.to_string())?;
     walk.push_head().map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for oid in walk.flatten() {
-        // Stop at the last-seen commit (exclusive) — everything newer is "since".
-        if Some(oid) == since {
-            break;
-        }
-        if let Ok(commit) = repo.find_commit(oid) {
-            out.push(CommitInfo {
-                id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
-                summary: commit.summary().unwrap_or("").to_string(),
-                author: commit.author().name().unwrap_or("").to_string(),
-                time_unix: commit.time().seconds(),
-            });
-        }
-        if out.len() >= max {
-            break;
-        }
+    // Hide the last-seen commit and its ancestry (`since..HEAD`). Stopping the
+    // walk at `since` instead would drop commits merged in with timestamps
+    // older than it, which a time-sorted walk yields after it.
+    if let Ok(since) = repo
+        .revparse_single(since_sha)
+        .and_then(|o| o.peel_to_commit())
+    {
+        let _ = walk.hide(since.id());
     }
-    Ok(out)
+    Ok(collect_commits(&repo, walk, max))
+}
+
+/// The first 7 hex chars of `oid` — the short hash shown in the UI.
+fn short_sha(oid: git2::Oid) -> String {
+    let mut s = oid.to_string();
+    s.truncate(7);
+    s
+}
+
+/// Up to `max` commits from `walk`, as [`CommitInfo`]s.
+fn collect_commits(repo: &Repository, walk: git2::Revwalk, max: usize) -> Vec<CommitInfo> {
+    walk.flatten()
+        .filter_map(|oid| repo.find_commit(oid).ok())
+        .take(max)
+        .map(|commit| CommitInfo {
+            id: short_sha(commit.id()),
+            summary: commit.summary().unwrap_or("").to_string(),
+            author: commit.author().name().unwrap_or("").to_string(),
+            time_unix: commit.time().seconds(),
+        })
+        .collect()
 }
 
 /// Commits on HEAD that aren't reachable from `base` (a local branch name,
@@ -568,48 +546,18 @@ pub fn commits_ahead_of(path: &str, base: &str, max: usize) -> Result<Vec<Commit
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let mut walk = repo.revwalk().map_err(|e| e.to_string())?;
     walk.push_head().map_err(|e| e.to_string())?;
-    if let Some(oid) = repo
-        .find_branch(base, BranchType::Local)
-        .ok()
-        .and_then(|b| b.get().target())
-    {
+    let (local, remote) = base_oids(&repo, base);
+    for oid in local.into_iter().chain(remote) {
         let _ = walk.hide(oid);
     }
-    if let Ok(r) = repo.find_reference(&format!("refs/remotes/origin/{base}")) {
-        if let Some(oid) = r.target() {
-            let _ = walk.hide(oid);
-        }
-    }
-    let mut out = Vec::new();
-    for oid in walk.flatten().take(max) {
-        if let Ok(commit) = repo.find_commit(oid) {
-            out.push(CommitInfo {
-                id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
-                summary: commit.summary().unwrap_or("").to_string(),
-                author: commit.author().name().unwrap_or("").to_string(),
-                time_unix: commit.time().seconds(),
-            });
-        }
-    }
-    Ok(out)
+    Ok(collect_commits(&repo, walk, max))
 }
 
 pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let mut walk = repo.revwalk().map_err(|e| e.to_string())?;
     walk.push_head().map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for oid in walk.flatten().take(limit) {
-        if let Ok(commit) = repo.find_commit(oid) {
-            out.push(CommitInfo {
-                id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
-                summary: commit.summary().unwrap_or("").to_string(),
-                author: commit.author().name().unwrap_or("").to_string(),
-                time_unix: commit.time().seconds(),
-            });
-        }
-    }
-    Ok(out)
+    Ok(collect_commits(&repo, walk, limit))
 }
 
 /// Clone `url` into `dest` (full destination path). Returns the working dir.
@@ -709,19 +657,29 @@ pub fn init(
         .unwrap_or_else(|| dest.to_string()))
 }
 
+/// Byte cap on a rendered diff, to keep the diff pane responsive.
+const DIFF_CAP: usize = 200_000;
+
 fn diff_to_string(diff: &git2::Diff) -> String {
     let mut buf = String::new();
+    let mut truncated = false;
+    // Returning `false` from the callback stops libgit2 generating the rest of
+    // the patch, so a huge diff isn't built in full only to be cut. `print`
+    // then reports a user-abort error, which is expected and ignored.
     let _ = diff.print(git2::DiffFormat::Patch, |_, _, line| {
         match line.origin() {
             '+' | '-' | ' ' => buf.push(line.origin()),
             _ => {}
         }
-        buf.push_str(std::str::from_utf8(line.content()).unwrap_or(""));
+        buf.push_str(&String::from_utf8_lossy(line.content()));
+        if buf.len() > DIFF_CAP {
+            truncated = true;
+            return false;
+        }
         true
     });
-    // Cap to keep the IPC payload + UI reasonable (char-boundary safe).
-    if buf.len() > 200_000 {
-        let mut end = 200_000;
+    if truncated {
+        let mut end = DIFF_CAP;
         while !buf.is_char_boundary(end) {
             end -= 1;
         }
@@ -742,15 +700,9 @@ pub fn branch_diff(path: &str, base: &str) -> Result<String, String> {
         .head()
         .and_then(|h| h.peel_to_commit())
         .map_err(|e| e.to_string())?;
-    let base_oid = repo
-        .find_branch(base, BranchType::Local)
-        .ok()
-        .and_then(|b| b.get().target())
-        .or_else(|| {
-            repo.find_reference(&format!("refs/remotes/origin/{base}"))
-                .ok()
-                .and_then(|r| r.target())
-        })
+    let (local, remote) = base_oids(&repo, base);
+    let base_oid = local
+        .or(remote)
         .ok_or_else(|| format!("no branch '{base}' to diff against"))?;
     let merge_base = repo
         .merge_base(head.id(), base_oid)
@@ -799,19 +751,85 @@ pub fn staged_diff(path: &str) -> Result<String, String> {
     Ok(diff_to_string(&diff))
 }
 
+/// Pending renames as `(new path, old path)`: HEAD→index when `staged`, else
+/// index→working tree. [`changes`] reports a rename under its new path; the
+/// staging ops use this to find the old side so both halves move together.
+fn renames(repo: &Repository, staged: bool) -> Vec<(String, String)> {
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+    if staged {
+        opts.renames_head_to_index(true);
+    } else {
+        opts.renames_index_to_workdir(true);
+    }
+    let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
+        return Vec::new();
+    };
+    statuses
+        .iter()
+        .filter_map(|e| {
+            let s = e.status();
+            let delta = if staged {
+                s.is_index_renamed().then(|| e.head_to_index())?
+            } else {
+                s.is_wt_renamed().then(|| e.index_to_workdir())?
+            }?;
+            Some((
+                delta_path(&delta.new_file())?,
+                delta_path(&delta.old_file())?,
+            ))
+        })
+        .collect()
+}
+
+fn delta_path(file: &git2::DiffFile) -> Option<String> {
+    file.path().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The old path of a pending rename whose new path is `file` (see [`renames`]).
+fn rename_source(repo: &Repository, file: &str, staged: bool) -> Option<String> {
+    renames(repo, staged)
+        .into_iter()
+        .find_map(|(new, old)| (new == file).then_some(old))
+}
+
+/// `paths` plus the old side of any pending rename among them, so staging or
+/// unstaging a rename moves both halves rather than leaving a stray add or
+/// deletion behind.
+fn with_rename_sources(repo: &Repository, paths: &[String], staged: bool) -> Vec<String> {
+    let renames = renames(repo, staged);
+    let mut out = paths.to_vec();
+    for p in paths {
+        if let Some((_, old)) = renames.iter().find(|(new, _)| new == p) {
+            if !out.contains(old) {
+                out.push(old.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Build the libgit2 diff behind [`file_diff`] / [`file_hunks`]: one file
 /// (repo-relative pathspec), index vs HEAD when `staged`, else working tree vs
-/// index (with untracked content shown as an add). `reverse` flips old/new —
-/// hunk order is preserved, which [`unstage_hunk`] relies on.
+/// index (with untracked content shown as an add). A renamed file is diffed
+/// against its old path, so the pane shows the edits rather than a whole-file
+/// add. `reverse` flips old/new — hunk order is preserved, which
+/// [`unstage_hunk`] relies on.
 fn file_diff_raw<'r>(
     repo: &'r Repository,
     file: &str,
     staged: bool,
     reverse: bool,
 ) -> Result<git2::Diff<'r>, String> {
+    let source = rename_source(repo, file, staged);
     let mut opts = DiffOptions::new();
     opts.pathspec(file).reverse(reverse);
-    if staged {
+    if let Some(old) = &source {
+        opts.pathspec(old);
+    }
+    let mut diff = if staged {
         let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
         repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
     } else {
@@ -820,7 +838,14 @@ fn file_diff_raw<'r>(
             .show_untracked_content(true);
         repo.diff_index_to_workdir(None, Some(&mut opts))
     }
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if source.is_some() {
+        let mut find = git2::DiffFindOptions::new();
+        find.renames(true).for_untracked(!staged);
+        diff.find_similar(Some(&mut find))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(diff)
 }
 
 /// Unified diff for a single file (repo-relative pathspec): index vs HEAD when
@@ -895,13 +920,15 @@ fn apply_file_hunk(path: &str, file: &str, hunk_ix: usize, stage: bool) -> Resul
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     // Untracked files aren't in the index, and `git_apply` refuses a patch for
     // a file the index doesn't know. Their whole content is one hunk anyway,
-    // so staging hunk 0 of an untracked file is exactly `git add`.
+    // so staging hunk 0 of an untracked file is exactly `git add`. The new
+    // side of an unstaged rename is untracked too; its hunks are edits against
+    // the old path, but it can only be staged whole (with the old side).
     if stage
         && repo
             .status_file(std::path::Path::new(file))
             .is_ok_and(|s| s.is_wt_new())
     {
-        if hunk_ix != 0 {
+        if hunk_ix != 0 && rename_source(&repo, file, false).is_none() {
             return Err(format!("untracked file has one hunk, not {}", hunk_ix + 1));
         }
         return stage_paths(path, &[file.to_string()]);
@@ -934,7 +961,14 @@ pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
     let mut out = Vec::new();
     for entry in statuses.iter() {
         let s = entry.status();
-        let file = String::from_utf8_lossy(entry.path_bytes()).into_owned();
+        // `path_bytes` is the *old* path for a rename, so take each side's new
+        // path from its delta: staging/diffing must act on the file as it is
+        // now. The entry path is the fallback when a side has no delta.
+        let fallback = String::from_utf8_lossy(entry.path_bytes()).into_owned();
+        let new_path = |d: Option<git2::DiffDelta>| {
+            d.and_then(|d| delta_path(&d.new_file()))
+                .unwrap_or_else(|| fallback.clone())
+        };
         // A single status entry carries both index and worktree bits; the
         // rename checks come first because RENAMED can combine with MODIFIED.
         let staged_kind = if s.is_index_renamed() {
@@ -950,7 +984,7 @@ pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
         };
         if let Some(kind) = staged_kind {
             out.push(FileChange {
-                path: file.clone(),
+                path: new_path(entry.head_to_index()),
                 kind,
                 staged: true,
             });
@@ -968,7 +1002,7 @@ pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
         };
         if let Some(kind) = unstaged_kind {
             out.push(FileChange {
-                path: file,
+                path: new_path(entry.index_to_workdir()),
                 kind,
                 staged: false,
             });
@@ -979,12 +1013,14 @@ pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
 
 /// Stage specific files into the index (`git add <paths>`). Paths are
 /// repo-relative. A path missing from the working tree stages as a deletion
-/// (`git rm --cached` semantics) — `add_path` would error on it.
+/// (`git rm --cached` semantics) — `add_path` would error on it. Staging the
+/// new path of a rename also stages the old path's deletion.
 pub fn stage_paths(path: &str, paths: &[String]) -> Result<(), String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
+    let paths = with_rename_sources(&repo, paths, false);
     let mut index = repo.index().map_err(|e| e.to_string())?;
-    for p in paths {
+    for p in &paths {
         let rel = std::path::Path::new(p);
         // symlink_metadata so a broken symlink still stages as an add.
         if workdir.join(rel).symlink_metadata().is_ok() {
@@ -1000,13 +1036,15 @@ pub fn stage_paths(path: &str, paths: &[String]) -> Result<(), String> {
 /// (`git restore --staged <paths>`). The working tree is untouched. On an
 /// unborn HEAD (no commits yet) there is nothing to reset to, so the entries
 /// are removed from the index — which is what `reset_default(None, ..)` does.
+/// Unstaging the new path of a staged rename also restores the old path.
 pub fn unstage_paths(path: &str, paths: &[String]) -> Result<(), String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let head = repo
         .head()
         .ok()
         .and_then(|h| h.peel(git2::ObjectType::Commit).ok());
-    repo.reset_default(head.as_ref(), paths)
+    let paths = with_rename_sources(&repo, paths, true);
+    repo.reset_default(head.as_ref(), &paths)
         .map_err(|e| e.to_string())
 }
 
@@ -1040,7 +1078,7 @@ pub fn commit(path: &str, message: &str) -> Result<String, String> {
     let oid = repo
         .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(|e| e.to_string())?;
-    Ok(oid.to_string()[..7.min(oid.to_string().len())].to_string())
+    Ok(short_sha(oid))
 }
 
 /// Push the current branch to its upstream remote; with no upstream, push to
@@ -1142,13 +1180,13 @@ fn push_rejection(detail: &str) -> String {
     )
 }
 
+/// Shared test fixtures (also used by `fleet`'s tests).
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+pub(crate) mod test_support {
+    use git2::Repository;
 
     /// Init a temp repo with one commit; return (tempdir, path).
-    fn init_repo() -> (tempfile::TempDir, String) {
+    pub(crate) fn init_repo() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
         {
@@ -1156,7 +1194,7 @@ mod tests {
             cfg.set_str("user.name", "t").unwrap();
             cfg.set_str("user.email", "t@t").unwrap();
         }
-        fs::write(dir.path().join("README.md"), "# Test").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Test").unwrap();
         let mut index = repo.index().unwrap();
         index.add_path(std::path::Path::new("README.md")).unwrap();
         index.write().unwrap();
@@ -1167,31 +1205,13 @@ mod tests {
         let path = dir.path().to_string_lossy().into_owned();
         (dir, path)
     }
+}
 
-    #[test]
-    fn stash_skips_clean_then_stashes_dirty() {
-        let (_dir, path) = init_repo();
-        // Clean tree → skipped.
-        assert!(matches!(stash(&path), Ok(OpOutcome::Skipped(_))));
-        // Make it dirty, then stash succeeds.
-        fs::write(std::path::Path::new(&path).join("README.md"), "# changed").unwrap();
-        assert!(matches!(stash(&path), Ok(OpOutcome::Done(_))));
-        // Tree is clean again after stashing.
-        assert_eq!(status_of(&Repository::open(&path).unwrap()).dirty, 0);
-    }
-
-    #[test]
-    fn run_command_captures_exit_and_output() {
-        let (_dir, path) = init_repo();
-        let ok = run_command(&path, "git rev-parse --is-inside-work-tree").unwrap();
-        assert!(ok.ok && ok.code == Some(0));
-        assert!(ok.output_tail.contains("true"));
-        // A failing command reports a non-zero code, not an Err.
-        let bad = run_command(&path, "git not-a-real-subcommand").unwrap();
-        assert!(!bad.ok);
-        // A missing executable is a hard error.
-        assert!(run_command(&path, "definitely-not-a-real-binary-xyz").is_err());
-    }
+#[cfg(test)]
+mod tests {
+    use super::test_support::init_repo;
+    use super::*;
+    use std::fs;
 
     #[test]
     fn pull_skips_repo_without_upstream() {
@@ -1811,6 +1831,272 @@ mod tests {
         );
         // Deleting an unknown branch is an error, not a panic.
         assert!(delete_branch(&path, "agent/x").is_err());
+    }
+
+    /// Commit `files` (written to the workdir) on top of `parents` without
+    /// moving any ref unless `update_ref` is given; returns the commit id.
+    fn raw_commit(
+        path: &str,
+        files: &[(&str, &str)],
+        parents: &[git2::Oid],
+        update_ref: Option<&str>,
+        msg: &str,
+        time: i64,
+    ) -> git2::Oid {
+        let repo = Repository::open(path).unwrap();
+        let mut index = repo.index().unwrap();
+        for (name, content) in files {
+            fs::write(std::path::Path::new(path).join(name), content).unwrap();
+            index.add_path(std::path::Path::new(name)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::new("t", "t@t", &git2::Time::new(time, 0)).unwrap();
+        let parents: Vec<git2::Commit> = parents
+            .iter()
+            .map(|p| repo.find_commit(*p).unwrap())
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(update_ref, &sig, &sig, msg, &tree, &parent_refs)
+            .unwrap()
+    }
+
+    #[test]
+    fn log_since_sha_includes_merged_commits_with_older_timestamps() {
+        let (_dir, path) = init_repo();
+        let base = Repository::open(&path)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap();
+        let t0 = 1_700_000_000;
+        // A side commit authored long ago (older than the "seen" commit)…
+        let side = raw_commit(&path, &[("side.txt", "s")], &[base], None, "side work", t0);
+        // …the commit the user last saw, newer than `side`…
+        let seen = raw_commit(
+            &path,
+            &[("main.txt", "m")],
+            &[base],
+            Some("HEAD"),
+            "seen",
+            t0 + 1000,
+        );
+        // …then the side work is merged in.
+        raw_commit(
+            &path,
+            &[],
+            &[seen, side],
+            Some("HEAD"),
+            "merge side",
+            t0 + 2000,
+        );
+
+        let log = log_since_sha(&path, &seen.to_string(), 10).unwrap();
+        let subjects: Vec<&str> = log.iter().map(|c| c.summary.as_str()).collect();
+        assert_eq!(subjects, vec!["merge side", "side work"]);
+
+        // An unresolvable cursor returns recent HEAD history instead.
+        let all = log_since_sha(&path, "0000000", 10).unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].id.len(), 7);
+    }
+
+    #[test]
+    fn rename_stages_both_sides_and_unstages_both() {
+        let (dir, path) = init_repo();
+        let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        commit_file(&path, "old.txt", &body, "add old");
+        fs::rename(dir.path().join("old.txt"), dir.path().join("new.txt")).unwrap();
+
+        // The unstaged rename is reported under its *new* path.
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Renamed, false)]
+        );
+        // Its diff is against the old path: a pure rename has no content hunks.
+        assert!(file_hunks(&path, "new.txt", false).unwrap().is_empty());
+
+        stage_paths(&path, &["new.txt".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Renamed, true)],
+            "both sides staged: no leftover deletion or untracked file"
+        );
+        let staged = file_diff(&path, "new.txt", true).unwrap();
+        assert!(
+            !staged.contains("+line 1"),
+            "not a whole-file add: {staged}"
+        );
+
+        unstage_paths(&path, &["new.txt".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Renamed, false)],
+            "unstaging restores the old path in the index too"
+        );
+
+        stage_paths(&path, &["new.txt".into()]).unwrap();
+        commit(&path, "rename").unwrap();
+        assert!(change_tuples(&path).is_empty());
+        let repo = Repository::open(&path).unwrap();
+        let tree = repo.head().unwrap().peel_to_tree().unwrap();
+        assert!(tree.get_name("new.txt").is_some(), "new file committed");
+        assert!(tree.get_name("old.txt").is_none(), "old file gone");
+    }
+
+    #[test]
+    fn renamed_and_edited_file_diffs_show_only_the_edits() {
+        let (dir, path) = init_repo();
+        let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        commit_file(&path, "old.txt", &body, "add old");
+        fs::remove_file(dir.path().join("old.txt")).unwrap();
+        fs::write(
+            dir.path().join("new.txt"),
+            body.replace("line 2\n", "line 2 changed\n"),
+        )
+        .unwrap();
+        stage_paths(&path, &["new.txt".into()]).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Renamed, true)]
+        );
+        let hunks = file_hunks(&path, "new.txt", true).unwrap();
+        assert_eq!(hunks.len(), 1, "{hunks:?}");
+        assert!(hunks[0].lines.iter().any(|l| l == "+line 2 changed"));
+        assert!(hunks[0].lines.iter().any(|l| l == "-line 2"));
+        // Unstaging the only hunk of a staged rename unstages the rename whole.
+        unstage_hunk(&path, "new.txt", 0).unwrap();
+        assert_eq!(
+            change_tuples(&path),
+            vec![("new.txt".into(), ChangeKind::Renamed, false)]
+        );
+    }
+
+    #[test]
+    fn unborn_head_reports_its_branch_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        repo.set_head("refs/heads/trunk").unwrap();
+        assert_eq!(status_of(&repo).branch, "trunk");
+
+        let (_d, path) = init_repo();
+        let repo = Repository::open(&path).unwrap();
+        let oid = repo.head().unwrap().target().unwrap();
+        repo.set_head_detached(oid).unwrap();
+        assert_eq!(status_of(&repo).branch, "HEAD");
+    }
+
+    /// Rename the default branch to `name` and point `origin/HEAD` at
+    /// `origin/<name>` (both refs at the current HEAD commit).
+    fn set_origin_default(path: &str, name: &str) {
+        let repo = Repository::open(path).unwrap();
+        let head = repo.head().unwrap().target().unwrap();
+        repo.reference(&format!("refs/remotes/origin/{name}"), head, true, "test")
+            .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            &format!("refs/remotes/origin/{name}"),
+            true,
+            "test",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn default_branch_keeps_slashes_from_origin_head() {
+        let (_dir, path) = init_repo();
+        set_origin_default(&path, "release/v1");
+        assert_eq!(default_branch(&path).as_deref(), Some("release/v1"));
+    }
+
+    #[test]
+    fn origin_head_default_drives_merged_and_protection() {
+        let (_dir, path) = init_repo();
+        let repo = Repository::open(&path).unwrap();
+        let first = repo.head().unwrap().peel_to_commit().unwrap();
+        // The real default is `develop` (via origin/HEAD), not main/master.
+        repo.branch("develop", &first, false).unwrap();
+        set_origin_default(&path, "develop");
+        switch_branch(&path, "develop").unwrap();
+        // `topic` is ahead of the initial branch but contained in develop.
+        let topic_tip = commit_file(&path, "t.txt", "t", "topic work");
+        repo.branch("topic", &repo.find_commit(topic_tip).unwrap(), false)
+            .unwrap();
+        commit_file(&path, "d.txt", "d", "develop moves on");
+        // `same` sits exactly at develop's tip.
+        let tip = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("same", &tip, false).unwrap();
+        // Move HEAD elsewhere so develop is protected only as the default.
+        repo.branch("elsewhere", &tip, false).unwrap();
+        switch_branch(&path, "elsewhere").unwrap();
+
+        let by_name = |n: &str| {
+            branches(&path)
+                .unwrap()
+                .into_iter()
+                .find(|b| b.name == n)
+                .unwrap()
+        };
+        assert!(
+            by_name("topic").merged,
+            "contained in origin/HEAD's default"
+        );
+        assert!(by_name("same").merged, "tip equal to the default counts");
+
+        let names: Vec<String> = prunable(&path)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert!(names.contains(&"topic".to_string()), "{names:?}");
+        assert!(names.contains(&"same".to_string()), "{names:?}");
+        assert!(!names.contains(&"develop".to_string()), "default protected");
+        assert!(!names.contains(&"elsewhere".to_string()), "HEAD protected");
+    }
+
+    #[test]
+    fn prunable_skips_branches_checked_out_in_worktrees() {
+        let (_dir, path) = init_repo();
+        let dest = format!("{path}-prune-wt");
+        add_worktree_on_branch(&path, "agent-x", "agent/x", &dest).unwrap();
+        // agent/x sits at the default's tip (merged), but it's checked out.
+        assert!(prunable(&path).unwrap().iter().all(|b| b.name != "agent/x"));
+        remove_worktree(&path, "agent-x").unwrap();
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn prune_branches_reports_deleted_and_failed_per_branch() {
+        let (dir, path) = init_repo();
+        let repo = Repository::open(&path).unwrap();
+        let first = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("a-old", &first, false).unwrap();
+        repo.branch("b-locked", &first, false).unwrap();
+        repo.branch("c-old", &first, false).unwrap();
+        commit_file(&path, "n.txt", "n", "advance");
+        // A stale lock file makes deleting `b-locked` fail.
+        fs::write(dir.path().join(".git/refs/heads/b-locked.lock"), "").unwrap();
+
+        let report = prune_branches(&path).unwrap();
+        assert_eq!(
+            report.deleted,
+            vec!["a-old".to_string(), "c-old".to_string()]
+        );
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert_eq!(report.failed[0].0, "b-locked");
+        assert!(repo.find_branch("a-old", BranchType::Local).is_err());
+        assert!(repo.find_branch("b-locked", BranchType::Local).is_ok());
+    }
+
+    #[test]
+    fn diff_to_string_truncates_large_diffs() {
+        let (dir, path) = init_repo();
+        let big: String = (0..30_000).map(|i| format!("line {i}\n")).collect();
+        fs::write(dir.path().join("README.md"), big).unwrap();
+        let diff = working_diff(&path).unwrap();
+        assert!(diff.ends_with("… diff truncated …\n"));
+        assert!(diff.len() <= DIFF_CAP + 32);
     }
 
     #[test]
