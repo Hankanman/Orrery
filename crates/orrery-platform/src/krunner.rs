@@ -1,18 +1,45 @@
 //! KDE KRunner integration (#49 / #138): exposes repos over the `org.kde.krunner1`
 //! D-Bus interface so they're searchable straight from KRunner / the Plasma
 //! launcher. Matches read the cached repo list (populated by the app's scans),
-//! so there's no filesystem walk per keystroke. Also writes a dbusplugin
+//! so there's no filesystem walk per keystroke — and that list is itself held
+//! in memory for a few seconds, so a burst of keystrokes doesn't re-query
+//! SQLite each time. Also writes a dbusplugin
 //! `.desktop` so KRunner discovers the service. Best-effort — no-ops without a
 //! session bus, like the rest of platform.
 //!
-//! This is the native-rewrite port of the Tauri-era `src-tauri/src/krunner.rs`:
-//! same D-Bus surface, but driven on its own thread + runtime (mirroring
-//! `appearance::watch` / `notifier::watch`) instead of Tauri's async runtime.
+//! The service runs on its own thread + runtime, mirroring `appearance::watch`
+//! / `notifier::watch`.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use orrery_core::model::Repo;
 use orrery_core::{cache, config, launch};
 use zbus::zvariant::OwnedValue;
+
+/// How long a loaded repo list serves matches before re-reading the cache.
+/// KRunner fires `Match` per keystroke; a few seconds covers a typed query
+/// while still picking up a fresh scan promptly.
+const REPOS_TTL: Duration = Duration::from_secs(5);
+
+/// The repo list as last loaded, and when.
+static REPOS: Mutex<Option<(Instant, Arc<Vec<Repo>>)>> = Mutex::new(None);
+
+/// The cached repo list, reloaded from SQLite once it's older than [`REPOS_TTL`].
+fn repos() -> Arc<Vec<Repo>> {
+    let Ok(mut slot) = REPOS.lock() else {
+        return Arc::new(cache::load_repos());
+    };
+    if let Some((at, repos)) = slot.as_ref() {
+        if at.elapsed() < REPOS_TTL {
+            return repos.clone();
+        }
+    }
+    let repos = Arc::new(cache::load_repos());
+    *slot = Some((Instant::now(), repos.clone()));
+    repos
+}
 
 const BUS_NAME: &str = "com.orrery.krunner";
 const OBJECT_PATH: &str = "/krunner";
@@ -40,8 +67,8 @@ impl Runner {
         if q.len() < 2 {
             return Vec::new();
         }
-        cache::load_repos()
-            .into_iter()
+        repos()
+            .iter()
             .filter(|r| {
                 r.display_name.to_lowercase().contains(&q)
                     || r.slug.as_deref().unwrap_or("").to_lowercase().contains(&q)
@@ -51,7 +78,7 @@ impl Runner {
             .map(|r| {
                 let subtitle = r.slug.clone().unwrap_or_else(|| r.path.clone());
                 (
-                    r.id,
+                    r.id.clone(),
                     format!("{}  —  {}", r.display_name, subtitle),
                     "folder-development".to_string(),
                     60,
@@ -74,7 +101,9 @@ impl Runner {
         if !cache::load_repos().iter().any(|r| r.id == match_id) {
             return;
         }
-        let _ = launch::launch(&config::load().ide_command, match_id);
+        if let Err(e) = launch::launch(&config::load().ide_command, match_id) {
+            eprintln!("[orrery krunner] failed to open {match_id}: {e}");
+        }
     }
 }
 

@@ -1,7 +1,7 @@
-# orrery-core — all of Orrery's logic with zero UI and zero Tauri. Scanning,
-# git, host APIs (GitHub/GitLab), local AI (Ollama + bundled llama.cpp), the
-# SQLite cache, config, and launchers. The GPUI app (crates/orrery) depends on
-# this; it knows nothing about the UI.
+# orrery-core — all of Orrery's logic with zero UI. Scanning, git, host APIs
+# (GitHub/GitLab), local AI (Ollama + bundled llama.cpp), the SQLite cache,
+# config, and launchers. The native GPUI app (and orrery-platform) depend on
+# this; it knows nothing about either.
 [package]
 name = "orrery-core"
 version = "2026.7.1"
@@ -30,9 +30,16 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 urlencoding = "2"
 futures-util = "0.3"                                      # stream combinators (ai.rs SSE)
-# Only the timer (oauth device-flow poll backoff). No runtime here — the caller
-# (app) drives async; logic stays runtime-agnostic where it can.
-tokio = { version = "1", features = ["time"] }
+# Timer (oauth device-flow poll backoff), `rt` for `spawn_blocking` (the
+# `gh auth token` spawn stays off async workers), an async mutex (llama sidecar
+# lifecycle) and async file I/O (model downloads). No runtime is built here —
+# the caller (app) drives async; these features are already enabled app-wide.
+tokio = { version = "1", features = ["rt", "time", "sync", "fs", "io-util"] }
+sha2 = "0.11"                                             # GGUF download checksum (already in the app's tree)
+
+# prctl(PR_SET_PDEATHSIG) so the llama-server sidecar dies with the app.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

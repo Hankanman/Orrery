@@ -1,10 +1,19 @@
 //! Detect terminal coding-agent sessions running on the system by scanning
 //! `/proc` — not just ones Orrery launched. A process counts as an agent session
-//! if its program (argv[0]) is a known agent CLI *and* its working directory is
-//! inside one of the scanned repos. Terminate is a plain signal by pid, so no
-//! child-process bookkeeping is needed.
+//! if its program (argv[0], or the script argv[1] names when argv[0] is an
+//! interpreter like `python`/`node`) is a known agent CLI *and* its working
+//! directory is inside one of the scanned repos (the deepest one wins, so a
+//! worktree nested in a repo is attributed to the worktree). Terminate is a
+//! plain signal by pid, guarded against pid reuse by the process start time
+//! recorded at detection, so no child-process bookkeeping is needed.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// `starttime` ticks of every agent pid returned by the last [`detect`], so
+/// [`terminate`] can refuse to signal a pid that has since been reused.
+static DETECTED: Mutex<Option<HashMap<u32, i64>>> = Mutex::new(None);
 
 /// A detected agent process.
 pub struct RunningAgent {
@@ -33,17 +42,63 @@ fn boot_time() -> i64 {
         .unwrap_or(0)
 }
 
-/// Process start time in unix seconds, from `/proc/<pid>/stat` field 22.
-fn start_time(pid: u32, btime: i64) -> i64 {
+/// Raw `starttime` (clock ticks since boot) of a live pid, from `/proc/<pid>/stat`.
+fn pid_start_ticks(pid: u32) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    starttime_ticks(&stat)
+}
+
+/// Process start time in unix seconds from its `starttime` ticks.
+fn start_unix(ticks: Option<i64>, btime: i64) -> i64 {
     // Clock ticks per second; 100 on effectively all Linux configs.
     const HZ: i64 = 100;
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return btime;
-    };
-    match starttime_ticks(&stat) {
+    match ticks {
         Some(ticks) => btime + ticks / HZ,
         None => btime,
     }
+}
+
+/// Interpreters that host agent CLIs as scripts (`node /usr/bin/gemini`,
+/// `python3 ~/.local/bin/aider`): for these the program is in argv[1].
+fn is_interpreter(name: &str) -> bool {
+    name.starts_with("python") || matches!(name, "node" | "nodejs" | "bun" | "deno")
+}
+
+/// The program name to match against the agent list: argv[0]'s basename, or —
+/// when that's an interpreter — the hosted script's basename (first non-flag
+/// argument, or the module after `-m`), minus a `.js`/`.mjs`/`.py` extension.
+fn program_name(args: &[String]) -> Option<&str> {
+    let argv0 = basename(args.first()?);
+    if !is_interpreter(argv0) {
+        return Some(argv0);
+    }
+    let mut rest = args[1..].iter();
+    let script = loop {
+        let a = rest.next()?;
+        if a == "-m" {
+            break rest.next()?;
+        }
+        if !a.starts_with('-') {
+            break a;
+        }
+    };
+    let name = basename(script);
+    Some(
+        [".mjs", ".cjs", ".js", ".py"]
+            .iter()
+            .find_map(|ext| name.strip_suffix(ext))
+            .unwrap_or(name),
+    )
+}
+
+/// The deepest of `repos` (paired with its canonical path) containing `cwd`.
+/// Longest-prefix, so a worktree nested inside a scanned repo wins over it.
+fn attribute<'a>(cwd: &Path, repos: &'a [(String, PathBuf)]) -> Option<&'a String> {
+    repos
+        .iter()
+        .filter(|(_, canon)| cwd.starts_with(canon))
+        .max_by_key(|(_, canon)| canon.components().count())
+        .map(|(repo, _)| repo)
 }
 
 /// Parse the `starttime` field (clock ticks since boot, field 22) out of a
@@ -67,6 +122,17 @@ pub fn detect(repos: &[String], programs: &[String]) -> Vec<RunningAgent> {
         return out;
     };
     let btime = boot_time();
+    // `/proc/<pid>/cwd` is fully resolved, so compare against resolved roots —
+    // a symlinked repo/root would otherwise never match. Keep the caller's
+    // spelling for the returned `repo` (the app keys repos by it).
+    let repos: Vec<(String, PathBuf)> = repos
+        .iter()
+        .map(|r| {
+            let canon = std::fs::canonicalize(r).unwrap_or_else(|_| PathBuf::from(r));
+            (r.clone(), canon)
+        })
+        .collect();
+    let mut ticks_by_pid = HashMap::new();
 
     for entry in dir.flatten() {
         let Some(pid) = entry
@@ -86,10 +152,10 @@ pub fn detect(repos: &[String], programs: &[String]) -> Vec<RunningAgent> {
             .filter(|s| !s.is_empty())
             .map(|s| String::from_utf8_lossy(s).into_owned())
             .collect();
-        let Some(argv0) = args.first() else {
+        let Some(program) = program_name(&args) else {
             continue;
         };
-        if !programs.iter().any(|p| basename(argv0) == p.as_str()) {
+        if !programs.iter().any(|p| program == p.as_str()) {
             continue;
         }
 
@@ -97,36 +163,125 @@ pub fn detect(repos: &[String], programs: &[String]) -> Vec<RunningAgent> {
         let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else {
             continue;
         };
-        let Some(repo) = repos.iter().find(|r| {
-            let r = Path::new(r);
-            cwd == r || cwd.starts_with(r)
-        }) else {
+        let Some(repo) = attribute(&cwd, &repos) else {
             continue;
         };
 
+        let ticks = pid_start_ticks(pid);
+        if let Some(t) = ticks {
+            ticks_by_pid.insert(pid, t);
+        }
         out.push(RunningAgent {
             pid,
             repo: repo.clone(),
             command: args.join(" "),
-            started_unix: start_time(pid, btime),
+            started_unix: start_unix(ticks, btime),
         });
+    }
+    if let Ok(mut detected) = DETECTED.lock() {
+        *detected = Some(ticks_by_pid);
     }
     out.sort_by_key(|a| std::cmp::Reverse(a.started_unix));
     out
 }
 
-/// Send SIGTERM to a process. Best-effort via the `kill` binary (no extra deps).
+/// Send SIGTERM to an agent process returned by the most recent [`detect`].
+/// Refuses (returns `false`) unless the pid was detected *and* still has the
+/// same start time — i.e. it hasn't exited and been reused by an unrelated
+/// process since the scan.
 pub fn terminate(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let expected = DETECTED
+        .lock()
+        .ok()
+        .and_then(|d| d.as_ref().and_then(|m| m.get(&pid).copied()));
+    match expected {
+        Some(ticks) => terminate_if_same(pid, ticks),
+        None => false,
+    }
+}
+
+/// SIGTERM `pid` only if its `/proc/<pid>/stat` start time still equals
+/// `expected_ticks`. (A tiny race remains between the check and the signal;
+/// a pidfd would close it, but that window is microseconds.)
+fn terminate_if_same(pid: u32, expected_ticks: i64) -> bool {
+    let Ok(raw) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if raw <= 0 || pid_start_ticks(pid) != Some(expected_ticks) {
+        return false;
+    }
+    // SAFETY: kill(2) takes plain integers and has no memory-safety contract.
+    unsafe { libc::kill(raw, libc::SIGTERM) == 0 }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, starttime_ticks};
+    use super::{attribute, basename, program_name, starttime_ticks, terminate_if_same};
+    use std::path::{Path, PathBuf};
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn program_name_reads_argv0_or_the_hosted_script() {
+        assert_eq!(
+            program_name(&argv("/usr/bin/claude --resume")),
+            Some("claude")
+        );
+        assert_eq!(
+            program_name(&argv("/usr/bin/python3 /home/u/.local/bin/aider --yes")),
+            Some("aider")
+        );
+        assert_eq!(program_name(&argv("node /usr/bin/gemini")), Some("gemini"));
+        assert_eq!(
+            program_name(&argv("node --no-warnings /opt/qwen/qwen.js")),
+            Some("qwen")
+        );
+        assert_eq!(program_name(&argv("python3.12 -m aider")), Some("aider"));
+        assert_eq!(program_name(&argv("bun opencode.mjs")), Some("opencode"));
+        assert_eq!(program_name(&argv("python3")), None, "bare interpreter");
+        assert_eq!(program_name(&[]), None);
+    }
+
+    #[test]
+    fn attribute_picks_the_deepest_repo() {
+        let repos = vec![
+            ("/r/app".to_string(), PathBuf::from("/r/app")),
+            (
+                "/r/app/.wt/feat".to_string(),
+                PathBuf::from("/r/app/.wt/feat"),
+            ),
+            ("/r/other".to_string(), PathBuf::from("/r/other")),
+        ];
+        let at = |p: &str| attribute(Path::new(p), &repos).map(String::as_str);
+        assert_eq!(at("/r/app/src"), Some("/r/app"));
+        assert_eq!(at("/r/app/.wt/feat/src"), Some("/r/app/.wt/feat"));
+        assert_eq!(at("/r/app/.wt/feat"), Some("/r/app/.wt/feat"));
+        assert_eq!(at("/r/appendix"), None, "component-wise, not string prefix");
+        assert_eq!(at("/elsewhere"), None);
+    }
+
+    #[test]
+    fn attribute_matches_symlinked_roots_via_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let spelled = link.to_string_lossy().into_owned();
+        let repos = vec![(spelled.clone(), std::fs::canonicalize(&link).unwrap())];
+        // /proc/<pid>/cwd is resolved, i.e. the real path.
+        let cwd = std::fs::canonicalize(real.join("src")).unwrap();
+        assert_eq!(attribute(&cwd, &repos), Some(&spelled));
+    }
+
+    #[test]
+    fn terminate_refuses_a_reused_pid() {
+        // Our own pid with a start time that can't be ours: must not signal.
+        assert!(!terminate_if_same(std::process::id(), -1));
+        assert!(!terminate_if_same(0, 0), "pid 0 = process group, never");
+    }
 
     #[test]
     fn basename_takes_trailing_segment() {

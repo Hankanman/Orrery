@@ -2,8 +2,10 @@
 //! (`~/.config/orrery/config.toml`), with sensible PATH-detected defaults.
 
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::AppConfig;
 
@@ -17,7 +19,7 @@ fn config_path() -> Option<PathBuf> {
 // TOML on every call.
 static CACHE: LazyLock<RwLock<Option<AppConfig>>> = LazyLock::new(|| RwLock::new(None));
 
-/// First command on PATH from `candidates`, formatted into a `{path}` template.
+/// First command on PATH from `candidates`, substituted for `{cmd}` in `template`.
 fn detect(candidates: &[&str], template: &str) -> Option<String> {
     candidates
         .iter()
@@ -87,7 +89,8 @@ impl Default for AppConfig {
     }
 }
 
-/// Load config, falling back to (and writing) defaults if absent/invalid.
+/// Load config, falling back to defaults if absent (written out) or invalid
+/// (the bad file is kept and backed up — see [`load_from`]).
 /// Cached after the first read; `save()` keeps the cache current.
 pub fn load() -> AppConfig {
     if let Some(cfg) = CACHE.read().ok().and_then(|g| g.clone()) {
@@ -101,30 +104,148 @@ pub fn load() -> AppConfig {
 }
 
 fn load_uncached() -> AppConfig {
-    let Some(path) = config_path() else {
-        return AppConfig::default();
-    };
-    match fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).unwrap_or_else(|_| AppConfig::default()),
-        Err(_) => {
+    match config_path() {
+        Some(path) => load_from(&path),
+        None => AppConfig::default(),
+    }
+}
+
+/// Read and parse the config at `path`.
+///
+/// - Missing file → defaults, written out so the user has a file to edit.
+/// - Unparseable file (bad TOML, a wrong value type, non-UTF-8) → defaults for
+///   this session, but the original is left in place and a byte-for-byte
+///   backup (`config.toml.bad-<unix-secs>`) is kept, so nothing the user wrote
+///   is lost even after a later `save()` replaces it.
+/// - Unreadable for another reason (permissions, I/O) → defaults, file untouched.
+fn load_from(path: &Path) -> AppConfig {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let cfg = AppConfig::default();
-            let _ = save(&cfg);
-            cfg
+            if let Err(e) = save_to(path, &cfg) {
+                eprintln!("[config] could not write default {}: {e}", path.display());
+            }
+            return cfg;
+        }
+        Err(e) => {
+            eprintln!(
+                "[config] could not read {}: {e}; using defaults",
+                path.display()
+            );
+            return AppConfig::default();
+        }
+    };
+    match parse(&bytes) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            let backup = match ensure_backup(path, &bytes) {
+                Ok(b) => format!("backed up to {}", b.display()),
+                Err(e) => format!("backup failed: {e}"),
+            };
+            eprintln!(
+                "[config] {} is invalid ({backup}); using defaults until fixed: {err}",
+                path.display()
+            );
+            AppConfig::default()
         }
     }
+}
+
+fn parse(bytes: &[u8]) -> Result<AppConfig, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    toml::from_str(text).map_err(|e| e.to_string())
+}
+
+/// Make sure a backup of the bad config `bytes` exists beside `path`, reusing
+/// an identical earlier backup rather than piling up copies on every launch.
+fn ensure_backup(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_string());
+    let prefix = format!("{name}.bad-");
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let is_backup = entry.file_name().to_string_lossy().starts_with(&prefix);
+            if is_backup && fs::read(entry.path()).is_ok_and(|b| b == bytes) {
+                return Ok(entry.path());
+            }
+        }
+    }
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for n in 0u32.. {
+        let suffix = if n == 0 {
+            secs.to_string()
+        } else {
+            format!("{secs}-{n}")
+        };
+        let backup = dir.join(format!("{prefix}{suffix}"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                f.sync_all()?;
+                return Ok(backup);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("u32 backup suffixes exhausted")
 }
 
 /// Persist config as TOML, creating the config directory if needed.
 pub fn save(config: &AppConfig) -> Result<(), String> {
     let path = config_path().ok_or("no config directory")?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let text = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(&path, text).map_err(|e| e.to_string())?;
+    save_to(&path, config)?;
     // Keep the cache in step with what we just wrote.
     if let Ok(mut g) = CACHE.write() {
         *g = Some(config.clone());
+    }
+    Ok(())
+}
+
+/// Atomically write `config` to `path`: temp file in the same directory,
+/// fsync, rename over the original (so a crash mid-write can't leave a
+/// truncated config). If the file being replaced doesn't parse, it is backed
+/// up first — and the save refuses rather than destroy it unbacked.
+fn save_to(path: &Path, config: &AppConfig) -> Result<(), String> {
+    let dir = path.parent().ok_or("config path has no parent directory")?;
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    if let Ok(existing) = fs::read(path) {
+        if parse(&existing).is_err() {
+            ensure_backup(path, &existing)
+                .map_err(|e| format!("not overwriting invalid config without a backup: {e}"))?;
+        }
+    }
+    let text = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
+    let name = path.file_name().ok_or("config path has no file name")?;
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let write = || -> io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    };
+    if let Err(e) = write() {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    // Make the rename itself durable.
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
     }
     Ok(())
 }
@@ -178,5 +299,125 @@ mod tests {
         )
         .unwrap();
         assert_eq!(back.agent_dispatch_args, "{prompt}");
+    }
+
+    fn backups(dir: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().contains("config.toml.bad-"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn partial_config_keeps_set_keys_and_defaults_the_rest() {
+        // Only a couple of keys set: before struct-level #[serde(default)] this
+        // failed to parse and reset every setting.
+        let cfg: AppConfig =
+            toml::from_str("roots = [\"/srv/code\"]\nnotifyNewPr = false").unwrap();
+        assert_eq!(cfg.roots, vec!["/srv/code".to_string()]);
+        assert!(!cfg.notify_new_pr);
+        let d = AppConfig::default();
+        assert_eq!(cfg.scan_depth, d.scan_depth);
+        assert_eq!(cfg.ignore, d.ignore);
+        assert_eq!(cfg.agent_dispatch_args, d.agent_dispatch_args);
+        assert!(cfg.ai_enabled);
+    }
+
+    #[test]
+    fn unknown_or_typoed_key_does_not_reset_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // `scanDepht` is a typo: it's ignored and scanDepth falls back, but
+        // the other settings survive.
+        fs::write(
+            &path,
+            "roots = [\"/srv/code\"]\nscanDepht = 7\nideCommand = \"zed {path}\"",
+        )
+        .unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.roots, vec!["/srv/code".to_string()]);
+        assert_eq!(cfg.ide_command, "zed {path}");
+        assert_eq!(cfg.scan_depth, 3);
+        assert!(backups(dir.path()).is_empty(), "valid file needs no backup");
+    }
+
+    #[test]
+    fn bad_toml_is_backed_up_and_left_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let bad = "roots = [\"/srv/code\"\nscanDepth = ";
+        fs::write(&path, bad).unwrap();
+
+        let cfg = load_from(&path);
+        assert_eq!(cfg.scan_depth, AppConfig::default().scan_depth);
+        // Original untouched, one backup with identical bytes.
+        assert_eq!(fs::read_to_string(&path).unwrap(), bad);
+        let b = backups(dir.path());
+        assert_eq!(b.len(), 1);
+        assert_eq!(fs::read_to_string(&b[0]).unwrap(), bad);
+
+        // Reloading the same bad file reuses the backup rather than piling up.
+        load_from(&path);
+        assert_eq!(backups(dir.path()).len(), 1);
+
+        // A save replaces the bad file, and the backup still holds the original.
+        save_to(&path, &cfg).unwrap();
+        assert_eq!(load_from(&path).roots, cfg.roots);
+        let b = backups(dir.path());
+        assert_eq!(b.len(), 1);
+        assert_eq!(fs::read_to_string(&b[0]).unwrap(), bad);
+    }
+
+    #[test]
+    fn wrong_value_type_counts_as_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "scanDepth = \"three\"").unwrap();
+        load_from(&path);
+        assert_eq!(backups(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn save_backs_up_an_invalid_file_it_replaces() {
+        // Even without a prior load, a save over an unparseable file keeps it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "not = [valid").unwrap();
+        save_to(&path, &AppConfig::default()).unwrap();
+        let b = backups(dir.path());
+        assert_eq!(b.len(), 1);
+        assert_eq!(fs::read_to_string(&b[0]).unwrap(), "not = [valid");
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let cfg = AppConfig {
+            scan_depth: 9,
+            ..AppConfig::default()
+        };
+        save_to(&path, &cfg).unwrap();
+        save_to(&path, &cfg).unwrap();
+        assert_eq!(load_from(&path).scan_depth, 9);
+        let names: Vec<String> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["config.toml".to_string()]);
+    }
+
+    #[test]
+    fn missing_file_writes_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = load_from(&path);
+        assert!(path.exists());
+        assert_eq!(load_from(&path).scan_depth, cfg.scan_depth);
     }
 }

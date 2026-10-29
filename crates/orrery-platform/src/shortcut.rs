@@ -4,8 +4,8 @@
 //! mechanism. The app registers an "activate" shortcut with a preferred
 //! Ctrl+Alt+O trigger — on a desktop that implements the portal (KDE Plasma 6,
 //! GNOME) the user can rebind it in their global-shortcuts settings. `on_activate`
-//! fires whenever the shortcut is triggered. Degrades silently (the thread exits)
-//! if the portal is unavailable, like the rest of platform.
+//! fires whenever the shortcut is triggered. Degrades gracefully (logs, and the
+//! thread exits) if the portal is unavailable, like the rest of platform.
 
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
@@ -24,7 +24,11 @@ pub fn spawn(on_activate: impl Fn() + Send + 'static) {
             return;
         };
         // Best-effort: a missing/!implemented portal just means no global hotkey.
-        let _ = rt.block_on(run(on_activate));
+        if let Err(e) = rt.block_on(run(on_activate)) {
+            eprintln!(
+                "[orrery shortcut] global shortcut unavailable (GlobalShortcuts portal): {e}"
+            );
+        }
     });
 }
 

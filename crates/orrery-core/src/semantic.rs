@@ -6,7 +6,7 @@
 //! chunks. Keying by (host, slug) — never slug alone — follows the #159
 //! lesson: the same "owner/repo" slug on two hosts must not share rows.
 //!
-//! Search is brute-force cosine over every stored row ([`top_k`]). At fleet
+//! Search is brute-force cosine over every stored row ([`recall`]). At fleet
 //! scale (a few thousand vectors) that is sub-millisecond, so there is
 //! deliberately no vector DB and no ANN index.
 //!
@@ -18,9 +18,9 @@
 //!
 //! Indexing ([`index_fleet`]) builds a per-repo corpus — readme (chunked),
 //! description, topics, notes, recent commit subjects — and embeds only the
-//! (repo, source) pairs whose text signature changed since the last pass
-//! (`embed_sig:*` meta keys), pacing itself so a cold fleet doesn't hammer the
-//! backend. Recall ([`recall`]) ranks a query vector against the whole index,
+//! (repo, source) pairs whose (embed model, text) signature changed since the
+//! last pass (`embed_sig:*` meta keys), prunes rows for repos that left the
+//! fleet, and paces itself so a cold fleet doesn't hammer the backend. Recall ([`recall`]) ranks a query vector against the whole index,
 //! best chunk per repo. Both are dormant unless the backend can embed.
 
 use rusqlite::Connection;
@@ -32,8 +32,9 @@ use crate::{ai, cache, config, git_ops};
 pub const MIN_SCORE: f32 = 0.35;
 /// Max ranked repos returned for a query.
 pub const MAX_HITS: usize = 8;
-/// How many chunks to embed concurrently.
-const BATCH: usize = 4;
+/// How many chunks go in one batched embed request. At least
+/// `MAX_CHUNKS_PER_SOURCE`, so a source is normally a single request.
+const BATCH: usize = 16;
 
 /// One stored chunk of the embedding index, decoded and ready to rank.
 #[derive(Debug, Clone, PartialEq)]
@@ -248,7 +249,7 @@ pub fn index_stats() -> IndexStats {
 /// Cosine similarity in [-1, 1]. Mismatched lengths, empty, and zero-norm
 /// vectors all return 0.0 rather than `None`: for ranking, "can't compare"
 /// and "no similarity" are the same outcome, and a plain f32 keeps the
-/// [`top_k`] sort total. (A length mismatch means the row was embedded with
+/// [`recall`] sort total. (A length mismatch means the row was embedded with
 /// a different model than the query — such rows simply never rank.)
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
@@ -269,11 +270,12 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-/// Brute-force rank `rows` against `query`, best `k` first. This *is* the
-/// search engine: no vector DB, no ANN — a linear scan is sub-millisecond at
-/// fleet scale. Equal scores tie-break on (host, slug, source, chunk_ix) so
-/// results are deterministic run to run.
-pub fn top_k(query: &[f32], rows: Vec<EmbeddingRow>, k: usize) -> Vec<ScoredHit> {
+/// Brute-force rank `rows` against `query`, best `k` chunks first (no
+/// per-repo grouping — [`recall`] is the production ranker). Equal scores
+/// tie-break on (host, slug, source, chunk_ix) so results are deterministic.
+/// Test-only: it pins the raw scan/tie-break behaviour `recall` builds on.
+#[cfg(test)]
+fn top_k(query: &[f32], rows: Vec<EmbeddingRow>, k: usize) -> Vec<ScoredHit> {
     let mut scored: Vec<(f32, EmbeddingRow)> = rows
         .into_iter()
         .map(|r| (cosine_similarity(query, &r.vector), r))
@@ -391,12 +393,23 @@ pub fn sig_key(host: &str, slug: &str, source: &str) -> String {
     format!("embed_sig:{host}\u{1f}{slug}\u{1f}{source}")
 }
 
-/// Stable hex fingerprint of a source's text, for skip-if-unchanged.
-pub fn text_signature(text: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
-    format!("{:x}", h.finish())
+/// Stable hex fingerprint of a source's text *and* the embed model, for
+/// skip-if-unchanged: switching the embedding model changes every signature,
+/// so the index re-embeds instead of mixing vector spaces. 64-bit FNV-1a —
+/// unlike `DefaultHasher`, its output is fixed across Rust releases, so a
+/// toolchain upgrade doesn't silently force a full re-embed (or worse, a
+/// collision-free-looking mismatch).
+pub fn text_signature(model: &str, text: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = OFFSET;
+    // The unit separator can't appear in a model name, so (model, text) pairs
+    // can't collide by concatenation.
+    for b in model.bytes().chain([0x1f]).chain(text.bytes()) {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    format!("fnv1a:{h:016x}")
 }
 
 /// Split `text` into embedding-sized chunks: markdown headings and blank lines
@@ -483,15 +496,17 @@ fn hard_split(block: &str) -> Vec<String> {
     out
 }
 
-/// Which of a doc's sources need (re)embedding, given the stored signature per
-/// source: `(source, text, new signature)` for each changed one. Pure — the
-/// signature lookup is injected. A source that is empty *and* was never stored
-/// is skipped outright (no rows to write, no signature worth recording); an
-/// emptied source that *was* stored is returned so its stale chunks drop.
-pub fn changed_sources(
-    sources: &[(String, String)],
+/// Which of a doc's sources need (re)embedding with `model`, given the stored
+/// signature per source: `(source, text, new signature)` for each changed one.
+/// Pure — the signature lookup is injected. A source that is empty *and* was
+/// never stored is skipped outright (no rows to write, no signature worth
+/// recording); an emptied source that *was* stored is returned so its stale
+/// chunks drop.
+pub fn changed_sources<'a>(
+    model: &str,
+    sources: &'a [(String, String)],
     stored_sig: impl Fn(&str) -> Option<String>,
-) -> Vec<(&str, &str, String)> {
+) -> Vec<(&'a str, &'a str, String)> {
     sources
         .iter()
         .filter_map(|(source, text)| {
@@ -499,7 +514,7 @@ pub fn changed_sources(
             if text.trim().is_empty() && stored.is_none() {
                 return None;
             }
-            let sig = text_signature(text);
+            let sig = text_signature(model, text);
             (stored.as_deref() != Some(sig.as_str())).then_some((
                 source.as_str(),
                 text.as_str(),
@@ -596,6 +611,11 @@ async fn index_fleet_inner(repos: &[Repo]) -> usize {
     let model = config::load().embed_model;
     let now = unix_now();
 
+    // Drop rows for repos no longer in the fleet first, so orphans can't take
+    // recall's MAX_HITS slots from live repos.
+    let live: std::collections::HashSet<(String, String)> = repos.iter().map(repo_key).collect();
+    let _ = prune_orphans(&live);
+
     // Plan first (cheap, local): docs + changed sources, deduped by store key
     // (two checkouts of one remote index once, like enrich jobs).
     let mut seen = std::collections::HashSet::new();
@@ -606,7 +626,7 @@ async fn index_fleet_inner(repos: &[Repo]) -> usize {
             continue;
         }
         let doc = build_doc(repo);
-        let changed: Vec<SourceWork> = changed_sources(&doc.sources, |source| {
+        let changed: Vec<SourceWork> = changed_sources(&model, &doc.sources, |source| {
             cache::get_meta(&sig_key(&doc.host, &doc.slug, source))
         })
         .into_iter()
@@ -638,15 +658,14 @@ async fn index_fleet_inner(repos: &[Repo]) -> usize {
     embedded
 }
 
-/// Embed a source's chunks, [`BATCH`] at a time. Any failure fails the source
-/// (partial vectors must not be stored — ranking needs the full source).
+/// Embed a source's chunks, up to [`BATCH`] per `/api/embed` request. Any
+/// failure fails the source (partial vectors must not be stored — ranking
+/// needs the full source).
 async fn embed_chunks(model: &str, chunks: &[String]) -> Result<Vec<(String, Vec<f32>)>, String> {
     let mut out = Vec::with_capacity(chunks.len());
     for group in chunks.chunks(BATCH) {
-        let vecs = futures_util::future::join_all(group.iter().map(|c| ai::embed(model, c))).await;
-        for (chunk, vec) in group.iter().zip(vecs) {
-            out.push((chunk.clone(), vec?));
-        }
+        let vecs = ai::embed_batch(model, group).await?;
+        out.extend(group.iter().cloned().zip(vecs));
     }
     Ok(out)
 }
@@ -672,6 +691,57 @@ pub fn purge_legacy_on(conn: &Connection) -> rusqlite::Result<usize> {
 pub fn purge_legacy() -> Result<usize, String> {
     let conn = cache::open()?;
     purge_legacy_on(&conn).map_err(|e| e.to_string())
+}
+
+/// Drop every stored chunk and skip signature for repos not in `live` (the
+/// current fleet's [`repo_key`]s) — removed or moved repos, a changed remote.
+/// Returns the chunks removed. An empty `live` set is treated as "fleet not
+/// known" and prunes nothing, so a failed scan can't wipe the index.
+pub fn prune_orphans_on(
+    conn: &Connection,
+    live: &std::collections::HashSet<(String, String)>,
+) -> rusqlite::Result<usize> {
+    if live.is_empty() {
+        return Ok(0);
+    }
+    let is_orphan = |host: &str, slug: &str| !live.contains(&(host.to_string(), slug.to_string()));
+
+    let stored: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT host, slug FROM embeddings")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut removed = 0;
+    for (host, slug) in stored.iter().filter(|(h, s)| is_orphan(h, s)) {
+        removed += delete_embeddings_on(conn, host, slug, None)?;
+    }
+
+    // Signatures too — else a repo that comes back would be skipped as
+    // "unchanged" with no rows behind it.
+    let sig_keys: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT key FROM meta WHERE key LIKE 'embed_sig:%'")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for key in sig_keys {
+        let Some(rest) = key.strip_prefix("embed_sig:") else {
+            continue;
+        };
+        let mut parts = rest.split('\u{1f}');
+        if let (Some(host), Some(slug), Some(_source)) = (parts.next(), parts.next(), parts.next())
+        {
+            if is_orphan(host, slug) {
+                conn.execute("DELETE FROM meta WHERE key = ?1", [&key])?;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// See [`prune_orphans_on`].
+pub fn prune_orphans(live: &std::collections::HashSet<(String, String)>) -> Result<usize, String> {
+    let conn = cache::open()?;
+    prune_orphans_on(&conn, live).map_err(|e| e.to_string())
 }
 
 /// Empty the whole index and its skip signatures, so the next pass re-embeds
@@ -933,27 +1003,81 @@ mod tests {
         ];
         // Nothing stored yet → both non-empty sources change; empty 'topics'
         // is skipped (no rows to write).
-        let changed = changed_sources(&sources, |_| None);
+        let m = "nomic-embed-text";
+        let changed = changed_sources(m, &sources, |_| None);
         assert_eq!(
             changed.iter().map(|(s, ..)| *s).collect::<Vec<_>>(),
             vec!["readme", "notes"]
         );
 
         // readme signature matches → only notes changes.
-        let readme_sig = text_signature("# Hello");
-        let changed = changed_sources(&sources, |s| (s == "readme").then(|| readme_sig.clone()));
+        let readme_sig = text_signature(m, "# Hello");
+        let changed = changed_sources(m, &sources, |s| (s == "readme").then(|| readme_sig.clone()));
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].0, "notes");
-        assert_eq!(changed[0].2, text_signature("remember the milk"));
+        assert_eq!(changed[0].2, text_signature(m, "remember the milk"));
+
+        // A different embed model invalidates every stored signature.
+        let changed = changed_sources("mxbai-embed-large", &sources, |s| {
+            (s == "readme").then(|| readme_sig.clone())
+        });
+        assert_eq!(changed.len(), 2);
 
         // A cleared source that *was* stored is returned, so its rows drop.
         let cleared = vec![("notes".to_string(), "".to_string())];
-        let changed = changed_sources(&cleared, |_| Some("oldsig".into()));
+        let changed = changed_sources(m, &cleared, |_| Some("oldsig".into()));
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].1, "");
         // ...and once the empty text's signature is stored, it stops changing.
-        let empty_sig = text_signature("");
-        assert!(changed_sources(&cleared, |_| Some(empty_sig.clone())).is_empty());
+        let empty_sig = text_signature(m, "");
+        assert!(changed_sources(m, &cleared, |_| Some(empty_sig.clone())).is_empty());
+    }
+
+    #[test]
+    fn text_signature_is_stable_and_model_scoped() {
+        // Pinned values: the signature must not drift across Rust releases.
+        // (FNV-1a 64 of the lone 0x1f separator; standard FNV-1a("a") is
+        // af63dc4c8601ec8c, computed by the same loop.)
+        assert_eq!(text_signature("", ""), "fnv1a:af63d24c8601db8e");
+        assert_eq!(text_signature("m", "hello"), text_signature("m", "hello"));
+        assert_ne!(text_signature("m", "hello"), text_signature("n", "hello"));
+        assert_ne!(text_signature("ab", "c"), text_signature("a", "bc"));
+    }
+
+    #[test]
+    fn prune_orphans_drops_rows_and_sigs_for_missing_repos() {
+        let mut conn = mem();
+        let has_sig = |conn: &Connection, slug: &str| -> bool {
+            conn.query_row(
+                "SELECT count(*) FROM meta WHERE key = ?1",
+                [sig_key("github.com", slug, "readme")],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                > 0
+        };
+        let v: &[&[f32]] = &[&[1.0, 0.0]];
+        for slug in ["o/live", "o/gone"] {
+            store_embeddings_on(&mut conn, "github.com", slug, "readme", &chunks(v), 1).unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, 'sig')",
+                [sig_key("github.com", slug, "readme")],
+            )
+            .unwrap();
+        }
+        let live: std::collections::HashSet<(String, String)> =
+            [("github.com".to_string(), "o/live".to_string())].into();
+
+        assert_eq!(prune_orphans_on(&conn, &live).unwrap(), 1);
+        let left = all_embeddings_on(&conn);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].slug, "o/live");
+        assert!(has_sig(&conn, "o/live"));
+        assert!(!has_sig(&conn, "o/gone"));
+
+        // An empty fleet prunes nothing (a failed scan must not wipe the index).
+        assert_eq!(prune_orphans_on(&conn, &Default::default()).unwrap(), 0);
+        assert_eq!(all_embeddings_on(&conn).len(), 1);
     }
 
     #[test]

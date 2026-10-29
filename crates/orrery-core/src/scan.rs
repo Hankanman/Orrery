@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use git2::Repository;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -123,10 +124,9 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
     let repo = Repository::open(path).ok()?;
 
     let git = crate::git_ops::status_of(&repo);
-    let last_commit_unix = repo
-        .head()
-        .ok()
-        .and_then(|h| h.peel_to_commit().ok())
+    let head_commit = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    let last_commit_unix = head_commit
+        .as_ref()
         .map(|c| c.time().seconds())
         .unwrap_or(0);
 
@@ -158,7 +158,7 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         slug,
         path: abbreviate(path),
         description,
-        language: detect_language(path),
+        language: cached_language(path, head_commit.map(|c| c.id())),
         git,
         last_commit_unix,
         activity,
@@ -187,39 +187,58 @@ fn classify_activity(last_commit_unix: i64, now: i64) -> Activity {
     }
 }
 
-/// Parse an origin remote URL into (host, "owner/repo", domain).
+/// Parse an origin remote URL into (host, slug, domain).
+///
+/// The provider is decided by an *exact* host match — `github.com` /
+/// `www.github.com` for GitHub; `gitlab.com`, or a valid DNS host whose first
+/// label is `gitlab` (self-hosted `gitlab.acme.io`), for GitLab — so lookalikes
+/// like `notgithub.com` or `github.company.com` aren't sent to the GitHub API
+/// and handed another repo's stars/visibility. (A self-hosted GitLab only ever
+/// gets a token when it's on the user's `gitlab_hosts` allowlist; see
+/// `forge::gitlab_host_trusted`.)
+///
+/// The slug is the full project path: `owner/repo` on GitHub (exactly two
+/// segments, else none), every group level on GitLab (`group/sub/proj`). It
+/// is interpolated into API URL paths, so a slug that fails
+/// `forge::valid_slug` (bad chars, `..` segments) is dropped.
 fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
-    // Strip protocol and any user@ prefix, then split the host from the path.
-    let after_scheme = url.rsplit_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let tail = after_scheme
-        .split_once('@')
-        .map(|(_, rest)| rest)
-        .unwrap_or(after_scheme);
-    // tail is like "github.com/owner/repo.git" or "github.com:owner/repo.git"
-    let (domain_raw, path_part) = tail.split_once(['/', ':']).unwrap_or((tail, ""));
+    // Split the authority ([user@]host[:port]) from the path. scp-like remotes
+    // ("git@host:owner/repo.git") use ':' as the separator and have no port.
+    let (authority, path_part) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/').unwrap_or((rest, "")),
+        None => match url.split_once(':') {
+            // A ':' after a '/' means a local path, not scp syntax.
+            Some((auth, path)) if !auth.contains('/') => (auth, path),
+            _ => ("", url),
+        },
+    };
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let domain_raw = match host_port.find(']') {
+        // Bracketed IPv6 literal; keep it whole (it never matches a provider).
+        Some(end) if host_port.starts_with('[') => &host_port[..=end],
+        _ => host_port.split_once(':').map_or(host_port, |(h, _)| h),
+    };
     let path = path_part.trim_end_matches('/').trim_end_matches(".git");
 
-    // Detect the provider from the host only (not the whole URL).
-    let host = if domain_raw.contains("github.com") {
-        Some(Host::Github)
-    } else if domain_raw.contains("gitlab") {
-        Some(Host::Gitlab)
-    } else {
-        None
+    // Detect the provider from the host only (not the whole URL), exactly.
+    let lower = domain_raw.to_ascii_lowercase();
+    let host = match lower.as_str() {
+        "github.com" | "www.github.com" => Some(Host::Github),
+        "gitlab.com" | "www.gitlab.com" => Some(Host::Gitlab),
+        d if d.starts_with("gitlab.") && crate::forge::valid_host(d) => Some(Host::Gitlab),
+        _ => None,
     };
 
-    let slug = {
-        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        if parts.len() >= 2 {
-            Some(format!(
-                "{}/{}",
-                parts[parts.len() - 2],
-                parts[parts.len() - 1]
-            ))
-        } else {
-            None
-        }
-    };
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let slug = match host {
+        Some(Host::Github) if parts.len() != 2 => None,
+        _ if parts.len() < 2 => None,
+        _ => Some(parts.join("/")),
+    }
+    .filter(|s| crate::forge::valid_slug(s));
     let domain = (!domain_raw.is_empty()).then(|| domain_raw.to_string());
 
     (host, slug, domain)
@@ -282,7 +301,7 @@ fn read_readme(path: &Path) -> (Option<String>, Option<String>) {
 
 /// Strip the most common inline markdown so titles/descriptions read cleanly.
 fn clean_markdown(s: &str) -> String {
-    let stripped = s.replace(['*', '`', '_'], "");
+    let stripped = strip_emphasis(s);
     // Collapse every [text](url) → text, left to right (handles multiple links).
     let mut out = String::with_capacity(stripped.len());
     let mut rest = stripped.as_str();
@@ -305,6 +324,28 @@ fn clean_markdown(s: &str) -> String {
     out.trim().to_string()
 }
 
+/// Drop `*` and backtick markers, and `_` where it can be emphasis — at a word
+/// edge. A `_` inside a word (`my_crate`) is part of the name and is kept.
+fn strip_emphasis(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let keep = match c {
+            '*' | '`' => false,
+            '_' => {
+                let prev = i.checked_sub(1).map(|j| chars[j]);
+                let next = chars.get(i + 1);
+                prev.is_some_and(char::is_alphanumeric) && next.is_some_and(|n| n.is_alphanumeric())
+            }
+            _ => true,
+        };
+        if keep {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -312,6 +353,31 @@ fn truncate(s: &str, max: usize) -> String {
     let mut t: String = s.chars().take(max).collect();
     t.push('…');
     t
+}
+
+/// [`detect_language`], cached per repo for the life of the process and keyed
+/// on the HEAD commit: the extension fallback walks the tree, and most repos
+/// are unchanged between rescans. A new commit re-detects; working-tree-only
+/// changes are picked up at the next commit. Repos with no commits aren't
+/// cached.
+fn cached_language(path: &Path, head: Option<git2::Oid>) -> Option<String> {
+    type Cache = Mutex<HashMap<PathBuf, (git2::Oid, Option<String>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let Some(head) = head else {
+        return detect_language(path);
+    };
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((oid, lang)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
+        if *oid == head {
+            return lang.clone();
+        }
+    }
+    let lang = detect_language(path);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_path_buf(), (head, lang.clone()));
+    lang
 }
 
 /// Heuristic primary language: manifest files first, then a shallow extension
@@ -524,10 +590,72 @@ mod tests {
         let (host, _, domain) = parse_remote("ssh://git@gitlab.example.com/team/app.git");
         assert_eq!(host, Some(Host::Gitlab));
         assert_eq!(domain, Some("gitlab.example.com".into()));
-        // nested groups → last two path components
+        // nested groups → the full path (the API needs every group level)
         assert_eq!(
             parse_remote("https://gitlab.com/group/sub/proj.git").1,
-            Some("sub/proj".into())
+            Some("group/sub/proj".into())
+        );
+        assert_eq!(
+            parse_remote("git@gitlab.acme.io:a/b/c/proj.git").1,
+            Some("a/b/c/proj".into())
+        );
+        // ssh:// with a port: the port is neither domain nor slug.
+        assert_eq!(
+            parse_remote("ssh://git@gitlab.acme.io:2222/group/sub/proj.git"),
+            (
+                Some(Host::Gitlab),
+                Some("group/sub/proj".into()),
+                Some("gitlab.acme.io".into())
+            )
+        );
+    }
+
+    #[test]
+    fn parse_remote_host_detection_is_exact_not_substring() {
+        // Lookalikes must not be treated as GitHub (they'd be enriched with
+        // another repo's stars/private flag from api.github.com).
+        for url in [
+            "https://github.company.com/o/r.git",
+            "https://notgithub.com/o/r.git",
+            "git@github.com.evil.io:o/r.git",
+            "https://evilgithub.com/o/r",
+        ] {
+            assert_eq!(parse_remote(url).0, None, "{url}");
+        }
+        assert_eq!(
+            parse_remote("https://www.github.com/o/r.git").0,
+            Some(Host::Github)
+        );
+        assert_eq!(parse_remote("https://GitHub.com/o/r").0, Some(Host::Github));
+        // "gitlab" merely appearing in the host isn't GitLab.
+        for url in [
+            "https://mygitlab.corp/o/r.git",
+            "https://notgitlab.com/o/r.git",
+            "https://169.254.169.254/o/r.git",
+        ] {
+            assert_eq!(parse_remote(url).0, None, "{url}");
+        }
+        assert_eq!(parse_remote("https://gitlab.com/o/r").0, Some(Host::Gitlab));
+    }
+
+    #[test]
+    fn parse_remote_rejects_unsafe_or_malformed_slugs() {
+        // Slugs are interpolated into API paths — traversal must not survive.
+        assert_eq!(parse_remote("https://github.com/o/../../user").1, None);
+        assert_eq!(parse_remote("https://gitlab.com/g/../proj.git").1, None);
+        assert_eq!(parse_remote("https://github.com/o/r%2F..").1, None);
+        assert_eq!(parse_remote("https://github.com/o/r?x=1").1, None);
+        // GitHub slugs are exactly owner/name.
+        assert_eq!(parse_remote("https://github.com/o/r/extra").1, None);
+        assert_eq!(parse_remote("https://github.com/o").1, None);
+        // Credentials in the URL never leak into the domain.
+        assert_eq!(
+            parse_remote("https://user:tok@github.com/o/r.git"),
+            (
+                Some(Host::Github),
+                Some("o/r".into()),
+                Some("github.com".into())
+            )
         );
     }
 
@@ -548,6 +676,130 @@ mod tests {
         );
         // multiple links on one line must all collapse to their text
         assert_eq!(clean_markdown("[A](u1) and [B](u2)"), "A and B");
+    }
+
+    #[test]
+    fn clean_markdown_keeps_underscores_inside_words() {
+        assert_eq!(clean_markdown("my_crate"), "my_crate");
+        assert_eq!(clean_markdown("`my_crate` is _great_"), "my_crate is great");
+        assert_eq!(
+            clean_markdown("__bold__ snake_case_name"),
+            "bold snake_case_name"
+        );
+    }
+
+    #[test]
+    fn read_readme_takes_h1_title_and_first_paragraph() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("README.md"),
+            "# **my_tool**\n\n[![ci](badge.svg)](ci)\n\n> a quote\n\nA *fast* tool for [things](https://x).\n\nMore text.\n",
+        )
+        .unwrap();
+        let (title, desc) = read_readme(dir.path());
+        assert_eq!(title.as_deref(), Some("my_tool"));
+        assert_eq!(desc.as_deref(), Some("A fast tool for things."));
+    }
+
+    #[test]
+    fn read_readme_handles_missing_and_title_only() {
+        let none = tempfile::tempdir().unwrap();
+        assert_eq!(read_readme(none.path()), (None, None));
+
+        // Lowercase name, no H1: the first prose line is the description.
+        let plain = tempfile::tempdir().unwrap();
+        fs::write(plain.path().join("readme.md"), "Just a description here\n").unwrap();
+        assert_eq!(
+            read_readme(plain.path()),
+            (None, Some("Just a description here".into()))
+        );
+
+        // A long description is truncated with an ellipsis.
+        let long = tempfile::tempdir().unwrap();
+        fs::write(
+            long.path().join("README.md"),
+            format!("# T\n{}\n", "x".repeat(300)),
+        )
+        .unwrap();
+        let (title, desc) = read_readme(long.path());
+        assert_eq!(title.as_deref(), Some("T"));
+        let desc = desc.unwrap();
+        assert_eq!(desc.chars().count(), 201);
+        assert!(desc.ends_with('…'));
+    }
+
+    #[test]
+    fn scan_builds_repo_metadata_end_to_end() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("proj");
+        fs::create_dir_all(&path).unwrap();
+        let repo = Repository::init(&path).unwrap();
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("user.name", "t").unwrap();
+            cfg.set_str("user.email", "t@t").unwrap();
+        }
+        repo.remote("origin", "git@github.com:owner/proj.git")
+            .unwrap();
+        fs::write(
+            path.join("README.md"),
+            "# Proj Title\n\nDoes useful things.\n",
+        )
+        .unwrap();
+        fs::write(path.join("Cargo.toml"), "[package]").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("README.md")).unwrap();
+        index.add_path(Path::new("Cargo.toml")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        // One uncommitted file → dirty count of 1.
+        fs::write(path.join("wip.txt"), "x").unwrap();
+        // A non-repo sibling dir is ignored.
+        fs::create_dir_all(root.path().join("not-a-repo")).unwrap();
+
+        let id = path.to_string_lossy().into_owned();
+        let favorites: HashSet<String> = [id.clone()].into_iter().collect();
+        let now = sig.when().seconds() + 60;
+        let roots = vec![root.path().to_string_lossy().into_owned()];
+        let repos = scan(&roots, 3, &[], &favorites, now);
+
+        assert_eq!(repos.len(), 1);
+        let r = &repos[0];
+        assert_eq!(r.id, id);
+        assert_eq!(r.display_name, "Proj Title");
+        assert_eq!(r.description.as_deref(), Some("Does useful things."));
+        assert_eq!(r.language.as_deref(), Some("Rust"));
+        assert_eq!(r.slug.as_deref(), Some("owner/proj"));
+        assert_eq!(r.host, Some(Host::Github));
+        assert_eq!(r.git.dirty, 1);
+        assert_eq!(r.activity, Activity::Active);
+        assert!(r.favorite);
+        assert_eq!(r.root, roots[0]);
+
+        // A rescan of the unchanged repo hits the language cache and agrees.
+        assert_eq!(
+            scan(&roots, 3, &[], &favorites, now)[0].language.as_deref(),
+            Some("Rust")
+        );
+    }
+
+    #[test]
+    fn cached_language_redetects_on_new_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = git2::Oid::from_str("1111111111111111111111111111111111111111").unwrap();
+        let b = git2::Oid::from_str("2222222222222222222222222222222222222222").unwrap();
+        fs::write(dir.path().join("x.py"), "").unwrap();
+        assert_eq!(cached_language(dir.path(), Some(a)), Some("Python".into()));
+        // Same HEAD → cached, even though the tree changed.
+        fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        assert_eq!(cached_language(dir.path(), Some(a)), Some("Python".into()));
+        // New HEAD → re-detected.
+        assert_eq!(cached_language(dir.path(), Some(b)), Some("Rust".into()));
+        // No HEAD → never cached.
+        assert_eq!(cached_language(dir.path(), None), Some("Rust".into()));
     }
 
     #[test]

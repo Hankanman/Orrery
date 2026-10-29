@@ -4,28 +4,112 @@
 //! resolved token (stored OAuth → env → `gh`); GitLab support can layer on the
 //! same shapes later.
 
+use std::time::{Duration, Instant};
+
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::forge::{self, client, GH_CORE};
 use crate::model::Host;
 use crate::oauth;
 
-const UA: &str = "Orrery/0.1 (+https://orrery.app)";
 const GH: &str = "https://api.github.com";
 
-fn client() -> reqwest::Client {
-    // Shared client (Arc-backed) so the inbox's several GitHub calls reuse one
-    // connection pool instead of handshaking anew each time.
-    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        crate::http::client_builder()
-            .user_agent(UA)
-            // Small JSON responses → bound both connect and overall time so a
-            // hung host can't stall an inbox refresh indefinitely.
-            .connect_timeout(std::time::Duration::from_secs(8))
-            .timeout(std::time::Duration::from_secs(20))
-            .build()
-            .unwrap_or_default()
+/// Rate-limit buckets (see [`forge::send`]): GitHub meters search and GraphQL
+/// separately from the core REST API.
+const GH_SEARCH: &str = "GitHub search";
+const GH_GRAPHQL: &str = "GitHub GraphQL";
+
+/// The resolved token, or `msg` as the error (shown in the UI).
+async fn token_or(msg: &str) -> Result<String, String> {
+    oauth::github_token_async()
+        .await
+        .ok_or_else(|| msg.to_string())
+}
+
+// ── GraphQL ──────────────────────────────────────────────────────────────────
+
+/// A GraphQL response envelope. GitHub answers HTTP 200 even when the query
+/// failed (rate limited, missing scope, not found) and reports it in `errors`,
+/// so this must be read — not just `data`.
+#[derive(Deserialize)]
+struct Gql<T> {
+    data: Option<T>,
+    #[serde(default)]
+    errors: Vec<GqlError>,
+}
+#[derive(Deserialize)]
+struct GqlError {
+    message: String,
+}
+
+/// Split an envelope into its data and its joined error messages. No data is
+/// an `Err` carrying the real reason (or a generic one when GitHub gave none);
+/// data *with* errors (partial result, e.g. `repository: null` + NOT_FOUND)
+/// returns both so the caller can pick. Pure for testing.
+fn gql_result<T>(resp: Gql<T>) -> Result<(T, Option<String>), String> {
+    let errors = (!resp.errors.is_empty()).then(|| {
+        resp.errors
+            .into_iter()
+            .map(|e| e.message)
+            .collect::<Vec<_>>()
+            .join("; ")
     });
-    CLIENT.clone()
+    match resp.data {
+        Some(data) => Ok((data, errors)),
+        None => Err(errors
+            .map(|e| format!("GitHub GraphQL: {e}"))
+            .unwrap_or_else(|| "GitHub GraphQL returned no data".into())),
+    }
+}
+
+/// POST a GraphQL query and parse the envelope (see [`gql_result`]).
+async fn graphql<T: DeserializeOwned>(
+    token: &str,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<(T, Option<String>), String> {
+    let req = client()
+        .post(format!("{GH}/graphql"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "query": query, "variables": variables }));
+    let resp = forge::send(req, GH_GRAPHQL).await?;
+    if !resp.status().is_success() {
+        return Err(forge::github_error(resp, "GitHub GraphQL").await);
+    }
+    gql_result(resp.json::<Gql<T>>().await.map_err(|e| e.to_string())?)
+}
+
+// ── REST pagination ──────────────────────────────────────────────────────────
+
+/// Fetch up to `max_pages` pages of `per_page` from a GitHub list endpoint —
+/// `url(page)` builds each page's URL, `items` pulls the entries out of the
+/// parsed page. Stops early when a page comes back short; any page failing
+/// (401 expired token, 403/429 rate limit) propagates as an error rather than
+/// a misleading partial/empty list. `what` labels the error.
+async fn paginate<P: DeserializeOwned, T>(
+    token: &str,
+    bucket: &str,
+    what: &str,
+    per_page: usize,
+    max_pages: usize,
+    url: impl Fn(usize) -> String,
+    items: impl Fn(P) -> Vec<T>,
+) -> Result<Vec<T>, String> {
+    let mut out = Vec::new();
+    for page in 1..=max_pages {
+        let resp = forge::send(client().get(url(page)).bearer_auth(token), bucket).await?;
+        if !resp.status().is_success() {
+            return Err(format!("{what} {}", resp.status()));
+        }
+        let page_items = items(resp.json::<P>().await.map_err(|e| e.to_string())?);
+        let page_len = page_items.len();
+        out.extend(page_items);
+        if !page_may_have_more(page_len, per_page) {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,16 +143,6 @@ pub struct RemoteRepo {
     pub language: Option<String>,
     pub clone_url: String,
     pub host: Host,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CiStatus {
-    /// "success" | "failure" | "pending" | "none"
-    pub state: String,
-    /// The run's web page (GitHub's `html_url`), when a run was found — lets
-    /// surfaces link straight to the failing run.
-    pub url: Option<String>,
 }
 
 /// One entry in the activity feed. `kind` distinguishes a starred-repo release
@@ -138,10 +212,6 @@ async fn release_items(token: &str) -> Result<Vec<FeedItem>, String> {
     }"#;
 
     #[derive(Deserialize)]
-    struct Resp {
-        data: Option<Data>,
-    }
-    #[derive(Deserialize)]
     struct Data {
         viewer: Viewer,
     }
@@ -193,19 +263,10 @@ async fn release_items(token: &str) -> Result<Vec<FeedItem>, String> {
     let mut items: Vec<FeedItem> = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..2 {
-        let body = serde_json::json!({ "query": QUERY, "variables": { "cursor": cursor } });
-        let resp = client()
-            .post(format!("{GH}/graphql"))
-            .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("GitHub GraphQL {}", resp.status()));
-        }
-        let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
-        let Some(data) = parsed.data else { break };
+        // A failed query (rate limit, missing scope) surfaces its real reason
+        // instead of an empty-but-Ok feed.
+        let (data, _partial): (Data, _) =
+            graphql(token, QUERY, serde_json::json!({ "cursor": cursor })).await?;
         let starred = data.viewer.starred;
         for node in starred.nodes {
             let Some(rel) = node.releases.nodes.into_iter().next() else {
@@ -285,12 +346,10 @@ async fn following_items(token: &str) -> Result<Vec<FeedItem>, String> {
     }
 
     let login = github_user(token).await?;
-    let resp = client()
+    let req = client()
         .get(format!("{GH}/users/{login}/received_events?per_page=100"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .bearer_auth(token);
+    let resp = forge::send(req, GH_CORE).await?;
     if !resp.status().is_success() {
         return Err(format!("GitHub events {}", resp.status()));
     }
@@ -383,7 +442,7 @@ async fn following_items(token: &str) -> Result<Vec<FeedItem>, String> {
 /// follow, merged newest-first and de-duplicated by URL. Each source is
 /// best-effort — a failure in one still returns the other.
 pub async fn github_feed() -> Result<Vec<FeedItem>, String> {
-    let token = oauth::github_token().ok_or("connect GitHub to see the feed")?;
+    let token = token_or("connect GitHub to see the feed").await?;
 
     let mut items: Vec<FeedItem> = Vec::new();
     let mut errors = Vec::new();
@@ -408,17 +467,50 @@ pub async fn github_feed() -> Result<Vec<FeedItem>, String> {
     Ok(items)
 }
 
+/// How long a resolved `/user` login is reused. The login for a token never
+/// changes, so this only bounds how long a revoked token keeps "working" for
+/// the login lookup (the real calls that follow still fail loudly).
+const LOGIN_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Cached `(token fingerprint, login, fetched at)` — saves a `/user` round
+/// trip on every inbox/feed refresh. Keyed by a hash of the token (not the
+/// token itself), so a sign-out/switch of account misses the cache.
+static LOGIN: std::sync::Mutex<Option<(u64, String, Instant)>> = std::sync::Mutex::new(None);
+
+fn token_fingerprint(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut h);
+    h.finish()
+}
+
+/// The cached login for `fp` if it's younger than [`LOGIN_TTL`]. Pure over
+/// the cache slot for testing.
+fn cached_login(slot: &Option<(u64, String, Instant)>, fp: u64, now: Instant) -> Option<String> {
+    slot.as_ref()
+        .filter(|(key, _, at)| *key == fp && now.duration_since(*at) < LOGIN_TTL)
+        .map(|(_, login, _)| login.clone())
+}
+
 async fn github_user(token: &str) -> Result<String, String> {
     #[derive(Deserialize)]
     struct User {
         login: String,
     }
-    let resp = client()
-        .get(format!("{GH}/user"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let fp = token_fingerprint(token);
+    let cached = cached_login(
+        &LOGIN.lock().unwrap_or_else(|e| e.into_inner()),
+        fp,
+        Instant::now(),
+    );
+    if let Some(login) = cached {
+        return Ok(login);
+    }
+    let resp = forge::send(
+        client().get(format!("{GH}/user")).bearer_auth(token),
+        GH_CORE,
+    )
+    .await?;
     if !resp.status().is_success() {
         return Err(format!(
             "GitHub auth failed ({}) — check the token scopes",
@@ -426,6 +518,18 @@ async fn github_user(token: &str) -> Result<String, String> {
         ));
     }
     let user: User = resp.json().await.map_err(|e| e.to_string())?;
+    // The login is interpolated into URL paths below; GitHub logins are
+    // alphanumeric + '-', so anything else is a malformed response.
+    if user.login.is_empty()
+        || !user
+            .login
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("GitHub returned an unexpected login".into());
+    }
+    *LOGIN.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((fp, user.login.clone(), Instant::now()));
     Ok(user.login)
 }
 
@@ -463,9 +567,62 @@ fn page_may_have_more(page_len: usize, per_page: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_run_state, ci_error_for_status, page_may_have_more, repo_from_url, rollup_state,
-        split_slug, status_context_state, workflow_run_state,
+        cached_login, check_run_state, gql_result, page_may_have_more, repo_from_url, rollup_state,
+        split_slug, status_context_state, Gql, LOGIN_TTL,
     };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn graphql_errors_surface_instead_of_empty_ok() {
+        // GitHub's HTTP-200 rate-limit answer: no data, an errors array.
+        let resp: Gql<serde_json::Value> = serde_json::from_value(serde_json::json!({
+            "data": null,
+            "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}],
+        }))
+        .unwrap();
+        let err = gql_result(resp).unwrap_err();
+        assert!(err.contains("API rate limit exceeded"), "{err}");
+
+        // No data and no errors is still an error, not an empty success.
+        let resp: Gql<serde_json::Value> = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(gql_result(resp).is_err());
+
+        // Partial data: keep the data, hand back the reason too.
+        let resp: Gql<serde_json::Value> = serde_json::from_value(serde_json::json!({
+            "data": {"repository": null},
+            "errors": [
+                {"message": "Could not resolve to a Repository"},
+                {"message": "second"}
+            ],
+        }))
+        .unwrap();
+        let (data, errs) = gql_result(resp).unwrap();
+        assert!(data["repository"].is_null());
+        assert_eq!(
+            errs.as_deref(),
+            Some("Could not resolve to a Repository; second")
+        );
+
+        // Clean success.
+        let resp: Gql<serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"data": {"ok": 1}})).unwrap();
+        assert_eq!(gql_result(resp).unwrap().1, None);
+    }
+
+    #[test]
+    fn login_cache_is_keyed_by_token_and_expires() {
+        let t0 = Instant::now();
+        let slot = Some((7u64, "octocat".to_string(), t0));
+        assert_eq!(cached_login(&slot, 7, t0).as_deref(), Some("octocat"));
+        // Another token (signed out / switched account) misses.
+        assert_eq!(cached_login(&slot, 8, t0), None);
+        // Stale entries miss.
+        assert_eq!(
+            cached_login(&slot, 7, t0 + LOGIN_TTL + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(cached_login(&None, 7, t0), None);
+    }
 
     #[test]
     fn repo_from_url_extracts_owner_repo() {
@@ -492,6 +649,8 @@ mod tests {
     fn split_slug_splits_owner_and_name() {
         assert_eq!(split_slug("Hankanman/Orrery"), Ok(("Hankanman", "Orrery")));
         assert!(split_slug("noslash").is_err());
+        assert!(split_slug("o/../x").is_err());
+        assert!(split_slug("group/sub/proj").is_err());
     }
 
     #[test]
@@ -524,43 +683,6 @@ mod tests {
         assert_eq!(status_context_state(Some("ERROR")), "failure");
         assert_eq!(status_context_state(None), "pending");
     }
-
-    #[test]
-    fn workflow_run_state_maps_status_and_conclusion() {
-        assert_eq!(workflow_run_state("in_progress", None), "pending");
-        assert_eq!(workflow_run_state("queued", Some("success")), "pending");
-        assert_eq!(workflow_run_state("completed", Some("success")), "success");
-        assert_eq!(workflow_run_state("completed", Some("failure")), "failure");
-        assert_eq!(
-            workflow_run_state("completed", Some("timed_out")),
-            "failure"
-        );
-        assert_eq!(
-            workflow_run_state("completed", Some("startup_failure")),
-            "failure"
-        );
-        assert_eq!(workflow_run_state("completed", Some("cancelled")), "none");
-        assert_eq!(workflow_run_state("completed", None), "none");
-    }
-
-    #[test]
-    fn ci_errors_surface_auth_and_rate_limit_but_not_missing_repo() {
-        use reqwest::StatusCode;
-        // 404 = repo not visible to this token — genuinely nothing to show.
-        assert_eq!(ci_error_for_status(StatusCode::NOT_FOUND), None);
-        // Expired/revoked token, rate limit, and server errors must be errors,
-        // not a silent "none" that blanks CI across the grid.
-        for status in [
-            StatusCode::UNAUTHORIZED,
-            StatusCode::FORBIDDEN,
-            StatusCode::TOO_MANY_REQUESTS,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::BAD_GATEWAY,
-        ] {
-            let err = ci_error_for_status(status).expect("must surface an error");
-            assert!(err.contains(status.as_str()), "{err}");
-        }
-    }
 }
 
 /// GitHub issue/PR search, paginated up to 3 pages × 50 items (150 per query)
@@ -570,64 +692,52 @@ mod tests {
 async fn gh_search(token: &str, query: &str, kind: &str) -> Result<Vec<InboxItem>, String> {
     const PER_PAGE: usize = 50;
     const MAX_PAGES: usize = 3;
-    let mut items = Vec::new();
-    for page in 1..=MAX_PAGES {
-        let url = format!(
-            "{GH}/search/issues?per_page={PER_PAGE}&page={page}&q={}",
-            urlencoding::encode(query)
-        );
-        let resp = client()
-            .get(url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            // Surface auth/rate-limit failures instead of a misleading empty inbox.
-            return Err(format!("GitHub search {}", resp.status()));
-        }
-        let parsed: SearchResp = resp.json().await.map_err(|e| e.to_string())?;
-        let page_len = parsed.items.len();
-        items.extend(parsed.items.into_iter().map(|i| InboxItem {
-            kind: kind.to_string(),
-            title: i.title,
-            repo: repo_from_url(&i.repository_url),
-            url: i.html_url,
-            number: i.number,
-            draft: i.draft,
-            host: Host::Github,
-        }));
-        if !page_may_have_more(page_len, PER_PAGE) {
-            break;
-        }
-    }
-    Ok(items)
+    let q = urlencoding::encode(query);
+    paginate(
+        token,
+        GH_SEARCH,
+        "GitHub search",
+        PER_PAGE,
+        MAX_PAGES,
+        |page| format!("{GH}/search/issues?per_page={PER_PAGE}&page={page}&q={q}"),
+        |parsed: SearchResp| {
+            parsed
+                .items
+                .into_iter()
+                .map(|i| InboxItem {
+                    kind: kind.to_string(),
+                    title: i.title,
+                    repo: repo_from_url(&i.repository_url),
+                    url: i.html_url,
+                    number: i.number,
+                    draft: i.draft,
+                    host: Host::Github,
+                })
+                .collect()
+        },
+    )
+    .await
 }
 
 /// Open PRs authored by the user, PRs awaiting their review, and issues
-/// assigned to them.
+/// assigned to them. The three searches are independent, so they run
+/// concurrently (latency = the slowest, not the sum); order in the result is
+/// still pr → review → issue.
 pub async fn github_inbox() -> Result<Vec<InboxItem>, String> {
-    let token = oauth::github_token().ok_or("connect GitHub to use the inbox")?;
+    let token = token_or("connect GitHub to use the inbox").await?;
     let login = github_user(&token).await?;
 
-    let mut items = Vec::new();
-    items.extend(gh_search(&token, &format!("is:open is:pr author:{login}"), "pr").await?);
-    items.extend(
-        gh_search(
-            &token,
-            &format!("is:open is:pr review-requested:{login}"),
-            "review",
-        )
-        .await?,
-    );
-    items.extend(
-        gh_search(
-            &token,
-            &format!("is:open is:issue assignee:{login}"),
-            "issue",
-        )
-        .await?,
-    );
+    let authored = format!("is:open is:pr author:{login}");
+    let reviews = format!("is:open is:pr review-requested:{login}");
+    let assigned = format!("is:open is:issue assignee:{login}");
+    let (mut items, reviews, issues) = futures_util::future::try_join3(
+        gh_search(&token, &authored, "pr"),
+        gh_search(&token, &reviews, "review"),
+        gh_search(&token, &assigned, "issue"),
+    )
+    .await?;
+    items.extend(reviews);
+    items.extend(issues);
     Ok(items)
 }
 
@@ -654,33 +764,26 @@ pub async fn github_notifications() -> Result<Vec<Notification>, String> {
     }
     const PER_PAGE: usize = 50;
     const MAX_PAGES: usize = 3;
-    let token = oauth::github_token().ok_or("connect GitHub to see notifications")?;
-    let mut items = Vec::new();
-    for page in 1..=MAX_PAGES {
-        let resp = client()
-            .get(format!(
-                "{GH}/notifications?per_page={PER_PAGE}&page={page}"
-            ))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("GitHub API {}", resp.status()));
-        }
-        let raw: Vec<N> = resp.json().await.map_err(|e| e.to_string())?;
-        let page_len = raw.len();
-        items.extend(raw.into_iter().map(|n| Notification {
-            title: n.subject.title,
-            repo: n.repository.full_name,
-            reason: n.reason,
-            kind: n.subject.kind,
-        }));
-        if !page_may_have_more(page_len, PER_PAGE) {
-            break;
-        }
-    }
-    Ok(items)
+    let token = token_or("connect GitHub to see notifications").await?;
+    paginate(
+        &token,
+        GH_CORE,
+        "GitHub API",
+        PER_PAGE,
+        MAX_PAGES,
+        |page| format!("{GH}/notifications?per_page={PER_PAGE}&page={page}"),
+        |raw: Vec<N>| {
+            raw.into_iter()
+                .map(|n| Notification {
+                    title: n.subject.title,
+                    repo: n.repository.full_name,
+                    reason: n.reason,
+                    kind: n.subject.kind,
+                })
+                .collect()
+        },
+    )
+    .await
 }
 
 /// The user's starred repos, paginated up to 3 pages × 60 (180 total,
@@ -699,33 +802,28 @@ pub async fn github_starred() -> Result<Vec<RemoteRepo>, String> {
     }
     const PER_PAGE: usize = 60;
     const MAX_PAGES: usize = 3;
-    let token = oauth::github_token().ok_or("connect GitHub to browse stars")?;
-    let mut items = Vec::new();
-    for page in 1..=MAX_PAGES {
-        let resp = client()
-            .get(format!("{GH}/user/starred?per_page={PER_PAGE}&page={page}"))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("GitHub API {}", resp.status()));
-        }
-        let raw: Vec<R> = resp.json().await.map_err(|e| e.to_string())?;
-        let page_len = raw.len();
-        items.extend(raw.into_iter().map(|r| RemoteRepo {
-            slug: r.full_name,
-            description: r.description,
-            stars: r.stargazers_count,
-            language: r.language,
-            clone_url: r.clone_url,
-            host: Host::Github,
-        }));
-        if !page_may_have_more(page_len, PER_PAGE) {
-            break;
-        }
-    }
-    Ok(items)
+    let token = token_or("connect GitHub to browse stars").await?;
+    paginate(
+        &token,
+        GH_CORE,
+        "GitHub API",
+        PER_PAGE,
+        MAX_PAGES,
+        |page| format!("{GH}/user/starred?per_page={PER_PAGE}&page={page}"),
+        |raw: Vec<R>| {
+            raw.into_iter()
+                .map(|r| RemoteRepo {
+                    slug: r.full_name,
+                    description: r.description,
+                    stars: r.stargazers_count,
+                    language: r.language,
+                    clone_url: r.clone_url,
+                    host: Host::Github,
+                })
+                .collect()
+        },
+    )
+    .await
 }
 
 // ── PR action panel (#67): per-repo checks / review / mergeable + merge ──────
@@ -780,7 +878,9 @@ pub struct PrPanel {
     pub prs: Vec<PrDetail>,
 }
 
+/// Split a validated GitHub `owner/name` slug.
 fn split_slug(slug: &str) -> Result<(&str, &str), String> {
+    forge::check_github_slug(slug)?;
     slug.split_once('/')
         .ok_or_else(|| format!("not an owner/name slug: {slug}"))
 }
@@ -822,10 +922,6 @@ pub async fn github_prs(slug: &str) -> Result<PrPanel, String> {
       }
     }"#;
 
-    #[derive(Deserialize)]
-    struct Resp {
-        data: Option<Data>,
-    }
     #[derive(Deserialize)]
     struct Data {
         repository: Option<RepoNode>,
@@ -909,27 +1005,21 @@ pub async fn github_prs(slug: &str) -> Result<PrPanel, String> {
         state: String,
     }
 
-    let token = oauth::github_token().ok_or("connect GitHub to view PRs")?;
     let (owner, name) = split_slug(slug)?;
-    let body = serde_json::json!({
-        "query": QUERY,
-        "variables": { "owner": owner, "name": name },
-    });
-    let resp = client()
-        .post(format!("{GH}/graphql"))
-        .bearer_auth(&token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub GraphQL {}", resp.status()));
-    }
-    let parsed: Resp = resp.json().await.map_err(|e| e.to_string())?;
-    let repo = parsed
-        .data
-        .and_then(|d| d.repository)
-        .ok_or("repository not found (or no access)")?;
+    let token = token_or("connect GitHub to view PRs").await?;
+    let (data, errors): (Data, _) = graphql(
+        &token,
+        QUERY,
+        serde_json::json!({ "owner": owner, "name": name }),
+    )
+    .await?;
+    // A null repository comes with GitHub's reason in `errors` (not found,
+    // missing scope, SAML enforcement…) — show that rather than guessing.
+    let repo = data.repository.ok_or_else(|| {
+        errors
+            .map(|e| format!("GitHub GraphQL: {e}"))
+            .unwrap_or_else(|| "repository not found (or no access)".into())
+    })?;
 
     let mut merge_methods = Vec::new();
     if repo.squash_merge_allowed {
@@ -1075,139 +1165,32 @@ pub async fn github_merge_pr(slug: &str, number: u64, method: &str) -> Result<()
         "squash" | "rebase" | "merge" => method,
         other => return Err(format!("invalid merge method: {other}")),
     };
-    let token = oauth::github_token().ok_or("connect GitHub to merge")?;
-    let resp = client()
+    forge::check_github_slug(slug)?;
+    let token = token_or("connect GitHub to merge").await?;
+    let req = client()
         .put(format!("{GH}/repos/{slug}/pulls/{number}/merge"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "merge_method": method }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .json(&serde_json::json!({ "merge_method": method }));
+    let resp = forge::send(req, GH_CORE).await?;
     if resp.status().is_success() {
         return Ok(());
     }
     // GitHub returns a JSON { message } explaining why (e.g. "Required status
     // checks must pass"); prefer it over the bare status code.
-    let status = resp.status();
-    let msg = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|v| {
-            v.get("message")
-                .and_then(|m| m.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| format!("GitHub merge {status}"));
-    Err(msg)
+    Err(forge::github_error(resp, "GitHub merge").await)
 }
 
 /// Approve a PR (submit an APPROVE review with no body).
 pub async fn github_approve_pr(slug: &str, number: u64) -> Result<(), String> {
-    let token = oauth::github_token().ok_or("connect GitHub to approve")?;
-    let resp = client()
+    forge::check_github_slug(slug)?;
+    let token = token_or("connect GitHub to approve").await?;
+    let req = client()
         .post(format!("{GH}/repos/{slug}/pulls/{number}/reviews"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "event": "APPROVE" }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .json(&serde_json::json!({ "event": "APPROVE" }));
+    let resp = forge::send(req, GH_CORE).await?;
     if resp.status().is_success() {
         return Ok(());
     }
-    let status = resp.status();
-    let msg = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|v| {
-            v.get("message")
-                .and_then(|m| m.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| format!("GitHub approve {status}"));
-    Err(msg)
-}
-
-/// Latest GitHub Actions run conclusion for a repo, filtered to `branch` when
-/// given (the central CI pass passes the default branch so PR-branch runs
-/// can't masquerade as trunk state).
-///
-/// "No CI" (`state: "none"`) is only reported when GitHub answers
-/// definitively: a 2xx with an empty run list, or a 404 (the repo isn't
-/// visible to this token — deleted, renamed, or private without access — so
-/// there is nothing to show). Auth failures (401 expired token), rate limits
-/// (403/429), and server errors surface as `Err` — same rule as `gh_search`
-/// above — so a broken token reads as an error, not as CI vanishing.
-pub async fn github_ci(slug: &str, branch: Option<&str>) -> Result<CiStatus, String> {
-    #[derive(Deserialize)]
-    struct Runs {
-        #[serde(default)]
-        workflow_runs: Vec<Run>,
-    }
-    #[derive(Deserialize)]
-    struct Run {
-        status: String,
-        conclusion: Option<String>,
-        html_url: Option<String>,
-    }
-    // No token → forge calls are gated off entirely; an unconnected app
-    // legitimately shows no CI (this is absence of a source, not a failure).
-    let Some(token) = oauth::github_token() else {
-        return Ok(CiStatus {
-            state: "none".into(),
-            url: None,
-        });
-    };
-    let mut req = client()
-        .get(format!("{GH}/repos/{slug}/actions/runs"))
-        .query(&[("per_page", "1")]);
-    if let Some(branch) = branch {
-        req = req.query(&[("branch", branch)]);
-    }
-    let resp = req
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
-    if !status.is_success() {
-        if let Some(err) = ci_error_for_status(status) {
-            return Err(err);
-        }
-        return Ok(CiStatus {
-            state: "none".into(),
-            url: None,
-        });
-    }
-    let runs: Runs = resp.json().await.map_err(|e| e.to_string())?;
-    let run = runs.workflow_runs.into_iter().next();
-    let state = run
-        .as_ref()
-        .map(|r| workflow_run_state(&r.status, r.conclusion.as_deref()))
-        .unwrap_or("none");
-    Ok(CiStatus {
-        state: state.to_string(),
-        url: run.and_then(|r| r.html_url),
-    })
-}
-
-/// How a non-2xx from the workflow-runs endpoint is treated: 404 means the
-/// repo isn't visible with this token (deleted/renamed/no access) — genuinely
-/// no CI to show, so `None`. Anything else (401 expired token, 403 rate
-/// limit, 5xx) is a transport/auth failure the caller must see.
-fn ci_error_for_status(status: reqwest::StatusCode) -> Option<String> {
-    (status != reqwest::StatusCode::NOT_FOUND).then(|| format!("GitHub CI {status}"))
-}
-
-/// Map a workflow run's REST (status, conclusion) to our four-state vocabulary.
-fn workflow_run_state(status: &str, conclusion: Option<&str>) -> &'static str {
-    if status != "completed" {
-        return "pending";
-    }
-    match conclusion {
-        Some("success") => "success",
-        Some("failure") | Some("timed_out") | Some("startup_failure") => "failure",
-        _ => "none",
-    }
+    Err(forge::github_error(resp, "GitHub approve").await)
 }
