@@ -26,10 +26,16 @@ rusqlite = { version = "0.32", features = ["bundled"] }   # cache (SQLite bundle
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 urlencoding = "2"
 futures-util = "0.3"                                      # stream combinators (ai.rs SSE)
-# The timer (oauth device-flow poll backoff) + `rt` for `spawn_blocking` (the
-# `gh auth token` spawn stays off async workers). No runtime is built here — the
-# caller (app) drives async; both features are already enabled app-wide.
-tokio = { version = "1", features = ["rt", "time"] }
+# Timer (oauth device-flow poll backoff), `rt` for `spawn_blocking` (the
+# `gh auth token` spawn stays off async workers), an async mutex (llama sidecar
+# lifecycle) and async file I/O (model downloads). No runtime is built here —
+# the caller (app) drives async; these features are already enabled app-wide.
+tokio = { version = "1", features = ["rt", "time", "sync", "fs", "io-util"] }
+sha2 = "0.10"                                             # GGUF download checksum (already in the app's tree)
+
+# prctl(PR_SET_PDEATHSIG) so the llama-server sidecar dies with the app.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
