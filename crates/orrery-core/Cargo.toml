@@ -12,20 +12,20 @@ license = "MIT"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Repo discovery + metadata (versions match the legacy crate deliberately).
+# Repo discovery + metadata.
 git2 = { version = "0.21", features = ["https", "ssh"] }   # libgit2 (vendored); 0.21 made https/ssh opt-in (push + clone need them)
 chrono = "0.4"                                            # contribution-graph date math
 walkdir = "2"                                             # repo scanning
 globset = "0.4"                                           # ignore-glob matching
 toml = "1"                                                # config file
-dirs = "6"                                                # XDG config/data paths
+dirs = "6"                                                # XDG config/data paths (7 only changes Windows; 6 matches gpui, so one copy)
 which = "8"                                               # detect IDE/terminal on PATH
 rusqlite = { version = "0.40", features = ["bundled"] }   # cache (SQLite bundled)
 
 # Git host providers + AI HTTP.
 # reqwest 0.13's `rustls` feature bundles aws-lc-rs (a large C/cmake build).
 # `rustls-no-provider` + rustls's pure-Rust-and-asm `ring` provider (what 0.12's
-# `rustls-tls` used) keeps the build lean; `tls::install_crypto_provider` installs it.
+# `rustls-tls` used) keeps the build lean; `http::client_builder` installs it.
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 urlencoding = "2"
