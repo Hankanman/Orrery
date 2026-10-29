@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   rust:
-    name: Rust (fmt + clippy + test)
+    name: Rust (fmt + build + clippy + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,9 +39,33 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      # --locked everywhere: CI must build exactly what Cargo.lock pins, and fail
+      # if a manifest change wasn't reflected in the lockfile.
       - name: Format
         run: cargo fmt --all --check
+      - name: Build
+        run: cargo build --workspace --locked
       - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # Dependency policy: RustSec advisories, licenses, banned crates, and allowed
+  # sources (see deny.toml for the policy and its documented exceptions).
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Not the action's default --all-features: deny.toml's [graph] decides.
+          arguments: --locked
+          command: check
+          command-arguments: advisories bans licenses sources
+
+  # Packaging dry run: the exact workflow release.yml runs on a tag (release
+  # build, .deb, .rpm, llama runtime, AppImage, SHA256SUMS), minus publishing.
+  packaging:
+    name: Packaging dry run
+    uses: ./.github/workflows/package.yml
