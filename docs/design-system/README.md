@@ -5,9 +5,9 @@
 
 This is the living spec for Orrery's UI. It describes what is actually
 implemented in the native GPUI app — the design tokens in
-[`crates/orrery/src/theme.rs`](../../crates/orrery/src/theme.rs), the desktop
+[`crates/orrery/src/theme.rs`](https://github.com/Hankanman/Orrery/blob/main/crates/orrery/src/theme.rs), the desktop
 integration in
-[`crates/orrery-platform/src/appearance.rs`](../../crates/orrery-platform/src/appearance.rs),
+[`crates/orrery-platform/src/appearance.rs`](https://github.com/Hankanman/Orrery/blob/main/crates/orrery-platform/src/appearance.rs),
 and the GPUI views — not an aspirational mock. When you change the design, change
 it here too.
 
@@ -95,7 +95,7 @@ match the rest of the UI.
 > `theme.accent_*` so the system accent flows through. The orbit-cyan `#38dbf0`
 > is only the *default* for when the OS exposes no accent.
 >
-> Not (yet) ported from the webview version: light mode, and borrowing KDE's
+> Not implemented yet (planned): light mode, and borrowing KDE's
 > window/view *surface* colours. The native theme is dark-only with accent-only
 > adaptation.
 
