@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Repo discovery + metadata (versions match the legacy crate deliberately).
-git2 = "0.20"                                             # libgit2 (vendored)
+git2 = { version = "0.21", features = ["https", "ssh"] }   # libgit2 (vendored); 0.21 made https/ssh opt-in (push + clone need them)
 chrono = "0.4"                                            # contribution-graph date math
 walkdir = "2"                                             # repo scanning
 globset = "0.4"                                           # ignore-glob matching

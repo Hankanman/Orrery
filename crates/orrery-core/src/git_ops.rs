@@ -123,7 +123,7 @@ pub(crate) fn status_of(repo: &Repository) -> GitStatus {
     let branch = repo
         .head()
         .ok()
-        .and_then(|h| h.shorthand().map(String::from))
+        .and_then(|h| h.shorthand().ok().map(String::from))
         .unwrap_or_else(|| "HEAD".to_string());
     let (ahead, behind) = ahead_behind(repo).unwrap_or((0, 0));
     let mut opts = git2::StatusOptions::new();
@@ -150,7 +150,12 @@ pub fn fetch(path: &str) -> Result<GitStatus, String> {
         opts.remote_callbacks(remote_callbacks());
         let refspecs: Vec<String> = remote
             .fetch_refspecs()
-            .map(|r| r.iter().flatten().map(String::from).collect())
+            .map(|r| {
+                r.iter()
+                    .filter_map(|s| s.ok().flatten())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         remote
             .fetch(&refspecs, Some(&mut opts), None)
@@ -176,7 +181,7 @@ pub fn branches(path: &str) -> Result<Vec<BranchInfo>, String> {
     let head_name = repo
         .head()
         .ok()
-        .and_then(|h| h.shorthand().map(String::from));
+        .and_then(|h| h.shorthand().ok().map(String::from));
     let default_oid = default_branch_oid(&repo);
 
     let mut out = Vec::new();
@@ -229,7 +234,7 @@ pub fn switch_branch(path: &str, name: &str) -> Result<(), String> {
     repo.checkout_tree(&object, None)
         .map_err(|e| e.to_string())?;
     match reference {
-        Some(r) => repo.set_head(r.name().ok_or("invalid ref")?),
+        Some(r) => repo.set_head(r.name().map_err(|_| "invalid ref")?),
         None => repo.set_head_detached(object.id()),
     }
     .map_err(|e| e.to_string())
@@ -259,7 +264,12 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
         opts.remote_callbacks(remote_callbacks());
         let refspecs: Vec<String> = remote
             .fetch_refspecs()
-            .map(|r| r.iter().flatten().map(String::from).collect())
+            .map(|r| {
+                r.iter()
+                    .filter_map(|s| s.ok().flatten())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         remote
             .fetch(&refspecs, Some(&mut opts), None)
@@ -271,7 +281,7 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
         if !head.is_branch() {
             return Ok(OpOutcome::Skipped("detached HEAD".into()));
         }
-        match (head.shorthand().map(String::from), head.target()) {
+        match (head.shorthand().ok().map(String::from), head.target()) {
             (Some(b), Some(o)) => (b, o),
             _ => return Ok(OpOutcome::Skipped("unborn branch".into())),
         }
@@ -341,7 +351,12 @@ pub fn default_branch(path: &str) -> Option<String> {
 /// The default branch name, preferring `origin/HEAD`, then a local main/master.
 fn default_branch_name(repo: &Repository) -> Option<String> {
     if let Ok(r) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(name) = r.symbolic_target().and_then(|t| t.rsplit('/').next()) {
+        if let Some(name) = r
+            .symbolic_target()
+            .ok()
+            .flatten()
+            .and_then(|t| t.rsplit('/').next())
+        {
             return Some(name.to_string());
         }
     }
@@ -361,7 +376,7 @@ pub fn checkout_default(path: &str) -> Result<OpOutcome, String> {
     let on_default = repo
         .head()
         .ok()
-        .and_then(|h| h.shorthand().map(String::from))
+        .and_then(|h| h.shorthand().ok().map(String::from))
         .as_deref()
         == Some(branch.as_str());
     if on_default {
@@ -428,7 +443,7 @@ fn protected_branches(repo: &Repository) -> Vec<String> {
         .chain(
             repo.head()
                 .ok()
-                .and_then(|h| h.shorthand().map(String::from)),
+                .and_then(|h| h.shorthand().ok().map(String::from)),
         )
         .collect()
 }
@@ -460,7 +475,7 @@ pub fn worktrees(path: &str) -> Result<Vec<WorktreeInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let names = repo.worktrees().map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    for name in names.iter().flatten() {
+    for name in names.iter().filter_map(|n| n.ok().flatten()) {
         if let Ok(wt) = repo.find_worktree(name) {
             out.push(WorktreeInfo {
                 name: name.to_string(),
@@ -547,7 +562,7 @@ pub fn log_since_sha(path: &str, since_sha: &str, max: usize) -> Result<Vec<Comm
         if let Ok(commit) = repo.find_commit(oid) {
             out.push(CommitInfo {
                 id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
-                summary: commit.summary().unwrap_or("").to_string(),
+                summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
                 author: commit.author().name().unwrap_or("").to_string(),
                 time_unix: commit.time().seconds(),
             });
@@ -585,7 +600,7 @@ pub fn commits_ahead_of(path: &str, base: &str, max: usize) -> Result<Vec<Commit
         if let Ok(commit) = repo.find_commit(oid) {
             out.push(CommitInfo {
                 id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
-                summary: commit.summary().unwrap_or("").to_string(),
+                summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
                 author: commit.author().name().unwrap_or("").to_string(),
                 time_unix: commit.time().seconds(),
             });
@@ -603,7 +618,7 @@ pub fn recent_log(path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
         if let Ok(commit) = repo.find_commit(oid) {
             out.push(CommitInfo {
                 id: oid.to_string()[..7.min(oid.to_string().len())].to_string(),
-                summary: commit.summary().unwrap_or("").to_string(),
+                summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
                 author: commit.author().name().unwrap_or("").to_string(),
                 time_unix: commit.time().seconds(),
             });
@@ -1059,14 +1074,14 @@ pub fn push(path: &str) -> Result<String, String> {
     let branch = head
         .shorthand()
         .map(String::from)
-        .ok_or("HEAD has no branch name")?;
+        .map_err(|_| "HEAD has no branch name")?;
 
     // Upstream remote when configured (branch.<name>.remote), else origin.
     let refname = format!("refs/heads/{branch}");
     let upstream_remote = repo
         .branch_upstream_remote(&refname)
         .ok()
-        .and_then(|b| b.as_str().map(String::from));
+        .and_then(|b| b.as_str().ok().map(String::from));
     let has_upstream = upstream_remote.is_some();
     let remote_name = upstream_remote.unwrap_or_else(|| "origin".to_string());
     let mut remote = repo
@@ -1283,7 +1298,7 @@ mod tests {
         // …its HEAD is the namespaced branch…
         let wt_repo = Repository::open(&wt_path).unwrap();
         assert_eq!(
-            wt_repo.head().unwrap().shorthand(),
+            wt_repo.head().unwrap().shorthand().ok(),
             Some("agent/fix-x-abcd")
         );
         // …and the branch exists in the origin repo too.
@@ -1683,7 +1698,7 @@ mod tests {
             .unwrap()
             .peel_to_commit()
             .unwrap();
-        assert_eq!(tip.summary(), Some("add a"));
+        assert_eq!(tip.summary().unwrap(), Some("add a"));
     }
 
     #[test]
@@ -1723,7 +1738,7 @@ mod tests {
             .unwrap()
             .peel_to_commit()
             .unwrap();
-        assert_eq!(tip.summary(), Some("add a"));
+        assert_eq!(tip.summary().unwrap(), Some("add a"));
     }
 
     #[test]

@@ -16,13 +16,9 @@ all-features = false
 unmaintained = "workspace"
 unsound = "workspace"
 yanked = "warn"
-# Advisories we knowingly accept. Each needs a reason and a way out; remove its
-# line once the fix lands.
-ignore = [
-    # git2 0.20 → 0.21 is a semver-major bump of our own dependency:
-    { id = "RUSTSEC-2026-0183", reason = "git2 0.20 Remote::list() UB (unsound); fixed in git2 >=0.21" },
-    { id = "RUSTSEC-2026-0184", reason = "git2 0.20 blame_buffer Signature UB (unsound); we don't use blame_buffer; fixed in >=0.21" },
-]
+# Advisories we knowingly accept. None today: each new one fails CI until its
+# dependency is bumped, or it is listed here with a reason and a way out.
+ignore = []
 
 [licenses]
 confidence-threshold = 0.9
