@@ -10,7 +10,8 @@
 //!   high-value signals (staging, commits, branch switches, ahead/behind).
 //!
 //! ~2 watches per repo instead of one-per-directory, so it establishes instantly
-//! and stays quiet. Degrades silently if watches can't be established.
+//! and stays quiet. Degrades gracefully (logging to stderr) if watches can't be
+//! established.
 //!
 //! The watch set is computed from the config at spawn and again on every
 //! [`WatcherHandle::rearm`], so repos/roots added while the app runs (Settings
@@ -20,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use notify_debouncer_mini::new_debouncer;
-use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_mini::notify::{Error, ErrorKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer};
 use orrery_core::config;
 use orrery_core::model::AppConfig;
@@ -49,10 +50,36 @@ impl WatcherHandle {
 }
 
 fn watch_one(debouncer: &mut Debouncer<RecommendedWatcher>, path: &std::path::Path) -> bool {
-    debouncer
-        .watcher()
-        .watch(path, RecursiveMode::NonRecursive)
-        .is_ok()
+    match debouncer.watcher().watch(path, RecursiveMode::NonRecursive) {
+        Ok(()) => true,
+        Err(e) => {
+            log_error(&format!("can't watch {}", path.display()), &e);
+            false
+        }
+    }
+}
+
+/// True when a notify error is inotify running out of watches (ENOSPC), which
+/// notify reports as `MaxFilesWatch` (or, from some paths, a raw io error).
+fn is_watch_limit(e: &Error) -> bool {
+    match &e.kind {
+        ErrorKind::MaxFilesWatch => true,
+        ErrorKind::Io(io) => io.raw_os_error() == Some(28), // ENOSPC
+        _ => false,
+    }
+}
+
+/// Log a watch error to stderr, with a remediation hint for the inotify limit.
+fn log_error(context: &str, e: &Error) {
+    if is_watch_limit(e) {
+        eprintln!(
+            "[orrery watcher] {context}: inotify watch limit reached (ENOSPC); \
+             raise it with `sysctl fs.inotify.max_user_watches=524288` \
+             (persist in /etc/sysctl.d/)"
+        );
+    } else {
+        eprintln!("[orrery watcher] {context}: {e}");
+    }
 }
 
 /// The paths the watcher registers for a config: each configured root, each
@@ -97,27 +124,32 @@ pub fn spawn(on_change: impl Fn() + Send + 'static) -> WatcherHandle {
                 },
             )
         };
-        let Ok(mut debouncer) = make_debouncer() else {
-            return;
+        let mut debouncer = match make_debouncer() {
+            Ok(d) => d,
+            Err(e) => {
+                log_error("disabled", &e);
+                return;
+            }
         };
         watch_targets(&mut debouncer);
 
         // Keep `debouncer` alive for the life of the thread; fire only on real
-        // change batches (`Msg::Fs` also carries notify errors, which we ignore
-        // so a degraded watch can't spam rescans). On re-arm, drop the debouncer
+        // change batches (`Msg::Fs` also carries notify errors, which we log
+        // but never rescan on, so a degraded watch can't spam rescans). On re-arm, drop the debouncer
         // — and with it every existing watch — and register a fresh set from
         // the current config: recreating is simpler than diffing paths, and
         // re-arms are rare (explicit user actions). Exits on disconnect.
         while let Ok(msg) = rx.recv() {
             match msg {
                 Msg::Fs(Ok(_events)) => on_change(),
-                Msg::Fs(Err(_)) => {}
-                Msg::Rearm => {
-                    if let Ok(fresh) = make_debouncer() {
+                Msg::Fs(Err(e)) => log_error("watch error", &e),
+                Msg::Rearm => match make_debouncer() {
+                    Ok(fresh) => {
                         debouncer = fresh;
                         watch_targets(&mut debouncer);
                     }
-                }
+                    Err(e) => log_error("re-arm failed", &e),
+                },
             }
         }
     });
@@ -154,5 +186,17 @@ mod tests {
             ..AppConfig::default()
         };
         assert!(target_paths(&cfg).is_empty());
+    }
+
+    #[test]
+    fn watch_limit_detects_enospc() {
+        assert!(is_watch_limit(&Error::new(ErrorKind::MaxFilesWatch)));
+        assert!(is_watch_limit(&Error::io(
+            std::io::Error::from_raw_os_error(28)
+        )));
+        assert!(!is_watch_limit(&Error::generic("other")));
+        assert!(!is_watch_limit(&Error::io(
+            std::io::Error::from_raw_os_error(2)
+        )));
     }
 }

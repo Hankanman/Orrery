@@ -6,24 +6,24 @@
 //! on the shared tokio runtime.
 //!
 //! **Errors never clobber cached state** (the #174 lesson): an `Err` from
-//! [`inbox::github_ci`] — expired token, rate limit, 5xx — leaves the last
+//! [`github_ci`] — expired token, rate limit, 5xx — leaves the last
 //! known state in place and is counted on the returned [`Outcome`] instead,
 //! so the caller can surface an auth problem rather than watching CI facts
 //! silently blank out. Only a definitive answer (including a definitive
 //! "none") is written.
 //!
-//! **GitLab is out of scope** for now: `inbox::github_ci` only speaks the
+//! **GitLab is out of scope** for now: [`github_ci`] only speaks the
 //! GitHub Actions API, so jobs are built solely for `Host::Github` repos.
 //! GitLab pipelines can layer on later behind the same cache shape.
 
 use std::collections::HashSet;
 
 use futures_util::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 
 use crate::attention::CiFact;
-use crate::inbox::{self, CiStatus};
 use crate::model::{Host, Repo};
-use crate::{cache, git_ops, oauth};
+use crate::{cache, enrich, forge, git_ops, oauth};
 
 /// How long a cached CI entry stays fresh. CI is far more volatile than the
 /// enrichment pass's stars/topics (6h TTL): a run can go red minutes after a
@@ -62,24 +62,13 @@ impl Outcome {
 }
 
 /// Build the work list: GitHub-remoted repos with a slug whose cache entry is
-/// stale/missing, deduped by (domain, slug) like the enrich pass. Pure (no
-/// I/O); unit-tested below.
+/// stale/missing, deduped by (domain, slug) exactly like the enrich pass
+/// (shared [`enrich::stale_remotes`]). Pure (no I/O); unit-tested below.
 fn build_jobs(repos: &[Repo], fresh: &HashSet<(String, String)>) -> Vec<Job> {
-    let mut seen = HashSet::new();
-    repos
-        .iter()
-        .filter_map(|r| {
-            if r.host != Some(Host::Github) {
-                return None; // GitLab CI is out of scope (module docs).
-            }
-            let slug = r.slug.clone()?;
-            let domain = r.remote_host.clone().unwrap_or_default();
-            let key = (domain.clone(), slug.clone());
-            if fresh.contains(&key) || !seen.insert(key) {
-                return None;
-            }
-            Some((domain, slug, r.id.clone()))
-        })
+    // GitLab CI is out of scope (module docs).
+    enrich::stale_remotes(repos, fresh, |r| r.host == Some(Host::Github))
+        .into_iter()
+        .map(|(r, domain, slug)| (domain, slug, r.id.clone()))
         .collect()
 }
 
@@ -120,9 +109,11 @@ fn apply_results_on(conn: &rusqlite::Connection, results: Vec<FetchResult>, now:
 ///
 /// `force` ignores the TTL and re-fetches every repo (the manual "Fetch all").
 pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> Outcome {
-    if oauth::github_token().is_none() {
+    // Resolve the token once for the whole pass (it may spawn `gh`), not once
+    // per repo.
+    let Some(token) = oauth::github_token_async().await else {
         return Outcome::default();
-    }
+    };
     let fresh = if force {
         HashSet::new()
     } else {
@@ -133,13 +124,14 @@ pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> Outcome {
         return Outcome::default();
     }
 
+    let token = token.as_str();
     let results: Vec<FetchResult> = stream::iter(jobs)
         .map(|(domain, slug, path)| async move {
             // Default branch from the local clone (origin/HEAD, else
             // main/master) — a fast ref read, no API call. `None` (bare
             // oddities) falls back to the latest run on any branch.
             let branch = git_ops::default_branch(&path);
-            match inbox::github_ci(&slug, branch.as_deref()).await {
+            match github_ci(token, &slug, branch.as_deref()).await {
                 Ok(status) => Ok((domain, slug, status)),
                 Err(e) => Err(e),
             }
@@ -196,33 +188,135 @@ pub fn facts(
     facts
 }
 
+// ── GitHub Actions fetch ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CiStatus {
+    /// "success" | "failure" | "pending" | "none"
+    pub state: String,
+    /// The run's web page (GitHub's `html_url`), when a run was found — lets
+    /// surfaces link straight to the failing run.
+    pub url: Option<String>,
+}
+
+impl CiStatus {
+    fn none() -> Self {
+        CiStatus {
+            state: "none".into(),
+            url: None,
+        }
+    }
+}
+
+/// Latest GitHub Actions run conclusion for a repo, filtered to `branch` when
+/// given (the central CI pass passes the default branch so PR-branch runs
+/// can't masquerade as trunk state). `token` is resolved once per pass by the
+/// caller ([`refresh`]).
+///
+/// "No CI" (`state: "none"`) is only reported when GitHub answers
+/// definitively: a 2xx with an empty run list, or a 404 (the repo isn't
+/// visible to this token — deleted, renamed, or private without access — so
+/// there is nothing to show). Auth failures (401 expired token), rate limits
+/// (403/429), and server errors surface as `Err`, so a broken token reads as
+/// an error, not as CI vanishing.
+pub async fn github_ci(token: &str, slug: &str, branch: Option<&str>) -> Result<CiStatus, String> {
+    #[derive(Deserialize)]
+    struct Runs {
+        #[serde(default)]
+        workflow_runs: Vec<Run>,
+    }
+    #[derive(Deserialize)]
+    struct Run {
+        status: String,
+        conclusion: Option<String>,
+        html_url: Option<String>,
+    }
+    forge::check_github_slug(slug)?;
+    let mut req = forge::client()
+        .get(format!("https://api.github.com/repos/{slug}/actions/runs"))
+        .query(&[("per_page", "1")]);
+    if let Some(branch) = branch {
+        req = req.query(&[("branch", branch)]);
+    }
+    let resp = forge::send(req.bearer_auth(token), forge::GH_CORE).await?;
+    let status = resp.status();
+    if !status.is_success() {
+        if let Some(err) = ci_error_for_status(status) {
+            return Err(err);
+        }
+        return Ok(CiStatus::none());
+    }
+    let runs: Runs = resp.json().await.map_err(|e| e.to_string())?;
+    let Some(run) = runs.workflow_runs.into_iter().next() else {
+        return Ok(CiStatus::none());
+    };
+    Ok(CiStatus {
+        state: workflow_run_state(&run.status, run.conclusion.as_deref()).to_string(),
+        url: run.html_url,
+    })
+}
+
+/// How a non-2xx from the workflow-runs endpoint is treated: 404 means the
+/// repo isn't visible with this token (deleted/renamed/no access) — genuinely
+/// no CI to show, so `None`. Anything else (401 expired token, 403 rate
+/// limit, 5xx) is a transport/auth failure the caller must see.
+fn ci_error_for_status(status: reqwest::StatusCode) -> Option<String> {
+    (status != reqwest::StatusCode::NOT_FOUND).then(|| format!("GitHub CI {status}"))
+}
+
+/// Map a workflow run's REST (status, conclusion) to our four-state vocabulary.
+fn workflow_run_state(status: &str, conclusion: Option<&str>) -> &'static str {
+    if status != "completed" {
+        return "pending";
+    }
+    match conclusion {
+        Some("success") => "success",
+        Some("failure") | Some("timed_out") | Some("startup_failure") => "failure",
+        _ => "none",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Activity, GitStatus};
+    use crate::enrich::test_support::sample;
     use rusqlite::Connection;
 
-    fn sample(id: &str, host: Host, domain: &str, slug: &str) -> Repo {
-        Repo {
-            id: id.to_string(),
-            display_name: "Test".into(),
-            slug: Some(slug.into()),
-            path: "~/dev/test".into(),
-            description: None,
-            language: Some("Rust".into()),
-            git: GitStatus::default(),
-            last_commit_unix: 0,
-            activity: Activity::Active,
-            root: "~/dev".into(),
-            host: Some(host),
-            remote_host: Some(domain.into()),
-            stars: 0,
-            topics: Vec::new(),
-            open_issues: 0,
-            latest_release: None,
-            private: false,
-            favorite: false,
-            ai_summary: None,
+    #[test]
+    fn workflow_run_state_maps_status_and_conclusion() {
+        assert_eq!(workflow_run_state("in_progress", None), "pending");
+        assert_eq!(workflow_run_state("queued", Some("success")), "pending");
+        assert_eq!(workflow_run_state("completed", Some("success")), "success");
+        assert_eq!(workflow_run_state("completed", Some("failure")), "failure");
+        assert_eq!(
+            workflow_run_state("completed", Some("timed_out")),
+            "failure"
+        );
+        assert_eq!(
+            workflow_run_state("completed", Some("startup_failure")),
+            "failure"
+        );
+        assert_eq!(workflow_run_state("completed", Some("cancelled")), "none");
+        assert_eq!(workflow_run_state("completed", None), "none");
+    }
+
+    #[test]
+    fn ci_errors_surface_auth_and_rate_limit_but_not_missing_repo() {
+        use reqwest::StatusCode;
+        // 404 = repo not visible to this token — genuinely nothing to show.
+        assert_eq!(ci_error_for_status(StatusCode::NOT_FOUND), None);
+        // Expired/revoked token, rate limit, and server errors must be errors,
+        // not a silent "none" that blanks CI across the grid.
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            let err = ci_error_for_status(status).expect("must surface an error");
+            assert!(err.contains(status.as_str()), "{err}");
         }
     }
 

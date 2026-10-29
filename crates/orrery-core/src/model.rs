@@ -90,8 +90,14 @@ pub struct HostInfo {
 }
 
 /// User configuration, persisted as TOML.
+///
+/// `#[serde(default)]` at the struct level: any key missing from the file
+/// (an older config, a hand-edit, a typo'd key name) falls back to that field
+/// of `AppConfig::default()` instead of failing the whole parse — which used to
+/// reset *every* setting to defaults and then overwrite the user's file on the
+/// next save.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     /// Directories scanned for git repos.
     pub roots: Vec<String>,
