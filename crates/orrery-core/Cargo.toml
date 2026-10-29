@@ -1,7 +1,7 @@
-# orrery-core — all of Orrery's logic with zero UI and zero Tauri. Scanning,
-# git, host APIs (GitHub/GitLab), local AI (Ollama + bundled llama.cpp), the
-# SQLite cache, config, and launchers. Both the (legacy) Tauri app and the
-# native GPUI app depend on this; it knows nothing about either.
+# orrery-core — all of Orrery's logic with zero UI. Scanning, git, host APIs
+# (GitHub/GitLab), local AI (Ollama + bundled llama.cpp), the SQLite cache,
+# config, and launchers. The native GPUI app (and orrery-platform) depend on
+# this; it knows nothing about either.
 [package]
 name = "orrery-core"
 version = "2026.7.1"
