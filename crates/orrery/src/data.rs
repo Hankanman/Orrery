@@ -19,7 +19,6 @@ pub struct Row {
     pub description: SharedString,
     pub language: SharedString, // "" when unknown
     pub branch: SharedString,
-    pub age: SharedString, // e.g. "3d ago"
     pub release: SharedString,
     pub ai_summary: SharedString,
     pub ahead: u32,
@@ -33,6 +32,15 @@ pub struct Row {
     pub activity: model::Activity,
     /// Last-commit time (Unix secs) — sort key for the "Activity" sort.
     pub last_commit_unix: i64,
+}
+
+impl Row {
+    /// Relative last-commit age ("3d ago"), formatted from the timestamp at
+    /// render time so it never goes stale between rescans (a periodic tick
+    /// repaints the app — see `live.rs`).
+    pub fn age(&self) -> SharedString {
+        rel_age(self.last_commit_unix, now_unix()).into()
+    }
 }
 
 pub(crate) fn rel_age(last_commit_unix: i64, now: i64) -> String {
@@ -72,7 +80,7 @@ pub(crate) fn human_bytes(n: u64) -> String {
     }
 }
 
-/// Mirror of `formatStars` in the frontend: 1234 → "1.2k".
+/// Compact star count for the card: 1234 → "1.2k".
 fn fmt_stars(stars: u32) -> String {
     if stars >= 1000 {
         format!("{:.1}k", stars as f64 / 1000.0)
@@ -237,7 +245,7 @@ pub(crate) fn unwrap_soft_breaks(src: &str) -> String {
     out
 }
 
-pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
+pub fn to_rows(repos: Vec<model::Repo>) -> Vec<Row> {
     repos
         .into_iter()
         .map(|r| Row {
@@ -259,7 +267,6 @@ pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
             .into(),
             language: r.language.unwrap_or_default().into(),
             branch: r.git.branch.into(),
-            age: rel_age(r.last_commit_unix, now).into(),
             release: oneline(r.latest_release.unwrap_or_default()).into(),
             ai_summary: oneline(r.ai_summary.unwrap_or_default()).into(),
             ahead: r.git.ahead,
@@ -288,14 +295,17 @@ pub struct Snapshot {
     pub rows: Vec<Row>,
     pub roots: usize,
     pub repos: Vec<model::Repo>,
+    /// When the roots were last scanned from disk (Unix secs), if known.
+    pub scanned_at: Option<i64>,
 }
 
-fn snapshot(repos: Vec<model::Repo>, now: i64) -> Snapshot {
+fn snapshot(repos: Vec<model::Repo>, scanned_at: Option<i64>) -> Snapshot {
     let roots = count_roots(&repos);
     Snapshot {
-        rows: to_rows(repos.clone(), now),
+        rows: to_rows(repos.clone()),
         roots,
         repos,
+        scanned_at,
     }
 }
 
@@ -316,22 +326,32 @@ fn count_roots(repos: &[model::Repo]) -> usize {
         .len()
 }
 
-/// Load real repos from the shipping SQLite cache. Returns the rows plus the
-/// number of distinct scanned roots (for the header's "N roots · M repos").
-pub fn load(now: i64) -> Snapshot {
+/// Cache-meta key holding the Unix time of the last completed disk scan.
+const SCANNED_AT_KEY: &str = "last_scan_at";
+
+/// Load real repos from the shipping SQLite cache (blocking — call off the UI
+/// thread once the app is up). Returns the rows plus the number of distinct
+/// scanned roots (for the header's "N roots · M repos").
+pub fn load() -> Snapshot {
     let mut repos = cache::load_repos();
+    // The stored snapshot carries the summaries applied when it was taken;
+    // drop them so the AI cache is the single source (a cleared or stale
+    // summary must not resurface from the snapshot).
+    for r in &mut repos {
+        r.ai_summary = None;
+    }
     // Overlay persisted host enrichment (stars/visibility/release) + AI summaries
     // so the launch paint — and reloads after an enrich/summarize pass — show
     // them without a rescan.
     cache::apply_host_info(&mut repos);
     cache::apply_summaries(&mut repos);
-    snapshot(repos, now)
+    let scanned_at = cache::get_meta(SCANNED_AT_KEY).and_then(|s| s.parse().ok());
+    snapshot(repos, scanned_at)
 }
 
 /// Re-scan the configured roots from disk (git-heavy — call off the UI thread),
-/// refresh the cache, and return render-ready rows + root count. Mirrors the
-/// Tauri `scan_repos` command: the filesystem watcher triggers this so the grid
-/// reflects on-disk changes live.
+/// refresh the cache, and return render-ready rows + root count. The filesystem
+/// watcher triggers this so the grid reflects on-disk changes live.
 pub fn rescan() -> Snapshot {
     let now = now_unix();
     let cfg = config::load();
@@ -343,7 +363,8 @@ pub fn rescan() -> Snapshot {
     cache::apply_host_info(&mut repos);
     cache::apply_summaries(&mut repos);
     let _ = cache::store_repos(&repos);
-    snapshot(repos, now)
+    cache::set_meta(SCANNED_AT_KEY, &now.to_string());
+    snapshot(repos, Some(now))
 }
 
 #[cfg(test)]

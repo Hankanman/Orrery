@@ -5,8 +5,6 @@
 //! Colors are `u32` 0xRRGGBB so call sites use `rgb(theme.fg0)`. Sizes are
 //! logical px. See `docs/design-system/` for the full spec.
 
-#![allow(dead_code)]
-
 /// Dark-theme token set. One value per `--orr-*`/shadcn var the grid touches.
 pub struct Theme {
     // Surfaces (deep blue-black void the system orbits in).
@@ -35,10 +33,20 @@ pub struct Theme {
     pub clean: u32,
     pub dirty: u32,
     pub behind: u32,
+    // Launcher action hues (design-system §3). Documented tokens, but the
+    // launch buttons are currently untinted, so nothing reads them yet.
+    #[allow(dead_code)]
     pub act_ide: u32,
+    #[allow(dead_code)]
     pub act_agent: u32,
+    #[allow(dead_code)]
     pub act_folder: u32,
+    #[allow(dead_code)]
     pub act_host: u32,
+
+    /// Modal backdrop behind overlays (drawer / palette / dialog), as
+    /// 0xRRGGBBAA for `rgba()` — the one translucent token.
+    pub scrim: u32,
 
     /// Contribution-heatmap ramp: `[0]` is the empty/no-commit cell; `[1..=4]`
     /// are increasing accent intensities ("Less → More"). Recomputed from the
@@ -55,6 +63,10 @@ pub struct Theme {
     pub text_h3: f32,
     pub text_small: f32,
     pub text_data_sm: f32,
+    /// The header wordmark ("Orrery").
+    pub text_brand: f32,
+    /// Large standalone titles (empty / placeholder states).
+    pub text_display: f32,
 }
 
 impl Theme {
@@ -92,6 +104,7 @@ impl Theme {
             act_agent: 0xa78bfa,
             act_folder: 0xf5b94b,
             act_host: 0x46c8a0,
+            scrim: 0x00000066,
 
             heat: heat_ramp((0x38, 0xdb, 0xf0)),
 
@@ -103,6 +116,8 @@ impl Theme {
             text_h3: 16.,
             text_small: 13.,
             text_data_sm: 12.,
+            text_brand: 15.,
+            text_display: 22.,
         }
     }
 

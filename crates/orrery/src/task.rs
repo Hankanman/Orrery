@@ -27,9 +27,12 @@ fn runtime() -> &'static Runtime {
 }
 
 /// Run `fut` on the shared tokio runtime and await its result on the caller's
-/// (gpui) executor. Call inside `cx.spawn` for network/AI core calls. Our core
-/// futures return `Result` rather than panicking, so the channel always delivers.
-pub async fn run<F, T>(fut: F) -> T
+/// (gpui) executor. Call inside `cx.spawn` for network/AI core calls.
+///
+/// Returns `None` if the future panicked (tokio tears the task down before it
+/// sends) instead of re-raising the panic on the GPUI foreground: a bug in one
+/// core call must not take the whole app down. The failure is logged.
+pub async fn run<F, T>(fut: F) -> Option<T>
 where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
@@ -38,9 +41,25 @@ where
     runtime().spawn(async move {
         let _ = tx.try_send(fut.await);
     });
-    rx.recv()
+    match rx.recv().await {
+        Ok(v) => Some(v),
+        Err(_) => {
+            eprintln!("[native] background task ended without a result (panicked?)");
+            None
+        }
+    }
+}
+
+/// [`run`] for the common `Result<T, String>` core call: a panicked task folds
+/// into an `Err`, so callers keep their single error path.
+pub async fn try_run<F, T>(fut: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    run(fut)
         .await
-        .expect("tokio task dropped before sending its result")
+        .unwrap_or_else(|| Err("background task failed unexpectedly".into()))
 }
 
 /// Spawn `fut` on the shared runtime, detached (fire-and-forget). Use for work
@@ -51,4 +70,30 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     runtime().spawn(fut);
+}
+
+/// Persist a cache-meta value (`orrery_core::cache::set_meta`) off the UI
+/// thread. Writes go through one lazily started writer thread, so they land in
+/// the order they were issued — a later value is never overwritten by an
+/// earlier one. Fire-and-forget, like the synchronous `set_meta` it replaces.
+pub fn persist_meta(key: &'static str, value: String) {
+    use std::sync::mpsc;
+    static WRITER: OnceLock<mpsc::Sender<(&'static str, String)>> = OnceLock::new();
+    let tx = WRITER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<(&'static str, String)>();
+        let spawned = std::thread::Builder::new()
+            .name("orrery-meta-writer".into())
+            .spawn(move || {
+                while let Ok((key, value)) = rx.recv() {
+                    orrery_core::cache::set_meta(key, &value);
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("[native] couldn't start the cache writer thread: {e}");
+        }
+        tx
+    });
+    if tx.send((key, value)).is_err() {
+        eprintln!("[native] cache writer unavailable; dropped a write to {key}");
+    }
 }
