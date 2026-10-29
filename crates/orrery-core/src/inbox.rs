@@ -16,7 +16,7 @@ fn client() -> reqwest::Client {
     // Shared client (Arc-backed) so the inbox's several GitHub calls reuse one
     // connection pool instead of handshaking anew each time.
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .user_agent(UA)
             // Small JSON responses → bound both connect and overall time so a
             // hung host can't stall an inbox refresh indefinitely.

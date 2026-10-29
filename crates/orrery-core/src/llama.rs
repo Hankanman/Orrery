@@ -81,7 +81,7 @@ fn client() -> reqwest::Client {
     // CPU inference of a completion can legitimately run long, so no overall
     // request timeout (which would truncate generation).
     static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .connect_timeout(Duration::from_secs(8))
             .build()
             .unwrap_or_default()

@@ -75,7 +75,8 @@ license-file = ["../../LICENSE", "0"]
 extended-description = "Orrery is a Linux-native command center for your git repos: a fast GPU-rendered desktop dashboard that scans your workspace, surfaces status/PRs/CI at a glance, and launches your IDE or agent."
 section = "devel"
 priority = "optional"
-depends = "$auto"
+# $auto covers linked libraries; the CA store is read at runtime (reqwest TLS).
+depends = "$auto, ca-certificates"
 assets = [
     ["target/release/orrery", "usr/bin/", "755"],
     ["../../packaging/orrery.desktop", "usr/share/applications/", "644"],

@@ -35,7 +35,7 @@ pub fn github_client_id() -> String {
 /// timeouts) instead of building a fresh client per request.
 fn client() -> reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .connect_timeout(std::time::Duration::from_secs(8))
             .timeout(std::time::Duration::from_secs(20))
             .build()

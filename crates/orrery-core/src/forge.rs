@@ -73,7 +73,7 @@ fn client() -> reqwest::Client {
     // reqwest::Client is Arc-backed, so cloning just shares the pool. Bounded
     // timeouts so a hung/blackholed host can't stall an enrich task forever.
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .user_agent(UA)
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(15))

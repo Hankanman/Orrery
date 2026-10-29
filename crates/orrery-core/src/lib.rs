@@ -16,6 +16,7 @@ pub mod enrich;
 pub mod fleet;
 pub mod forge;
 pub mod git_ops;
+pub mod http;
 pub mod inbox;
 pub mod launch;
 pub mod llama;

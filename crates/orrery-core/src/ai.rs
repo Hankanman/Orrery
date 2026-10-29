@@ -97,7 +97,7 @@ fn base() -> String {
 /// stream for minutes and must not be cut off.
 fn client() -> reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .connect_timeout(std::time::Duration::from_secs(8))
             .build()
             .unwrap_or_default()

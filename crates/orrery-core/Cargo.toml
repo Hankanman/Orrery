@@ -23,7 +23,11 @@ which = "8"                                               # detect IDE/terminal 
 rusqlite = { version = "0.40", features = ["bundled"] }   # cache (SQLite bundled)
 
 # Git host providers + AI HTTP.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# reqwest 0.13's `rustls` feature bundles aws-lc-rs (a large C/cmake build).
+# `rustls-no-provider` + rustls's pure-Rust-and-asm `ring` provider (what 0.12's
+# `rustls-tls` used) keeps the build lean; `tls::install_crypto_provider` installs it.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 urlencoding = "2"
 futures-util = "0.3"                                      # stream combinators (ai.rs SSE)
 # Only the timer (oauth device-flow poll backoff). No runtime here — the caller
