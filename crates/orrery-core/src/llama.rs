@@ -174,7 +174,7 @@ fn client() -> reqwest::Client {
     // and a wedged one can't hang a caller forever. No overall request timeout,
     // since CPU inference of a completion can legitimately run long.
     static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .connect_timeout(Duration::from_secs(8))
             .read_timeout(READ_TIMEOUT)
             .build()
@@ -187,7 +187,7 @@ fn client() -> reqwest::Client {
 /// can't be swapped by anyone on the network path.
 fn download_client() -> reqwest::Client {
     static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .https_only(true)
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))

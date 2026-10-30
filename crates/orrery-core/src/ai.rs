@@ -166,7 +166,7 @@ fn base() -> String {
 /// and must not be cut off.
 fn client() -> reqwest::Client {
     static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .connect_timeout(Duration::from_secs(8))
             .read_timeout(READ_TIMEOUT)
             .build()

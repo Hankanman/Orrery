@@ -18,6 +18,14 @@ A Linux-native command center that puts every repo in your dev directories into 
 
 > **Status:** 🚧 Early development, but functional. Now a **native Rust app on GPUI** (no webview) — the earlier Tauri 2 + React build was rewritten for GPU rendering. Mission Control, multi-host enrichment, launchers, Inbox/Feed/Explore/Cleanup/Agents/Dev Tools, and local AI all work. Tagged releases produce `.deb`/`.rpm`/`.AppImage`; you can also [build from source](https://hankanman.github.io/Orrery/guide/getting-started). Expect rough edges; track progress in [the issues](../../issues).
 
+## Install / update
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Hankanman/Orrery/main/scripts/install.sh | bash
+```
+
+This installs the latest release AppImage for your user (no root): it's checksum-verified, goes in `~/.local/bin/orrery`, and gets an app-menu entry. Run the same command again to update, or append `-s -- --uninstall` to remove it. Prefer a system package? `.deb` and `.rpm` builds are on the [releases page](../../releases), or [build from source](https://hankanman.github.io/Orrery/guide/getting-started).
+
 ## What is it?
 
 Point Orrery at the directories where you keep your projects. It discovers every git repo inside them and lays them out in a dark, dense "mission control" grid. Each card fuses three sources of truth:

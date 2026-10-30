@@ -16,25 +16,9 @@ all-features = false
 unmaintained = "workspace"
 unsound = "workspace"
 yanked = "warn"
-# Known advisories in today's Cargo.lock, ignored so the gate can land and
-# catch *new* ones. Each needs a dependency bump in its own PR, then remove
-# its line here. Semver-compatible (a `cargo update -p <crate>` should do it):
-ignore = [
-    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch 0.9.18 fmt::Pointer deref; fixed in >=0.9.20" },
-    { id = "RUSTSEC-2026-0418", reason = "libz-sys <=1.1.30 build script prints the env into target/ (CI caches it); fixed in >=1.1.31" },
-    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23.40 TLS 1.3 encryption-level check; bump rustls" },
-    { id = "RUSTSEC-2026-0346", reason = "rustls 0.23.40 session-value Debug leaks secrets; fixed in >=0.23.46" },
-    { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.40 brotli cert decompression (non-default feature); bump rustls" },
-    { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.40 ServerHello key-exchange downgrade; bump rustls" },
-    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.13 distrusted intermediates; fixed in >=0.103.16" },
-    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 1.0.7 distrusted emSign roots; fixed in >=1.0.10" },
-    { id = "RUSTSEC-2026-0386", reason = "tokio 1.52.3 AsyncFd I/O safety (unsound); fixed in >=1.53.3" },
-    # Need a semver-major bump (git2 0.20 → 0.21 is ours; quick-xml is via gpui):
-    { id = "RUSTSEC-2026-0183", reason = "git2 0.20 Remote::list() UB (unsound); fixed in git2 >=0.21" },
-    { id = "RUSTSEC-2026-0184", reason = "git2 0.20 blame_buffer Signature UB (unsound); we don't use blame_buffer; fixed in >=0.21" },
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 quadratic duplicate-attr check; build-time only (wayland-scanner proc-macro on trusted protocol XML)" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 NsReader unbounded alloc; build-time only (wayland-scanner proc-macro)" },
-]
+# Advisories we knowingly accept. None today: each new one fails CI until its
+# dependency is bumped, or it is listed here with a reason and a way out.
+ignore = []
 
 [licenses]
 confidence-threshold = 0.9
