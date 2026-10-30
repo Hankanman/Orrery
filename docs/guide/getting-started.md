@@ -2,9 +2,31 @@
 
 Install a packaged build, or build from source. Both are covered below.
 
-## Install a release
+## Install / update in one line
 
-Grab the latest artifact for your distro from the [releases page](https://github.com/Hankanman/Orrery/releases):
+```sh
+curl -fsSL https://raw.githubusercontent.com/Hankanman/Orrery/main/scripts/install.sh | bash
+```
+
+This installs the latest release AppImage for your user, with no root needed:
+
+- the download is checked against the release's `SHA256SUMS`;
+- it's stored in `~/.local/opt/orrery`;
+- it's linked as `~/.local/bin/orrery`;
+- it gets an app-menu entry and icon.
+
+**Updating:** run the same command again. It does nothing if you're already on the latest release.
+
+**Options:**
+
+- `ORRERY_VERSION=v2026.10.1` installs a specific tag.
+- `ORRERY_PREFIX=…` changes the install location from `~/.local`.
+
+**Uninstalling:** append `-s -- --uninstall` to the command. Your config and cache are left in place.
+
+## Install a release manually
+
+Or grab the latest artifact for your distro from the [releases page](https://github.com/Hankanman/Orrery/releases):
 
 ```sh
 # Optional: verify the download against the release's SHA256SUMS
