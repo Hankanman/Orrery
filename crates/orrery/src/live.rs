@@ -2,14 +2,16 @@
 //! the running app reacts without a manual refresh. Several sources, each owning
 //! its own thread + runtime in `orrery-platform`:
 //!
-//! - **filesystem watch** → rescan the roots and reload the grid;
+//! - **filesystem watch** → rescan the roots and reload the grid (a burst of
+//!   events coalesces into one single-flight rescan);
 //! - **appearance change** → recompute the theme with the new system accent;
 //! - **attention poll** → feed the poll's inbox facts into the attention model
 //!   (badges, tray summary, urgent notifications — all downstream of
 //!   `recompute_attention`; the poller itself only notifies the non-model
 //!   PR/CI kinds);
 //! - **global shortcut** (Ctrl+Alt+O) → raise the window;
-//! - **system tray** → show / rescan / quit / open-a-repo.
+//! - **system tray** → show / rescan / quit / open-a-repo;
+//! - **clock** → a once-a-minute repaint for relative times.
 //!
 //! GPUI is single-threaded: entity mutation needs `&mut App`, which only exists
 //! on the foreground. So each background callback just pushes a [`Signal`] onto
@@ -23,8 +25,7 @@ use gpui::Context;
 use orrery_platform::appearance::Appearance;
 use orrery_platform::tray::TrayAction;
 
-use crate::data;
-use crate::shell::OrreryApp;
+use crate::shell::{OrreryApp, SnapKind};
 use crate::theme::Theme;
 
 /// A desktop signal to apply on the GPUI foreground.
@@ -119,27 +120,32 @@ pub fn spawn(
     // `recompute_attention`, through the clone returned below).
     let tray_for_app = tray.clone();
     cx.spawn(async move |this, cx| {
-        while let Ok(signal) = rx.recv().await {
+        // A signal read ahead while coalescing a ReposChanged burst, to be
+        // handled next.
+        let mut pending: Option<Signal> = None;
+        loop {
+            let signal = match pending.take() {
+                Some(s) => s,
+                None => match rx.recv().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                },
+            };
             match signal {
                 Signal::ReposChanged => {
-                    // The git scan is slow; run it on the background pool and
-                    // only touch the entity with the finished rows.
-                    let snap = cx
-                        .background_executor()
-                        .spawn(async { data::rescan() })
-                        .await;
+                    // Coalesce a burst of change events (and tray rescans)
+                    // queued behind this one into a single rescan.
+                    while let Ok(next) = rx.try_recv() {
+                        if !matches!(next, Signal::ReposChanged) {
+                            pending = Some(next);
+                            break;
+                        }
+                    }
+                    // The snapshot pass scans off the UI thread, is
+                    // single-flight (a request mid-scan becomes one trailing
+                    // rescan), and runs the post-snapshot fan-out.
                     let applied = this.update(cx, |app, cx| {
-                        app.apply_snapshot(snap);
-                        // Drop fleet-selected ids for repos that vanished.
-                        app.prune_selection();
-                        // New/changed repos → refresh the semantic index (cheap
-                        // when unchanged; a no-op unless AI is ready) and host
-                        // enrichment (skips repos still within the cache TTL).
-                        app.index_semantic();
-                        app.enrich_hosts(cx);
-                        app.refresh_ci(cx);
-                        app.load_activity(cx);
-                        cx.notify();
+                        app.request_snapshot(SnapKind::Rescan, cx);
                     });
                     if applied.is_err() {
                         break; // entity gone — stop draining
@@ -183,6 +189,21 @@ pub fn spawn(
                 }
                 Signal::ShowWindow => cx.update(|cx| cx.activate(true)),
                 Signal::Quit => cx.update(|cx| cx.quit()),
+            }
+        }
+    })
+    .detach();
+
+    // Clock tick → repaint once a minute, so relative times rendered from
+    // timestamps (card ages, the sidebar's "Scanned …") stay current while
+    // nothing else changes. Ends when the entity is dropped.
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(60))
+                .await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
             }
         }
     })

@@ -55,8 +55,7 @@ fn main() {
         orrery_core::llama::set_bundled_dir(prefix.join("lib/orrery/llama-runtime"));
     }
 
-    let now = data::now_unix();
-    let snap = data::load(now);
+    let snap = data::load();
     eprintln!(
         "[native] loaded {} repos across {} roots",
         snap.rows.len(),
@@ -164,6 +163,9 @@ fn main() {
                             toasts: Vec::new(),
                             toast_seq: 0,
                             grid: Default::default(),
+                            passes: Default::default(),
+                            derived: Default::default(),
+                            scanned_at: snap.scanned_at,
                             view_filter: None,
                             focus: cx.focus_handle(),
                         }
@@ -180,21 +182,10 @@ fn main() {
                     // Probe AI reachability and build the semantic index in the
                     // background, so Ctrl+K can search by meaning. Also kick off a
                     // host-enrichment pass so cards fill in stars/visibility.
-                    view.update(cx, |this, cx| {
-                        // First attention pass from the launch snapshot's local
-                        // git facts (dirty/ahead/behind), so badges and card
-                        // dots are right on the first paint; host/inbox/agent
-                        // facts refine it as their sources load.
-                        this.recompute_attention();
-                        this.ai_startup(cx);
-                        this.enrich_hosts(cx);
-                        this.refresh_ci(cx);
-                        this.load_activity(cx);
-                        // Detect dispatched-agent sessions that ended while
-                        // Orrery was closed, and resume supervising live ones
-                        // (#185) — see `OrreryApp::agents_startup`.
-                        this.agents_startup(cx);
-                    });
+                    // The first attention pass, the AI probe, and the same
+                    // post-snapshot fan-out a rescan runs — see
+                    // `OrreryApp::startup`.
+                    view.update(cx, |this, cx| this.startup(cx));
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();
                     window.focus(&focus, cx);

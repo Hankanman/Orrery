@@ -154,7 +154,7 @@ pub fn render(
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(0x00000088))
+        .bg(rgba(t.scrim))
         .on_click(move |_ev, _win, cx| {
             app.update(cx, |this, _cx| this.close_overlay());
         })

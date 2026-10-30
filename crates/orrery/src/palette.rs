@@ -7,6 +7,9 @@
 //! are methods on `OrreryApp` (shell.rs). This module owns the item model + the
 //! rendering.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gpui::{
     Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Subscription, div, px, rgb, rgba,
@@ -39,6 +42,10 @@ pub struct SemanticHit {
     pub snippet: SharedString,
 }
 
+/// The [`PaletteData::items`] cache key: (`rev`, rows generation,
+/// has-selection).
+pub type ItemsKey = (u64, u64, bool);
+
 /// Live palette state.
 pub struct PaletteData {
     pub query: Entity<InputState>,
@@ -57,7 +64,14 @@ pub struct PaletteData {
     pub query_vecs: std::collections::HashMap<String, std::sync::Arc<Vec<f32>>>,
     /// Query generation, for debouncing/dropping stale searches.
     pub generation: u64,
-    /// Keeps the query-observation alive (re-renders the app on each keystroke).
+    /// Bumped whenever an input of [`items`] held here changes (the query,
+    /// `code`, `semantic`) — part of the `items` cache key.
+    pub rev: u64,
+    /// The result list last built by `OrreryApp::palette_items`, keyed by
+    /// (`rev`, rows generation, has-selection), so render / arrow keys / Enter
+    /// don't each rebuild it.
+    pub items: RefCell<Option<(ItemsKey, Rc<Vec<PaletteItem>>)>>,
+    /// Keeps the query subscription alive (re-renders the app on each edit).
     pub _sub: Subscription,
 }
 
@@ -307,7 +321,7 @@ pub fn render(
         .flex()
         .flex_col()
         .items_center()
-        .bg(rgba(0x00000066))
+        .bg(rgba(t.scrim))
         .child(div().h(px(80.)))
         .child(panel)
 }
@@ -426,7 +440,6 @@ mod tests {
             description: "".into(),
             language: "".into(),
             branch: "".into(),
-            age: "".into(),
             release: "".into(),
             ai_summary: "".into(),
             ahead: 0,

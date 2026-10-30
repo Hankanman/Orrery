@@ -143,7 +143,8 @@ pub struct NotesData {
     /// Commits since last seen — drives whether "Mark caught up" is offered.
     pub count: usize,
     pub first_visit: bool,
-    /// AI "what changed" narrative, once generated (gated on `aiReady`).
+    /// AI "what changed" narrative, once generated (gated on `aiReady`) —
+    /// stored already reflowed for the markdown renderer.
     pub resume: Option<SharedString>,
 }
 
@@ -163,10 +164,11 @@ pub struct DrawerData {
     pub changes: Option<Vec<ChangeRow>>,
     /// The file whose diff the pane shows, as (path, staged-side).
     pub change_sel: Option<(SharedString, bool)>,
-    /// AI-generated commit message for the staged diff, once requested, as
-    /// (subject, body) — the body may be empty. Errors land in the subject.
-    pub commit_suggestion: Option<(SharedString, SharedString)>,
-    /// AI-generated changelog from recent commits, once requested.
+    /// AI-generated commit message for the staged diff, once requested — the
+    /// body may be empty. Errors land in the subject.
+    pub commit_suggestion: Option<CommitSuggestion>,
+    /// AI-generated changelog from recent commits, once requested — stored
+    /// already reflowed for the markdown renderer.
     pub changelog: Option<SharedString>,
     /// Notes tab (catch-up + saved note); `None` until first shown.
     pub notes: Option<NotesData>,
@@ -199,15 +201,82 @@ pub struct DrawerData {
     pub dispatch_input: Option<Entity<gpui_component::input::InputState>>,
     /// Whether "Dispatch" runs the agent on a fresh worktree (#185).
     pub dispatch_fresh: bool,
+    /// Identifies this drawer session (unique per open), so a load started for
+    /// an earlier session of the same repo can't land in this one.
+    epoch: u64,
+    /// Latest issued load ticket per [`Slot`]; only the newest load of a slot
+    /// may store its result, so overlapping reloads can't land out of order.
+    seqs: [u64; SLOTS],
+}
+
+/// The independently reloaded parts of the drawer, for stale-result guards.
+#[derive(Clone, Copy)]
+enum Slot {
+    Overview,
+    Readme,
+    Changes,
+    Diff,
+    Notes,
+    Pr,
+}
+const SLOTS: usize = 6;
+
+/// Issued when a drawer load starts; the result is stored only while the
+/// ticket is still current (same session, no newer load of the same slot).
+#[derive(Clone, Copy)]
+struct Ticket {
+    epoch: u64,
+    slot: Slot,
+    seq: u64,
+}
+
+/// The AI commit-message suggestion (Changes tab).
+pub struct CommitSuggestion {
+    pub subject: SharedString,
+    /// The raw body — what "Commit this" commits.
+    pub body: SharedString,
+    /// `body` reflowed for the markdown renderer, computed once here rather
+    /// than on every frame (see [`data::unwrap_soft_breaks`]).
+    body_md: SharedString,
+}
+
+impl CommitSuggestion {
+    pub fn new(subject: impl Into<SharedString>, body: impl Into<SharedString>) -> Self {
+        let body = body.into();
+        CommitSuggestion {
+            subject: subject.into(),
+            body_md: data::unwrap_soft_breaks(&body).into(),
+            body,
+        }
+    }
 }
 
 impl DrawerData {
     /// Fresh, all-loading state for a newly opened repo.
     pub fn loading(repo: SharedString) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
         DrawerData {
             repo,
+            epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
             ..Default::default()
         }
+    }
+
+    /// Start a load of `slot`, superseding any in-flight one.
+    fn ticket(&mut self, slot: Slot) -> Ticket {
+        let seq = &mut self.seqs[slot as usize];
+        *seq += 1;
+        Ticket {
+            epoch: self.epoch,
+            slot,
+            seq: *seq,
+        }
+    }
+
+    /// Is `t` still the newest load of its slot in this drawer session?
+    fn is_current(&self, t: Ticket) -> bool {
+        self.epoch == t.epoch && self.seqs[t.slot as usize] == t.seq
     }
 }
 
@@ -229,18 +298,18 @@ fn read_overview(id: &str) -> Loaded {
     )
 }
 
-/// Apply a finished Overview load to the app, but only if the drawer still shows
-/// the same repo (else the user moved on and this is stale).
+/// Apply a finished Overview load to the app, but only if `ticket` is still
+/// current (else the user moved on, or a newer reload superseded this one).
 fn store_overview(
     this: &WeakEntity<OrreryApp>,
     cx: &mut AsyncApp,
-    repo: &SharedString,
+    ticket: Ticket,
     loaded: Loaded,
     now: i64,
 ) {
     let (branches, commits, worktrees, default_branch) = loaded;
     let _ = this.update(cx, |this, cx| {
-        if &this.drawer.repo != repo {
+        if !this.drawer.is_current(ticket) {
             return;
         }
         this.drawer.branches = Some(branches.into_iter().map(branch_row).collect());
@@ -251,50 +320,65 @@ fn store_overview(
     });
 }
 
-/// Kick off the Overview load for `repo` (branches/commits/worktrees).
-pub fn load_overview(repo: SharedString, cx: &mut Context<OrreryApp>) {
+/// Run `op` (sync git, may be a no-op) and then re-read the Overview on the
+/// background pool, storing it if still current. Backs the Overview load and
+/// every Overview mutation (branch switch, worktree add/remove).
+fn reload_overview(
+    this: &mut OrreryApp,
+    op: impl FnOnce(&str) + Send + 'static,
+    cx: &mut Context<OrreryApp>,
+) {
     let now = data::now_unix();
-    let id = repo.to_string();
-    cx.spawn(async move |this, cx| {
-        let loaded = cx
-            .background_executor()
-            .spawn(async move { read_overview(&id) })
-            .await;
-        store_overview(&this, cx, &repo, loaded, now);
-    })
-    .detach();
-}
-
-/// Switch `repo` to `name`, then refresh the Overview. Spawn-only (the caller,
-/// already holding `&mut OrreryApp`, sets the loading state). The `.git/HEAD`
-/// change also trips the filesystem watcher, so the card row refreshes on its own.
-pub fn switch_branch(repo: SharedString, name: SharedString, cx: &mut Context<OrreryApp>) {
-    let now = data::now_unix();
-    let (id, branch) = (repo.to_string(), name.to_string());
+    let ticket = this.drawer.ticket(Slot::Overview);
+    let id = this.drawer.repo.to_string();
     cx.spawn(async move |this, cx| {
         let loaded = cx
             .background_executor()
             .spawn(async move {
-                let _ = git_ops::switch_branch(&id, &branch);
+                op(&id);
                 read_overview(&id)
             })
             .await;
-        store_overview(&this, cx, &repo, loaded, now);
+        store_overview(&this, cx, ticket, loaded, now);
     })
     .detach();
 }
 
+/// Kick off the Overview load for the open drawer (branches/commits/worktrees).
+pub fn load_overview(this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
+    reload_overview(this, |_| {}, cx);
+}
+
+/// Switch the drawer's repo to `name`, then refresh the Overview. The caller
+/// sets the loading state. The `.git/HEAD` change also trips the filesystem
+/// watcher, so the card row refreshes on its own.
+pub fn switch_branch(this: &mut OrreryApp, name: SharedString, cx: &mut Context<OrreryApp>) {
+    reload_overview(
+        this,
+        move |id| {
+            let _ = git_ops::switch_branch(id, &name);
+        },
+        cx,
+    );
+}
+
 /// Lazily load the repo's README (filesystem, sync) when the Readme tab opens.
-pub fn load_readme(repo: SharedString, cx: &mut Context<OrreryApp>) {
-    let id = repo.to_string();
+/// It's reflowed once here, off the UI thread, rather than on every frame.
+pub fn load_readme(this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
+    let ticket = this.drawer.ticket(Slot::Readme);
+    let id = this.drawer.repo.to_string();
     cx.spawn(async move |this, cx| {
         let content = cx
             .background_executor()
-            .spawn(async move { read_readme(&id) })
+            .spawn(async move {
+                // Reflow soft-wrapped lines first — gpui-component's renderer
+                // panics on a paragraph's embedded newlines.
+                read_readme(&id).map(|src| SharedString::from(data::unwrap_soft_breaks(&src)))
+            })
             .await;
         let _ = this.update(cx, |this, cx| {
-            if this.drawer.repo == repo {
-                this.drawer.readme = ReadmeState::Ready(content.map(SharedString::from));
+            if this.drawer.is_current(ticket) {
+                this.drawer.readme = ReadmeState::Ready(content);
                 cx.notify();
             }
         });
@@ -310,22 +394,40 @@ fn change_row(c: git_ops::FileChange) -> ChangeRow {
     }
 }
 
-/// Lazily load the Changes tab's file lists (sync git, off the UI thread).
-/// The store step auto-selects a file and loads its diff.
-pub fn load_changes(repo: SharedString, cx: &mut Context<OrreryApp>) {
-    let id = repo.to_string();
+/// Run `op` (sync git) on the drawer's repo, then re-read the Changes tab's
+/// file lists, both on the background pool. `on_done` gets `op`'s result on
+/// the foreground (for toasts — pushed even if the drawer moved on); the
+/// lists are stored only if this is still the newest Changes load.
+fn reload_changes<R: Send + 'static>(
+    this: &mut OrreryApp,
+    op: impl FnOnce(&str) -> R + Send + 'static,
+    on_done: impl FnOnce(&mut OrreryApp, &R, &mut Context<OrreryApp>) + 'static,
+    cx: &mut Context<OrreryApp>,
+) {
+    let ticket = this.drawer.ticket(Slot::Changes);
+    let id = this.drawer.repo.to_string();
     cx.spawn(async move |this, cx| {
-        let list = cx
+        let (result, list) = cx
             .background_executor()
-            .spawn(async move { git_ops::changes(&id).unwrap_or_default() })
+            .spawn(async move {
+                let result = op(&id);
+                (result, git_ops::changes(&id).unwrap_or_default())
+            })
             .await;
         let _ = this.update(cx, |this, cx| {
-            if this.drawer.repo == repo {
+            on_done(this, &result, cx);
+            if this.drawer.is_current(ticket) {
                 store_changes(this, list, cx);
             }
         });
     })
     .detach();
+}
+
+/// Lazily load the Changes tab's file lists (sync git, off the UI thread).
+/// The store step auto-selects a file and loads its diff.
+pub fn load_changes(this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
+    reload_changes(this, |_| (), |_, _, _| {}, cx);
 }
 
 /// Apply freshly read file lists: keep the selection if its entry survived
@@ -357,7 +459,7 @@ fn store_changes(
     match sel {
         Some((path, staged)) => {
             this.drawer.diff = DiffState::Loading;
-            load_file_diff(this.drawer.repo.clone(), path, staged, cx);
+            load_file_diff(this, path, staged, cx);
         }
         None => this.drawer.diff = DiffState::Ready(Vec::new()),
     }
@@ -381,31 +483,28 @@ fn select_change(
     }
     this.drawer.change_sel = Some((path.clone(), staged));
     this.drawer.diff = DiffState::Loading;
-    load_file_diff(this.drawer.repo.clone(), path, staged, cx);
+    load_file_diff(this, path, staged, cx);
     cx.notify();
 }
 
 /// Load one file's diff as hunks (sync git, off the UI thread). The result is
-/// dropped if the drawer moved on or the selection changed while in flight.
+/// dropped if the drawer moved on or a newer diff load (another selection,
+/// or a refresh of this one) superseded it while in flight.
 fn load_file_diff(
-    repo: SharedString,
+    this: &mut OrreryApp,
     path: SharedString,
     staged: bool,
     cx: &mut Context<OrreryApp>,
 ) {
-    let (id, file) = (repo.to_string(), path.to_string());
+    let ticket = this.drawer.ticket(Slot::Diff);
+    let (id, file) = (this.drawer.repo.to_string(), path.to_string());
     cx.spawn(async move |this, cx| {
         let hunks = cx
             .background_executor()
             .spawn(async move { git_ops::file_hunks(&id, &file, staged).unwrap_or_default() })
             .await;
         let _ = this.update(cx, |this, cx| {
-            let still_selected = this
-                .drawer
-                .change_sel
-                .as_ref()
-                .is_some_and(|(p, s)| *p == path && *s == staged);
-            if this.drawer.repo == repo && still_selected {
+            if this.drawer.is_current(ticket) {
                 this.drawer.diff = DiffState::Ready(hunks.into_iter().map(hunk_row).collect());
                 cx.notify();
             }
@@ -427,73 +526,60 @@ fn hunk_row(h: git_ops::Hunk) -> HunkRow {
 /// lists + diff exactly like the file-level ops do. `staged` is the side the
 /// hunk was shown on (staged → unstage it). Failures surface as a toast.
 fn hunk_op(
-    repo: SharedString,
+    this: &mut OrreryApp,
     path: SharedString,
     staged: bool,
     hunk_ix: usize,
     cx: &mut Context<OrreryApp>,
 ) {
-    let (id, file) = (repo.to_string(), path.to_string());
-    cx.spawn(async move |this, cx| {
-        let (result, list) = cx
-            .background_executor()
-            .spawn(async move {
-                let result = if staged {
-                    git_ops::unstage_hunk(&id, &file, hunk_ix)
-                } else {
-                    git_ops::stage_hunk(&id, &file, hunk_ix)
-                };
-                (result, git_ops::changes(&id).unwrap_or_default())
-            })
-            .await;
-        let _ = this.update(cx, |this, cx| {
+    let file = path.to_string();
+    reload_changes(
+        this,
+        move |id| {
+            if staged {
+                git_ops::unstage_hunk(id, &file, hunk_ix)
+            } else {
+                git_ops::stage_hunk(id, &file, hunk_ix)
+            }
+        },
+        move |this, result, cx| {
             if let Err(e) = result {
                 let title = if staged {
                     "Unstage hunk failed"
                 } else {
                     "Stage hunk failed"
                 };
-                this.push_toast(ToastKind::Error, title, Some(e.into()), cx);
+                this.push_toast(ToastKind::Error, title, Some(e.clone().into()), cx);
             }
-            if this.drawer.repo == repo {
-                store_changes(this, list, cx);
-            }
-        });
-    })
-    .detach();
+        },
+        cx,
+    );
 }
 
 /// Stage (or unstage) `paths`, then re-read the file lists + selected diff.
 /// Failures surface as an error toast rather than vanishing silently.
-fn set_staged(repo: SharedString, paths: Vec<String>, stage: bool, cx: &mut Context<OrreryApp>) {
-    let id = repo.to_string();
-    cx.spawn(async move |this, cx| {
-        let (result, list) = cx
-            .background_executor()
-            .spawn(async move {
-                let result = if stage {
-                    git_ops::stage_paths(&id, &paths)
-                } else {
-                    git_ops::unstage_paths(&id, &paths)
-                };
-                (result, git_ops::changes(&id).unwrap_or_default())
-            })
-            .await;
-        let _ = this.update(cx, |this, cx| {
+fn set_staged(this: &mut OrreryApp, paths: Vec<String>, stage: bool, cx: &mut Context<OrreryApp>) {
+    reload_changes(
+        this,
+        move |id| {
+            if stage {
+                git_ops::stage_paths(id, &paths)
+            } else {
+                git_ops::unstage_paths(id, &paths)
+            }
+        },
+        move |this, result, cx| {
             if let Err(e) = result {
                 let title = if stage {
                     "Stage failed"
                 } else {
                     "Unstage failed"
                 };
-                this.push_toast(ToastKind::Error, title, Some(e.into()), cx);
+                this.push_toast(ToastKind::Error, title, Some(e.clone().into()), cx);
             }
-            if this.drawer.repo == repo {
-                store_changes(this, list, cx);
-            }
-        });
-    })
-    .detach();
+        },
+        cx,
+    );
 }
 
 /// Join a commit subject and optional body with the conventional blank line.
@@ -509,26 +595,21 @@ fn full_commit_message(subject: &str, body: &str) -> String {
 
 /// Commit the index as-is with `message`, toast the outcome, then refresh the
 /// file lists + diff. The commit also trips the watcher, refreshing the card.
-fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp>) {
-    let id = repo.to_string();
+fn commit_staged(this: &mut OrreryApp, message: String, cx: &mut Context<OrreryApp>) {
+    let repo = this.drawer.repo.clone();
     // The commit subject, for the success toast's detail line.
     let subject = message.lines().next().unwrap_or("").trim().to_string();
-    cx.spawn(async move |this, cx| {
-        let (result, list) = cx
-            .background_executor()
-            .spawn(async move {
-                let result = git_ops::commit(&id, message.trim());
-                (result, git_ops::changes(&id).unwrap_or_default())
-            })
-            .await;
-        let _ = this.update(cx, |this, cx| {
+    reload_changes(
+        this,
+        move |id| git_ops::commit(id, message.trim()),
+        move |this, result, cx| {
             // The toast is global feedback — push it even if the drawer moved on.
-            match &result {
+            match result {
                 Ok(hash) => {
                     this.push_toast(
                         ToastKind::Success,
                         format!("Committed {hash}"),
-                        Some(subject.clone().into()),
+                        Some(subject.into()),
                         cx,
                     );
                 }
@@ -541,18 +622,14 @@ fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp
                     );
                 }
             }
-            if this.drawer.repo != repo {
-                return;
-            }
-            if result.is_ok() {
+            if result.is_ok() && this.drawer.repo == repo {
                 this.drawer.commit_suggestion = None;
                 // Offer Push even while the grid row's ahead count is stale.
                 this.drawer.committed = true;
             }
-            store_changes(this, list, cx);
-        });
-    })
-    .detach();
+        },
+        cx,
+    );
 }
 
 /// Read the "resume where I left off" catch-up for a repo (sync). The note text
@@ -584,22 +661,37 @@ fn read_notes(id: &str) -> NotesData {
     }
 }
 
-/// Lazily load the Notes tab data when it first opens.
-pub fn load_notes(repo: SharedString, cx: &mut Context<OrreryApp>) {
-    let id = repo.to_string();
+/// Run `op` (cache write, may be a no-op) and then read the Notes tab data on
+/// the background pool, storing it if still current. Keeps any AI narrative
+/// already generated this session.
+fn reload_notes(
+    this: &mut OrreryApp,
+    op: impl FnOnce(&str) + Send + 'static,
+    cx: &mut Context<OrreryApp>,
+) {
+    let ticket = this.drawer.ticket(Slot::Notes);
+    let id = this.drawer.repo.to_string();
     cx.spawn(async move |this, cx| {
         let notes = cx
             .background_executor()
-            .spawn(async move { read_notes(&id) })
+            .spawn(async move {
+                op(&id);
+                read_notes(&id)
+            })
             .await;
         let _ = this.update(cx, |this, cx| {
-            if this.drawer.repo == repo {
+            if this.drawer.is_current(ticket) {
                 this.drawer.notes = Some(notes);
                 cx.notify();
             }
         });
     })
     .detach();
+}
+
+/// Lazily load the Notes tab data when it first opens.
+pub fn load_notes(this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
+    reload_notes(this, |_| {}, cx);
 }
 
 /// Persist the edited note (off the UI thread).
@@ -615,23 +707,27 @@ fn save_note(repo: SharedString, text: String, cx: &mut Context<OrreryApp>) {
     .detach();
 }
 
-/// Record the current HEAD as "seen", then refresh the catch-up.
-fn mark_seen(repo: SharedString, cx: &mut Context<OrreryApp>) {
-    let now = data::now_unix();
-    let id = repo.to_string();
+/// Seed the (just created, empty) note field from the saved note, read off the
+/// UI thread. Skipped if the drawer moved on or the user already started
+/// typing — never clobber their text with the stored copy.
+fn seed_note_input(this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
+    // Guarded by the session alone (no slot ticket — that would supersede
+    // the catch-up load the Notes tab starts alongside this).
+    let epoch = this.drawer.epoch;
+    let id = this.drawer.repo.to_string();
     cx.spawn(async move |this, cx| {
-        let notes = cx
+        let initial = cx
             .background_executor()
-            .spawn(async move {
-                if let Ok(sha) = git_ops::head_sha(&id) {
-                    let _ = cache::set_seen(&id, &sha, now);
-                }
-                read_notes(&id)
-            })
+            .spawn(async move { cache::note(&id) })
             .await;
-        let _ = this.update(cx, |this, cx| {
-            if this.drawer.repo == repo {
-                this.drawer.notes = Some(notes);
+        let _ = this.update_in(cx, |this, window, cx| {
+            if this.drawer.epoch != epoch || initial.is_empty() {
+                return;
+            }
+            if let Some(input) = &this.drawer.note_input
+                && input.read(cx).value().is_empty()
+            {
+                input.update(cx, |st, cx| st.set_value(initial, window, cx));
                 cx.notify();
             }
         });
@@ -639,43 +735,44 @@ fn mark_seen(repo: SharedString, cx: &mut Context<OrreryApp>) {
     .detach();
 }
 
-/// Create a worktree (+ branch) `name` in a sibling dir, then refresh Overview.
-fn add_worktree(repo: SharedString, name: String, cx: &mut Context<OrreryApp>) {
+/// Record the current HEAD as "seen", then refresh the catch-up.
+fn mark_seen(this: &mut OrreryApp, cx: &mut Context<OrreryApp>) {
     let now = data::now_unix();
-    let id = repo.to_string();
-    let dest = format!("{id}-{name}");
-    cx.spawn(async move |this, cx| {
-        let loaded = cx
-            .background_executor()
-            .spawn(async move {
-                let _ = git_ops::add_worktree(&id, &name, &dest);
-                read_overview(&id)
-            })
-            .await;
-        store_overview(&this, cx, &repo, loaded, now);
-    })
-    .detach();
+    reload_notes(
+        this,
+        move |id| {
+            if let Ok(sha) = git_ops::head_sha(id) {
+                let _ = cache::set_seen(id, &sha, now);
+            }
+        },
+        cx,
+    );
+}
+
+/// Create a worktree (+ branch) `name` in a sibling dir, then refresh Overview.
+fn add_worktree(this: &mut OrreryApp, name: String, cx: &mut Context<OrreryApp>) {
+    reload_overview(
+        this,
+        move |id| {
+            let dest = format!("{id}-{name}");
+            let _ = git_ops::add_worktree(id, &name, &dest);
+        },
+        cx,
+    );
 }
 
 /// Unlink worktree `name` (leaves files on disk), then refresh Overview.
-fn remove_worktree(repo: SharedString, name: String, cx: &mut Context<OrreryApp>) {
-    let now = data::now_unix();
-    let id = repo.to_string();
-    cx.spawn(async move |this, cx| {
-        let loaded = cx
-            .background_executor()
-            .spawn(async move {
-                let _ = git_ops::remove_worktree(&id, &name);
-                read_overview(&id)
-            })
-            .await;
-        store_overview(&this, cx, &repo, loaded, now);
-    })
-    .detach();
+fn remove_worktree(this: &mut OrreryApp, name: String, cx: &mut Context<OrreryApp>) {
+    reload_overview(
+        this,
+        move |id| {
+            let _ = git_ops::remove_worktree(id, &name);
+        },
+        cx,
+    );
 }
 
-/// Read the first matching README from the repo root (mirrors the Tauri
-/// `repo_readme` command).
+/// Read the first matching README from the repo root.
 fn read_readme(id: &str) -> Option<String> {
     const NAMES: [&str; 5] = [
         "README.md",
@@ -743,72 +840,71 @@ fn ready_pr(panel: inbox::PrPanel) -> PrState {
     }
 }
 
-/// Lazily load the GitHub PR panel for `repo` (slug = owner/name). Network — runs
-/// on the shared tokio runtime via [`crate::task`].
-pub fn load_pr(repo: SharedString, slug: SharedString, cx: &mut Context<OrreryApp>) {
+/// Run `op` (a network PR action, may be a no-op) and then re-fetch the GitHub
+/// PR panel for `slug` (owner/name) on the shared tokio runtime via
+/// [`crate::task`], storing it if still current. The caller sets the loading
+/// state.
+fn reload_pr<F>(this: &mut OrreryApp, slug: SharedString, op: F, cx: &mut Context<OrreryApp>)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let ticket = this.drawer.ticket(Slot::Pr);
     let s = slug.to_string();
     cx.spawn(async move |this, cx| {
-        let result = crate::task::run(async move { inbox::github_prs(&s).await }).await;
+        let panel = crate::task::try_run(async move {
+            op.await;
+            inbox::github_prs(&s).await
+        })
+        .await;
         let _ = this.update(cx, |this, cx| {
-            if this.drawer.repo != repo {
+            if !this.drawer.is_current(ticket) {
                 return;
             }
-            this.drawer.pr = result
+            this.drawer.pr = panel
                 .map(ready_pr)
                 .unwrap_or_else(|e| PrState::Error(e.into()));
             cx.notify();
         });
     })
     .detach();
+}
+
+/// Lazily load the GitHub PR panel for the open drawer (slug = owner/name).
+pub fn load_pr(this: &mut OrreryApp, slug: SharedString, cx: &mut Context<OrreryApp>) {
+    reload_pr(this, slug, async {}, cx);
 }
 
 /// Merge PR `number` via `method`, then refresh the panel. Caller sets the
 /// loading state.
 fn merge_pr(
-    repo: SharedString,
+    this: &mut OrreryApp,
     slug: SharedString,
     number: u64,
     method: String,
     cx: &mut Context<OrreryApp>,
 ) {
-    let (do_slug, re_slug) = (slug.to_string(), slug.to_string());
-    cx.spawn(async move |this, cx| {
-        let _ = crate::task::run(
-            async move { inbox::github_merge_pr(&do_slug, number, &method).await },
-        )
-        .await;
-        let panel = crate::task::run(async move { inbox::github_prs(&re_slug).await }).await;
-        let _ = this.update(cx, |this, cx| {
-            if this.drawer.repo != repo {
-                return;
-            }
-            this.drawer.pr = panel
-                .map(ready_pr)
-                .unwrap_or_else(|e| PrState::Error(e.into()));
-            cx.notify();
-        });
-    })
-    .detach();
+    let do_slug = slug.to_string();
+    reload_pr(
+        this,
+        slug,
+        async move {
+            let _ = inbox::github_merge_pr(&do_slug, number, &method).await;
+        },
+        cx,
+    );
 }
 
 /// Approve PR `number`, then refresh the panel. Caller sets the loading state.
-fn approve_pr(repo: SharedString, slug: SharedString, number: u64, cx: &mut Context<OrreryApp>) {
-    let (do_slug, re_slug) = (slug.to_string(), slug.to_string());
-    cx.spawn(async move |this, cx| {
-        let _ =
-            crate::task::run(async move { inbox::github_approve_pr(&do_slug, number).await }).await;
-        let panel = crate::task::run(async move { inbox::github_prs(&re_slug).await }).await;
-        let _ = this.update(cx, |this, cx| {
-            if this.drawer.repo != repo {
-                return;
-            }
-            this.drawer.pr = panel
-                .map(ready_pr)
-                .unwrap_or_else(|e| PrState::Error(e.into()));
-            cx.notify();
-        });
-    })
-    .detach();
+fn approve_pr(this: &mut OrreryApp, slug: SharedString, number: u64, cx: &mut Context<OrreryApp>) {
+    let do_slug = slug.to_string();
+    reload_pr(
+        this,
+        slug,
+        async move {
+            let _ = inbox::github_approve_pr(&do_slug, number).await;
+        },
+        cx,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -830,7 +926,7 @@ pub fn drawer(
             .id("drawer-backdrop")
             .flex_1()
             .h_full()
-            .bg(rgba(0x00000066))
+            .bg(rgba(t.scrim))
             .on_click(move |_ev, _win, cx| {
                 app.update(cx, |this, cx| {
                     this.close_overlay();
@@ -848,7 +944,7 @@ pub fn drawer(
         .border_l_1()
         .border_color(rgb(t.border))
         .child(header(row, t, app))
-        .child(tab_bar(tab, t, app, data.repo.clone(), github_slug(row)))
+        .child(tab_bar(tab, t, app, github_slug(row)))
         .child(body(row, tab, t, data, app, ai_ready, github_authed))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
@@ -939,7 +1035,6 @@ fn tab_bar(
     active: DrawerTab,
     t: &Theme,
     app: &Entity<OrreryApp>,
-    repo: SharedString,
     pr_slug: Option<SharedString>,
 ) -> impl IntoElement {
     let mut bar = div()
@@ -954,7 +1049,6 @@ fn tab_bar(
         let is_active = tab == active;
         let fg = if is_active { t.fg0 } else { t.fg2 };
         let app = app.clone();
-        let repo = repo.clone();
         let pr_slug = pr_slug.clone();
         // 1px underline on the active tab; page-coloured (invisible) otherwise so
         // the row height stays constant.
@@ -971,7 +1065,7 @@ fn tab_bar(
             .hover(|s| s.text_color(rgb(t.fg0)))
             .child(SharedString::from(label))
             .on_click(move |_ev, window, cx| {
-                let (repo, pr_slug) = (repo.clone(), pr_slug.clone());
+                let pr_slug = pr_slug.clone();
                 app.update(cx, |this, cx| {
                     if let Some(Overlay::Drawer { tab: cur, .. }) = &mut this.overlay {
                         *cur = tab;
@@ -979,12 +1073,12 @@ fn tab_bar(
                     // Lazy-load the tab's data on first view.
                     if tab == DrawerTab::Readme && this.drawer.readme == ReadmeState::Idle {
                         this.drawer.readme = ReadmeState::Loading;
-                        load_readme(repo, cx);
+                        load_readme(this, cx);
                     } else if tab == DrawerTab::Pr && matches!(this.drawer.pr, PrState::Idle) {
                         match pr_slug {
                             Some(slug) => {
                                 this.drawer.pr = PrState::Loading;
-                                load_pr(repo, slug, cx);
+                                load_pr(this, slug, cx);
                             }
                             None => {
                                 this.drawer.pr = PrState::Error("PR triage is GitHub-only.".into());
@@ -1007,20 +1101,21 @@ fn tab_bar(
                                     .placeholder("Body (optional)…")
                             }));
                         }
-                        load_changes(repo, cx);
+                        load_changes(this, cx);
                     } else if tab == DrawerTab::Notes {
                         if this.drawer.notes.is_none() {
-                            load_notes(repo.clone(), cx);
+                            load_notes(this, cx);
                         }
-                        // Seed the editable note field from the saved note (sync).
+                        // The editable note field needs the Window, so it's
+                        // created here; the saved note is read off the UI
+                        // thread and seeded into it once loaded.
                         if this.drawer.note_input.is_none() {
-                            let initial = cache::note(&repo);
                             this.drawer.note_input = Some(cx.new(|cx| {
                                 gpui_component::input::InputState::new(window, cx)
                                     .multi_line(true)
                                     .placeholder("Notes (markdown)…")
-                                    .default_value(initial)
                             }));
+                            seed_note_input(this, cx);
                         }
                     }
                     cx.notify();
@@ -1042,7 +1137,7 @@ fn body(
     github_authed: bool,
 ) -> impl IntoElement {
     let content = match tab {
-        DrawerTab::Overview => overview(row, t, data, app).into_any_element(),
+        DrawerTab::Overview => overview(row, t, data, app, ai_ready).into_any_element(),
         DrawerTab::Readme => readme_view(data, t).into_any_element(),
         DrawerTab::Pr => pr_view(row, data, t, app).into_any_element(),
         DrawerTab::Changes => {
@@ -1064,7 +1159,13 @@ fn body(
 
 /// Overview: the synchronous `Row` facts up top, then the async git data
 /// (branches / recent commits / worktrees) loaded via [`load_overview`].
-fn overview(row: &Row, t: &Theme, data: &DrawerData, app: &Entity<OrreryApp>) -> impl IntoElement {
+fn overview(
+    row: &Row,
+    t: &Theme,
+    data: &DrawerData,
+    app: &Entity<OrreryApp>,
+    ai_ready: bool,
+) -> impl IntoElement {
     let mut col = div().flex().flex_col().gap(px(16.));
 
     // Description.
@@ -1076,8 +1177,8 @@ fn overview(row: &Row, t: &Theme, data: &DrawerData, app: &Entity<OrreryApp>) ->
             .child(row.description.clone()),
     );
 
-    // AI summary, when present.
-    if !row.ai_summary.is_empty() {
+    // AI summary, when present — hidden (even if cached) unless AI is ready.
+    if ai_ready && !row.ai_summary.is_empty() {
         col = col.child(
             div()
                 .flex()
@@ -1153,7 +1254,7 @@ fn overview(row: &Row, t: &Theme, data: &DrawerData, app: &Entity<OrreryApp>) ->
     if !row.release.is_empty() {
         facts = facts.child(seg("tag", row.release.clone(), t.fg2));
     }
-    facts = facts.child(seg("clock", row.age.clone(), t.fg2));
+    facts = facts.child(seg("clock", row.age(), t.fg2));
     // Default-branch CI state from the central pass (#183); clicking it opens
     // the run's page when the API offered one.
     if let Some(ci) = &data.ci {
@@ -1317,19 +1418,14 @@ fn branches_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> im
         Some(list) if list.is_empty() => s = s.child(placeholder("No branches.", t)),
         Some(list) => {
             for b in list {
-                s = s.child(branch_item(b, data.repo.clone(), t, app));
+                s = s.child(branch_item(b, t, app));
             }
         }
     }
     s
 }
 
-fn branch_item(
-    b: &BranchRow,
-    repo: SharedString,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-) -> impl IntoElement {
+fn branch_item(b: &BranchRow, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
     let fg = if b.current { t.accent_bright } else { t.fg1 };
     let icon = if b.current { "check" } else { "git-branch" };
     let mut item = div()
@@ -1366,10 +1462,10 @@ fn branch_item(
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.surface_hover)))
             .on_click(move |_ev, _win, cx| {
-                let (repo, name) = (repo.clone(), name.clone());
+                let name = name.clone();
                 app.update(cx, |this, cx| {
                     this.drawer.branches = None; // optimistic loading state
-                    switch_branch(repo, name, cx);
+                    switch_branch(this, name, cx);
                     cx.notify();
                 });
             });
@@ -1412,7 +1508,6 @@ fn commits_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
 }
 
 fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let repo = data.repo.clone();
     let mut s = section(t, "Worktrees", data.worktrees.as_ref().map(|w| w.len()));
     match &data.worktrees {
         None => s = s.child(placeholder("Loading…", t)),
@@ -1420,7 +1515,7 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
         Some(list) => {
             for w in list {
                 let remove = {
-                    let (app, repo, name) = (app.clone(), repo.clone(), w.name.to_string());
+                    let (app, name) = (app.clone(), w.name.to_string());
                     div()
                         .id(SharedString::from(format!("wt-rm-{}", w.name)))
                         .flex()
@@ -1433,8 +1528,8 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
                         .hover(|s| s.bg(rgb(t.surface_hover)))
                         .child(lucide("x", 12., t.fg3))
                         .on_click(move |_ev, _win, cx| {
-                            let (repo, name) = (repo.clone(), name.clone());
-                            app.update(cx, |_this, cx| remove_worktree(repo, name, cx));
+                            let name = name.clone();
+                            app.update(cx, |this, cx| remove_worktree(this, name, cx));
                         })
                 };
                 s = s.child(
@@ -1464,7 +1559,7 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
 
     // Add a worktree: name field + Add button.
     if let Some(input) = &data.worktree_input {
-        let (app, repo, input2) = (app.clone(), repo.clone(), input.clone());
+        let (app, input2) = (app.clone(), input.clone());
         s = s.child(
             div()
                 .flex()
@@ -1479,13 +1574,12 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
                         .child(gpui_component::input::Input::new(input)),
                 )
                 .child(pr_btn(SharedString::from("wt-add"), "Add", t, move |cx| {
-                    let repo = repo.clone();
                     let name = input2.read(cx).value();
                     if name.trim().is_empty() {
                         return;
                     }
-                    app.update(cx, |_this, cx| {
-                        add_worktree(repo, name.trim().to_string(), cx)
+                    app.update(cx, |this, cx| {
+                        add_worktree(this, name.trim().to_string(), cx)
                     });
                 })),
         );
@@ -1529,7 +1623,6 @@ fn changes_view(
         }
         actions = actions.child(div().flex_1());
         if has_staged {
-            let repo = row.id.clone();
             let app2 = app.clone();
             let input2 = input.clone();
             let body2 = body_input.clone();
@@ -1538,13 +1631,12 @@ fn changes_view(
                 "Commit",
                 t,
                 move |cx: &mut gpui::App| {
-                    let repo = repo.clone();
                     let subject = input2.read(cx).value();
                     if subject.trim().is_empty() {
                         return;
                     }
                     let msg = full_commit_message(&subject, &body2.read(cx).value());
-                    app2.update(cx, |_this, cx| commit_staged(repo, msg, cx));
+                    app2.update(cx, |this, cx| commit_staged(this, msg, cx));
                 },
             ));
         } else {
@@ -1569,10 +1661,9 @@ fn changes_view(
 
     // The AI commit-message suggestion (subject + optional body), with a
     // one-click commit using both.
-    if let Some((subject, body)) = &data.commit_suggestion {
-        let repo = row.id.clone();
+    if let Some(suggestion) = &data.commit_suggestion {
         let app4 = app.clone();
-        let (subject2, body2) = (subject.clone(), body.clone());
+        let (subject2, body2) = (suggestion.subject.clone(), suggestion.body.clone());
         let mut card = div()
             .flex()
             .flex_col()
@@ -1582,17 +1673,15 @@ fn changes_view(
             .bg(rgb(t.surface))
             .border_1()
             .border_color(rgb(t.border))
-            .child(seg("sparkles", subject.clone(), t.fg1));
-        if !body.is_empty() {
-            // Multi-line body → markdown (reflowed first — the renderer panics
-            // on a run's embedded newlines, see data::unwrap_soft_breaks).
+            .child(seg("sparkles", suggestion.subject.clone(), t.fg1));
+        if !suggestion.body.is_empty() {
+            // Multi-line body → markdown, pre-reflowed (the renderer panics on
+            // a run's embedded newlines, see data::unwrap_soft_breaks).
             card = card.child(
                 div()
                     .text_size(px(t.text_small))
                     .text_color(rgb(t.fg2))
-                    .child(gpui_component::text::markdown(
-                        crate::data::unwrap_soft_breaks(body),
-                    )),
+                    .child(gpui_component::text::markdown(suggestion.body_md.clone())),
             );
         }
         col = col.child(
@@ -1601,12 +1690,11 @@ fn changes_view(
                 "Commit this",
                 t,
                 move |cx: &mut gpui::App| {
-                    let repo = repo.clone();
                     if subject2.trim().is_empty() {
                         return;
                     }
                     let msg = full_commit_message(&subject2, &body2);
-                    app4.update(cx, |_this, cx| commit_staged(repo, msg, cx));
+                    app4.update(cx, |this, cx| commit_staged(this, msg, cx));
                 },
             ))),
         );
@@ -1685,9 +1773,9 @@ fn changes_view(
     }
 
     // Unstaged / Staged file lists, then the selected file's diff.
-    col = col.child(changes_section(row.id.clone(), data, false, t, app));
-    col = col.child(changes_section(row.id.clone(), data, true, t, app));
-    col = col.child(diff_pane(row.id.clone(), data, t, app));
+    col = col.child(changes_section(data, false, t, app));
+    col = col.child(changes_section(data, true, t, app));
+    col = col.child(diff_pane(data, t, app));
 
     // AI changelog from recent commits (gated on aiReady).
     if ai_ready {
@@ -1726,9 +1814,9 @@ fn changes_view(
                         .text_color(rgb(t.fg1))
                         .child(
                             // The prompt asks for markdown bullets, so render as
-                            // markdown — reflowed first, like the Readme tab, since
+                            // markdown — already reflowed when stored (like the Readme), since
                             // the renderer panics on a run's embedded newlines.
-                            gpui_component::text::markdown(crate::data::unwrap_soft_breaks(log)),
+                            gpui_component::text::markdown(log.clone()),
                         ),
                 ),
         );
@@ -1750,13 +1838,7 @@ fn kind_badge(kind: git_ops::ChangeKind, t: &Theme) -> (&'static str, u32) {
 
 /// One of the Changes tab's file lists (`staged` picks which). Header: label +
 /// count + a "Stage all"/"Unstage all" action; body: one row per file.
-fn changes_section(
-    repo: SharedString,
-    data: &DrawerData,
-    staged: bool,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-) -> Div {
+fn changes_section(data: &DrawerData, staged: bool, t: &Theme, app: &Entity<OrreryApp>) -> Div {
     let title = if staged { "STAGED" } else { "UNSTAGED" };
     let mut head = div()
         .flex()
@@ -1785,18 +1867,18 @@ fn changes_section(
                 // Stage all / Unstage all on the section header.
                 let label = if staged { "Unstage all" } else { "Stage all" };
                 let all: Vec<String> = files.iter().map(|c| c.path.to_string()).collect();
-                let (app2, repo2) = (app.clone(), repo.clone());
+                let app2 = app.clone();
                 head = head.child(div().flex_1()).child(pr_btn(
                     SharedString::from(format!("stage-all-{staged}")),
                     label,
                     t,
                     move |cx: &mut gpui::App| {
-                        let (repo, all) = (repo2.clone(), all.clone());
-                        app2.update(cx, |_this, cx| set_staged(repo, all, !staged, cx));
+                        let all = all.clone();
+                        app2.update(cx, |this, cx| set_staged(this, all, !staged, cx));
                     },
                 ));
                 for c in files {
-                    col = col.child(change_item(c, repo.clone(), data, t, app));
+                    col = col.child(change_item(c, data, t, app));
                 }
             }
         }
@@ -1815,7 +1897,6 @@ fn changes_section(
 /// remove-from-list affordance as the worktree rows).
 fn change_item(
     c: &ChangeRow,
-    repo: SharedString,
     data: &DrawerData,
     t: &Theme,
     app: &Entity<OrreryApp>,
@@ -1827,7 +1908,7 @@ fn change_item(
     let (letter, color) = kind_badge(c.kind, t);
 
     let action = {
-        let (app, repo, path) = (app.clone(), repo.clone(), c.path.to_string());
+        let (app, path) = (app.clone(), c.path.to_string());
         let (staged, icon) = (c.staged, if c.staged { "x" } else { "plus" });
         div()
             .id(SharedString::from(format!(
@@ -1846,8 +1927,8 @@ fn change_item(
             .on_click(move |_ev, _win, cx| {
                 // Don't also select the row underneath.
                 cx.stop_propagation();
-                let (repo, path) = (repo.clone(), path.clone());
-                app.update(cx, |_this, cx| set_staged(repo, vec![path], !staged, cx));
+                let path = path.clone();
+                app.update(cx, |this, cx| set_staged(this, vec![path], !staged, cx));
             })
     };
 
@@ -1892,7 +1973,7 @@ fn change_item(
 }
 
 /// The selected file's diff, under a header naming the file and its side.
-fn diff_pane(repo: SharedString, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> Div {
+fn diff_pane(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> Div {
     let mut head = div()
         .flex()
         .flex_row()
@@ -1923,7 +2004,7 @@ fn diff_pane(repo: SharedString, data: &DrawerData, t: &Theme, app: &Entity<Orre
         }
         (_, DiffState::Ready(hunks)) => match &data.change_sel {
             Some((path, staged)) => {
-                diff_block(repo, path.clone(), *staged, hunks, t, app).into_any_element()
+                diff_block(path.clone(), *staged, hunks, t, app).into_any_element()
             }
             None => placeholder("No diff for this file.", t).into_any_element(),
         },
@@ -1948,7 +2029,6 @@ const DIFF_MAX_LINES: usize = 500;
 /// then its sentiment-coloured body lines. Content is truncated to
 /// [`DIFF_MAX_LINES`] total with a muted "… n more" footer.
 fn diff_block(
-    repo: SharedString,
     path: SharedString,
     staged: bool,
     hunks: &[HunkRow],
@@ -1984,7 +2064,7 @@ fn diff_block(
 
         // Hunk header: the @@ line + the stage/unstage-this-hunk affordance.
         let action = {
-            let (app, repo, path) = (app.clone(), repo.clone(), path.clone());
+            let (app, path) = (app.clone(), path.clone());
             let label = if staged { "Unstage hunk" } else { "Stage hunk" };
             div()
                 .id(SharedString::from(format!("hunk-act-{staged}-{ix}")))
@@ -1996,8 +2076,8 @@ fn diff_block(
                 .hover(|s| s.bg(rgb(t.surface_hover)).text_color(rgb(t.fg1)))
                 .child(SharedString::from(label))
                 .on_click(move |_ev, _win, cx| {
-                    let (repo, path) = (repo.clone(), path.clone());
-                    app.update(cx, |_this, cx| hunk_op(repo, path, staged, ix, cx));
+                    let path = path.clone();
+                    app.update(cx, |this, cx| hunk_op(this, path, staged, ix, cx));
                 })
         };
         let mut header_row = div().flex().flex_row().items_center().gap(px(6.));
@@ -2067,11 +2147,10 @@ fn pr_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> 
             placeholder("No open pull requests.", t).into_any_element()
         }
         PrState::Ready { methods, prs } => {
-            let repo = row.id.clone();
             let slug = row.slug.clone();
             let mut col = div().flex().flex_col().gap(px(10.));
             for pr in prs {
-                col = col.child(pr_card(pr, methods, repo.clone(), slug.clone(), t, app));
+                col = col.child(pr_card(pr, methods, slug.clone(), t, app));
             }
             col.into_any_element()
         }
@@ -2084,7 +2163,6 @@ fn pr_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> 
 fn pr_card(
     pr: &PrRow,
     methods: &[SharedString],
-    repo: SharedString,
     slug: SharedString,
     t: &Theme,
     app: &Entity<OrreryApp>,
@@ -2201,13 +2279,13 @@ fn pr_card(
             "Approve",
             t,
             {
-                let (repo, slug, number) = (repo.clone(), slug.clone(), pr.number);
+                let (slug, number) = (slug.clone(), pr.number);
                 let app = app.clone();
                 move |cx: &mut gpui::App| {
-                    let (repo, slug) = (repo.clone(), slug.clone());
+                    let slug = slug.clone();
                     app.update(cx, |this, cx| {
                         this.drawer.pr = PrState::Loading;
-                        approve_pr(repo, slug, number, cx);
+                        approve_pr(this, slug, number, cx);
                         cx.notify();
                     });
                 }
@@ -2220,14 +2298,13 @@ fn pr_card(
             &label,
             t,
             {
-                let (repo, slug, number, method) =
-                    (repo.clone(), slug.clone(), pr.number, method.to_string());
+                let (slug, number, method) = (slug.clone(), pr.number, method.to_string());
                 let app = app.clone();
                 move |cx: &mut gpui::App| {
-                    let (repo, slug, method) = (repo.clone(), slug.clone(), method.clone());
+                    let (slug, method) = (slug.clone(), method.clone());
                     app.update(cx, |this, cx| {
                         this.drawer.pr = PrState::Loading;
-                        merge_pr(repo, slug, number, method, cx);
+                        merge_pr(this, slug, number, method, cx);
                         cx.notify();
                     });
                 }
@@ -2319,9 +2396,9 @@ fn seg_str(icon: &str, label: &str, color: u32) -> impl IntoElement {
 fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
     match &data.readme {
         ReadmeState::Ready(Some(src)) => {
-            // Reflow soft-wrapped lines first — gpui-component's renderer panics
-            // on a paragraph's embedded newlines (see data::unwrap_soft_breaks).
-            gpui_component::text::markdown(crate::data::unwrap_soft_breaks(src)).into_any_element()
+            // Already reflowed at load — gpui-component's renderer panics on a
+            // paragraph's embedded newlines (see data::unwrap_soft_breaks).
+            gpui_component::text::markdown(src.clone()).into_any_element()
         }
         ReadmeState::Ready(None) => placeholder("No README in this repo.", t).into_any_element(),
         _ => placeholder("Loading…", t).into_any_element(),
@@ -2374,14 +2451,13 @@ fn notes_view(
         ));
     }
     if n.count > 0 || n.first_visit {
-        let (app, repo) = (app.clone(), row.id.clone());
+        let app = app.clone();
         catch = catch.child(pr_btn(
             SharedString::from("mark-seen"),
             "Mark caught up",
             t,
             move |cx| {
-                let repo = repo.clone();
-                app.update(cx, |_this, cx| mark_seen(repo, cx));
+                app.update(cx, mark_seen);
             },
         ));
     }
@@ -2405,10 +2481,10 @@ fn notes_view(
                         .text_size(px(t.text_small))
                         .text_color(rgb(t.fg1))
                         .child(
-                            // Render as markdown (reflowed, like the Readme tab): the
+                            // Render as markdown (reflowed when stored, like the Readme): the
                             // prompt asks for plain sentences but models still emit
                             // multi-line text, which plain text elements panic on.
-                            gpui_component::text::markdown(crate::data::unwrap_soft_breaks(resume)),
+                            gpui_component::text::markdown(resume.clone()),
                         ),
                 ),
         );
@@ -2542,4 +2618,39 @@ fn seg(icon: &str, label: SharedString, color: u32) -> impl IntoElement {
         .text_color(rgb(color))
         .child(lucide(icon, 13., color))
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newer_load_of_a_slot_supersedes_older() {
+        let mut d = DrawerData::loading("/a".into());
+        let first = d.ticket(Slot::Changes);
+        let second = d.ticket(Slot::Changes);
+        assert!(!d.is_current(first), "the older load is stale");
+        assert!(d.is_current(second));
+        // Other slots are independent.
+        let pr = d.ticket(Slot::Pr);
+        assert!(d.is_current(pr) && d.is_current(second));
+    }
+
+    #[test]
+    fn reopening_the_drawer_drops_earlier_sessions_loads() {
+        let mut old = DrawerData::loading("/a".into());
+        let t = old.ticket(Slot::Overview);
+        // Same repo, new session: the old session's ticket must not match.
+        let mut new = DrawerData::loading("/a".into());
+        assert!(!new.is_current(t));
+        let fresh = new.ticket(Slot::Overview);
+        assert!(new.is_current(fresh));
+    }
+
+    #[test]
+    fn commit_suggestion_keeps_raw_body_and_reflows_display() {
+        let s = CommitSuggestion::new("Subject", "line one\nline two");
+        assert_eq!(s.body.as_ref(), "line one\nline two");
+        assert_eq!(s.body_md.as_ref(), "line one line two");
+    }
 }

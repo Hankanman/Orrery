@@ -8,9 +8,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    AppContext, Context, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, rgb,
 };
+use gpui_component::input::{InputEvent, InputState};
 
 use orrery_core::attention::{AttentionItem, AttentionKind, Severity};
 use orrery_core::model::AppConfig;
@@ -25,6 +27,19 @@ use crate::toast::ToastKind;
 /// bottom of the card, so the row must be tall enough not to clip it).
 const ROW_H: f32 = 260.;
 const ROW_H_AI: f32 = 288.;
+
+/// Text-input subscription handler: repaint on edits only. Observing an
+/// `InputState` instead would also fire on every cursor blink.
+fn repaint_on_change(
+    _this: &mut OrreryApp,
+    _input: Entity<InputState>,
+    ev: &InputEvent,
+    cx: &mut Context<OrreryApp>,
+) {
+    if matches!(ev, InputEvent::Change) {
+        cx.notify();
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -176,9 +191,10 @@ pub fn load_saved_views() -> Vec<SavedView> {
         .unwrap_or_default()
 }
 
+/// Persist the saved views (off the UI thread, in order).
 fn persist_saved_views(views: &[SavedView]) {
     if let Ok(json) = serde_json::to_string(views) {
-        orrery_core::cache::set_meta(SAVED_VIEWS_KEY, &json);
+        crate::task::persist_meta(SAVED_VIEWS_KEY, json);
     }
 }
 
@@ -345,6 +361,13 @@ pub struct OrreryApp {
     pub toast_seq: u64,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
+    /// Single-flight guards for the background passes (see [`Passes`]).
+    pub passes: Passes,
+    /// Render-path caches derived from `rows` (see [`Derived`]).
+    pub derived: Derived,
+    /// When the roots were last scanned from disk (Unix secs), for the
+    /// sidebar footer; `None` if never recorded.
+    pub scanned_at: Option<i64>,
     /// The active contextual sub-filter for the current non-Grid view (e.g. the
     /// Feed/Inbox category panels). Ephemeral: reset when the view changes so
     /// filters don't bleed across views.
@@ -406,6 +429,146 @@ impl Default for GridState {
     }
 }
 
+/// Single-flight state for one background pass: at most one run in flight;
+/// requests arriving meanwhile coalesce into one trailing run, which starts
+/// after the current one lands and so sees the latest app state. This keeps an
+/// older result from overwriting a newer one, and stops two overlapping agent
+/// scans from both reporting the same session as finished.
+#[derive(Default)]
+pub struct Pass {
+    running: bool,
+    queued: bool,
+}
+
+impl Pass {
+    /// Claim the pass. `false` when a run is already in flight — the request
+    /// is then queued as the trailing run instead.
+    fn begin(&mut self) -> bool {
+        if self.running {
+            self.queued = true;
+            false
+        } else {
+            self.running = true;
+            true
+        }
+    }
+
+    /// Release the pass; `true` when a trailing run was requested meanwhile
+    /// (the caller starts it).
+    fn finish(&mut self) -> bool {
+        self.running = false;
+        std::mem::take(&mut self.queued)
+    }
+}
+
+/// What a snapshot pass produces: a cheap reload of the cached snapshot (after
+/// enrichment / summaries / cache edits), or a full disk rescan. A rescan
+/// subsumes a reload, so a queued reload is upgraded rather than run twice.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum SnapKind {
+    Reload,
+    Rescan,
+}
+
+/// The snapshot pass: every producer of `rows` (rescan, cache reload) runs
+/// through it, one at a time, so snapshots apply in the order they were taken.
+#[derive(Default)]
+pub struct SnapshotPass {
+    /// The run in flight, if any.
+    current: Option<SnapKind>,
+    queued: Option<SnapKind>,
+    /// Explore slugs whose clone finished and that should stop showing as
+    /// "cloning" once a rescan started after the clone has landed.
+    settle_clones: Vec<SharedString>,
+}
+
+impl SnapshotPass {
+    /// Claim the pass for `kind`; `false` (and queued) when one is running.
+    fn begin(&mut self, kind: SnapKind) -> bool {
+        if self.current.is_some() {
+            self.queued = self.queued.max(Some(kind));
+            false
+        } else {
+            self.current = Some(kind);
+            true
+        }
+    }
+
+    /// Release the pass, returning the coalesced trailing request, if any.
+    fn finish(&mut self) -> Option<SnapKind> {
+        self.current = None;
+        self.queued.take()
+    }
+
+    /// Is a disk rescan in flight or queued (the footer's "Scanning…")?
+    fn scanning(&self) -> bool {
+        self.current == Some(SnapKind::Rescan) || self.queued == Some(SnapKind::Rescan)
+    }
+}
+
+/// Single-flight guards + stale-result counters for the app's background
+/// passes, grouped out of [`OrreryApp`].
+#[derive(Default)]
+pub struct Passes {
+    pub snapshot: SnapshotPass,
+    pub enrich: Pass,
+    pub ci: Pass,
+    pub activity: Pass,
+    pub agents: Pass,
+    pub index: Pass,
+    /// Latest-issued load id for each network view; a result whose id isn't
+    /// the latest (a refresh superseded it) is dropped.
+    pub inbox_seq: u64,
+    pub feed_seq: u64,
+    pub explore_seq: u64,
+    /// The persisted already-notified attention set has been read (see
+    /// `OrreryApp::load_attention_seen`); urgent notifications wait for it.
+    pub attention_seeded: bool,
+}
+
+/// The cache key for [`Derived::visible`]: everything `visible_rows` reads.
+#[derive(Clone, PartialEq)]
+struct VisibleKey {
+    rows_gen: u64,
+    attention_gen: u64,
+    filter: RepoFilter,
+    root: Option<SharedString>,
+    language: Option<SharedString>,
+    sort: SortMode,
+}
+
+/// The sidebar ROOTS / LANGUAGES facets: (value, repo count), most repos first.
+pub struct Facets {
+    roots: Vec<(SharedString, usize)>,
+    langs: Vec<(SharedString, usize)>,
+}
+
+/// Render-path caches: values derived from `rows` (and the grid filters) that
+/// used to be recomputed on every frame. Each entry is keyed by the
+/// generation counters below, so it recomputes lazily — on the first render
+/// after its inputs change — and never goes stale. Interior mutability lets
+/// the `&self` render path fill them; GPUI renders on one thread.
+#[derive(Default)]
+pub struct Derived {
+    /// Bumped whenever `rows` changes (snapshot applied, favorite toggled).
+    rows_gen: u64,
+    /// Bumped whenever the attention model is recomputed.
+    attention_gen: u64,
+    visible: std::cell::RefCell<Option<(VisibleKey, Rc<Vec<usize>>)>>,
+    facets: std::cell::RefCell<Option<(u64, Rc<Facets>)>>,
+    slugs: std::cell::RefCell<Option<(u64, Rc<std::collections::HashSet<SharedString>>)>>,
+}
+
+impl Derived {
+    pub fn rows_changed(&mut self) {
+        self.rows_gen += 1;
+    }
+
+    pub fn rows_gen(&self) -> u64 {
+        self.rows_gen
+    }
+}
+
 /// Recent commit subject lines for a repo (newest first) — the input for the
 /// AI changelog / resume prompts. Empty on any git error.
 fn recent_summaries(id: &str, limit: usize) -> Vec<String> {
@@ -414,6 +577,52 @@ fn recent_summaries(id: &str, limit: usize) -> Vec<String> {
         .into_iter()
         .map(|c| c.summary)
         .collect()
+}
+
+/// The shared tail of both "Open PR" flows (drawer branch, agent worktree),
+/// run once `head` is pushed: read the commit range `dir` has over `base`,
+/// draft the title/body from it — AI-drafted when `ai_ready`, else the
+/// fallback; only the drafting is aiReady-gated, never the button — then
+/// create the PR on `slug`. Returns the title and the PR URL (or the error).
+async fn draft_and_create_pr(
+    cx: &mut gpui::AsyncApp,
+    ai_ready: bool,
+    dir: String,
+    slug: String,
+    head: String,
+    base: String,
+) -> (String, Result<String, String>) {
+    // The branch's commit range, for drafting the title/body.
+    let base2 = base.clone();
+    let commits: Vec<String> = cx
+        .background_executor()
+        .spawn(async move {
+            orrery_core::git_ops::commits_ahead_of(&dir, &base2, 30)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.summary)
+                .collect()
+        })
+        .await;
+    let drafted = if ai_ready && !commits.is_empty() {
+        let (h, c) = (head.clone(), commits.clone());
+        crate::task::try_run(async move { orrery_core::ai::pr_description(&h, &c).await })
+            .await
+            .ok()
+            .and_then(|d| orrery_core::ai::split_pr_draft(&d))
+    } else {
+        None
+    };
+    let (title, body) =
+        drafted.unwrap_or_else(|| orrery_core::ai::fallback_pr_draft(&head, &commits));
+    // Create the PR (network → the shared tokio runtime).
+    let t2 = title.clone();
+    let result = crate::task::try_run(async move {
+        let token = orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
+        orrery_core::forge::create_pr(&slug, &head, &base, &t2, &body, &token).await
+    })
+    .await;
+    (title, result)
 }
 
 /// Cache-meta key persisting the urgent-item keys already notified, so a
@@ -479,7 +688,89 @@ impl OrreryApp {
         self.rows = snap.rows;
         self.roots = snap.roots;
         self.repos = snap.repos;
+        if snap.scanned_at.is_some() {
+            self.scanned_at = snap.scanned_at;
+        }
+        self.derived.rows_changed();
         self.recompute_attention();
+    }
+
+    /// Produce and apply a fresh snapshot of `kind` through the single-flight
+    /// snapshot pass: a disk rescan or a cache reload, off the UI thread. A
+    /// request while one is running coalesces into one trailing run (a rescan
+    /// wins over a reload), so overlapping requests never apply out of order.
+    /// A rescan is followed by the post-snapshot fan-out
+    /// ([`Self::after_snapshot`]); a reload only repaints.
+    pub fn request_snapshot(&mut self, kind: SnapKind, cx: &mut Context<Self>) {
+        if !self.passes.snapshot.begin(kind) {
+            return;
+        }
+        // Clones that finished before this rescan started are settled by it.
+        let settle = if kind == SnapKind::Rescan {
+            std::mem::take(&mut self.passes.snapshot.settle_clones)
+        } else {
+            Vec::new()
+        };
+        cx.notify(); // the footer shows "Scanning…" while a rescan runs
+        cx.spawn(async move |this, cx| {
+            let snap = cx
+                .background_executor()
+                .spawn(async move {
+                    match kind {
+                        SnapKind::Rescan => crate::data::rescan(),
+                        SnapKind::Reload => crate::data::load(),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_snapshot(snap);
+                for slug in &settle {
+                    this.explore_cloning.remove(slug);
+                }
+                let next = this.passes.snapshot.finish();
+                if kind == SnapKind::Rescan {
+                    this.after_snapshot(cx);
+                }
+                if let Some(next) = next {
+                    this.request_snapshot(next, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The fan-out after a fresh scan (launch, watcher, explicit rescan): drop
+    /// vanished selections, then refresh everything derived from the fleet —
+    /// semantic index (incremental; a no-op unless AI is ready), host
+    /// enrichment and CI (TTL-paced, so usually no-ops), the contribution
+    /// graph, and live agent sessions (the card indicator). Each is
+    /// single-flight, so calling this often is safe.
+    pub fn after_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.prune_selection();
+        self.index_semantic(cx);
+        self.enrich_hosts(cx);
+        self.refresh_ci(cx);
+        self.load_activity(cx);
+        self.scan_agents(false, cx);
+        cx.notify();
+    }
+
+    /// Toggle a repo's favorite (card star): update the row now, persist the
+    /// flag off the UI thread.
+    pub fn set_favorite(&mut self, idx: usize, next: bool, cx: &mut Context<Self>) {
+        let Some(r) = self.rows.get_mut(idx) else {
+            return;
+        };
+        r.favorite = next;
+        let id = r.id.to_string();
+        self.derived.rows_changed(); // the Starred filter reads it
+        cx.background_executor()
+            .spawn(async move {
+                let _ = orrery_core::cache::set_favorite(&id, next);
+            })
+            .detach();
+        cx.notify();
     }
 
     /// Recompute the ranked attention list (and the per-repo severity lookup)
@@ -528,6 +819,7 @@ impl OrreryApp {
         };
         let ci = orrery_core::ci::facts(&self.ci_states, &self.repos);
         self.attention_items = attention::compute(&self.repos, inbox, &ci, &prunable, &agents);
+        self.derived.attention_gen += 1; // the Attention filter reads it
         // Items are severity-sorted (Urgent first), so a repo's first
         // occurrence is its highest severity.
         self.attention_by_repo.clear();
@@ -587,10 +879,13 @@ impl OrreryApp {
         // snapshot, so only items that appeared since the last run notify.
         // No snapshot at all (first-ever run) → baseline silently, like the
         // platform notifier's first poll.
-        let prev = self.attention_seen.take().or_else(|| {
-            orrery_core::cache::get_meta(ATTENTION_SEEN_KEY)
-                .and_then(|s| serde_json::from_str(&s).ok())
-        });
+        // The persisted snapshot is read off the UI thread at launch
+        // ([`Self::load_attention_seen`]); hold off until it has landed, so
+        // a slow read can't be mistaken for a first-ever run.
+        if !self.passes.attention_seeded {
+            return;
+        }
+        let prev = self.attention_seen.take();
         if let Some(prev) = &prev
             && self.config.notify_enabled
             && self.config.notify_attention
@@ -610,9 +905,45 @@ impl OrreryApp {
         if prev.as_ref() != Some(&current)
             && let Ok(blob) = serde_json::to_string(&current)
         {
-            orrery_core::cache::set_meta(ATTENTION_SEEN_KEY, &blob);
+            crate::task::persist_meta(ATTENTION_SEEN_KEY, blob);
         }
         self.attention_seen = Some(current);
+    }
+
+    /// Launch: read the persisted already-notified set off the UI thread, then
+    /// let the urgent-notification diff run (recomputing once, in case host
+    /// facts arrived while it loaded).
+    fn load_attention_seen(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let prev: Option<std::collections::HashSet<String>> = cx
+                .background_executor()
+                .spawn(async {
+                    orrery_core::cache::get_meta(ATTENTION_SEEN_KEY)
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                })
+                .await;
+            let _ = this.update(cx, |this, _cx| {
+                if this.attention_seen.is_none() {
+                    this.attention_seen = prev;
+                }
+                this.passes.attention_seeded = true;
+                this.recompute_attention();
+            });
+        })
+        .detach();
+    }
+
+    /// One-shot launch work, after the window is up: the first attention pass
+    /// from the launch snapshot's local git facts (so badges and card dots are
+    /// right on the first paint; host/inbox/agent facts refine it as their
+    /// sources load), the AI probe, and the post-snapshot fan-out — whose
+    /// agents scan also detects dispatched sessions that ended while Orrery was
+    /// closed and resumes supervising live ones (#185).
+    pub fn startup(&mut self, cx: &mut Context<Self>) {
+        self.recompute_attention();
+        self.load_attention_seen(cx);
+        self.ai_startup(cx);
+        self.after_snapshot(cx);
     }
 
     /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
@@ -646,7 +977,7 @@ impl OrreryApp {
         self.drawer.dispatch_input = Some(cx.new(|cx| {
             gpui_component::input::InputState::new(window, cx).placeholder("Task for the agent…")
         }));
-        crate::drawer::load_overview(repo, cx);
+        crate::drawer::load_overview(self, cx);
         cx.notify();
     }
 
@@ -661,11 +992,17 @@ impl OrreryApp {
             gpui_component::input::InputState::new(window, cx)
                 .placeholder("Search repos, run a command…")
         });
-        // On each keystroke: reset the selection, kick off a (debounced) code
-        // search, and re-render.
-        let sub = cx.observe(&query, |this, _q, cx| {
+        // On each edit: reset the selection, kick off a (debounced) code
+        // search, and re-render. Subscribe to `Change` rather than observing
+        // the input — it notifies on every cursor blink too, which would
+        // reset the selection and re-run the searches twice a second.
+        let sub = cx.subscribe(&query, |this, _q, ev: &InputEvent, cx| {
+            if !matches!(ev, InputEvent::Change) {
+                return;
+            }
             if let Some(Overlay::Palette(d)) = &mut this.overlay {
                 d.selected = 0;
+                d.rev += 1;
             }
             this.trigger_code_search(cx);
             this.trigger_semantic_search(cx);
@@ -680,6 +1017,8 @@ impl OrreryApp {
             embeddings: None,
             query_vecs: std::collections::HashMap::new(),
             generation: 0,
+            rev: 0,
+            items: Default::default(),
             _sub: sub,
         }));
         window.focus(&fh, cx);
@@ -718,12 +1057,10 @@ impl OrreryApp {
         let remote =
             cx.new(|cx| InputState::new(window, cx).placeholder("git@github.com:owner/repo.git"));
         let template = cx.new(|cx| InputState::new(window, cx).placeholder("~/templates/rust"));
-        let subs = vec![
-            cx.observe(&url, |_this, _e, cx| cx.notify()),
-            cx.observe(&name, |_this, _e, cx| cx.notify()),
-            cx.observe(&remote, |_this, _e, cx| cx.notify()),
-            cx.observe(&template, |_this, _e, cx| cx.notify()),
-        ];
+        let subs = [&url, &name, &remote, &template]
+            .into_iter()
+            .map(|input| cx.subscribe(input, repaint_on_change))
+            .collect();
         self.overlay = Some(Overlay::NewProject(NewProjectData {
             mode: NewMode::Clone,
             url,
@@ -850,18 +1187,29 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// The current palette result list (actions + repos + code hits).
-    fn palette_items(&self, cx: &Context<Self>) -> Vec<crate::palette::PaletteItem> {
-        match &self.overlay {
-            Some(Overlay::Palette(d)) => crate::palette::items(
-                &self.rows,
-                &d.code,
-                &d.semantic,
-                &d.query.read(cx).value(),
-                !self.selected.is_empty(),
-            ),
-            _ => Vec::new(),
+    /// The current palette result list (actions + repos + code hits). Cached
+    /// on the palette and rebuilt only when its inputs change — the query or
+    /// search results (`rev`), the rows, or whether a selection exists — so
+    /// render, arrow keys, and Enter share one list.
+    fn palette_items(&self, cx: &Context<Self>) -> Rc<Vec<crate::palette::PaletteItem>> {
+        let Some(Overlay::Palette(d)) = &self.overlay else {
+            return Rc::default();
+        };
+        let key = (d.rev, self.derived.rows_gen(), !self.selected.is_empty());
+        if let Some((k, items)) = &*d.items.borrow()
+            && *k == key
+        {
+            return items.clone();
         }
+        let items = Rc::new(crate::palette::items(
+            &self.rows,
+            &d.code,
+            &d.semantic,
+            &d.query.read(cx).value(),
+            key.2,
+        ));
+        *d.items.borrow_mut() = Some((key, items.clone()));
+        items
     }
 
     /// Move the palette selection by `delta` (wrapping), if it's open.
@@ -930,6 +1278,7 @@ impl OrreryApp {
                 if let Some(Overlay::Palette(d)) = &mut this.overlay
                     && d.generation == generation {
                         d.code = results.into_iter().map(crate::palette::code_hit).collect();
+                        d.rev += 1;
                         cx.notify();
                     }
             });
@@ -957,6 +1306,7 @@ impl OrreryApp {
         if query.len() < 2 {
             if let Some(Overlay::Palette(d)) = &mut self.overlay {
                 d.semantic.clear();
+                d.rev += 1;
             }
             return;
         }
@@ -968,6 +1318,7 @@ impl OrreryApp {
             let hits = self.semantic_rank(&vec, &index);
             if let Some(Overlay::Palette(d)) = &mut self.overlay {
                 d.semantic = hits;
+                d.rev += 1;
             }
             cx.notify();
             return;
@@ -989,7 +1340,7 @@ impl OrreryApp {
             }
             let q = query.clone();
             let vec =
-                crate::task::run(async move { orrery_core::ai::embed(&model, &q).await }).await;
+                crate::task::try_run(async move { orrery_core::ai::embed(&model, &q).await }).await;
             let _ = this.update(cx, |this, cx| {
                 let Ok(vec) = vec else {
                     // Backend unreachable — recall just finds nothing.
@@ -997,6 +1348,7 @@ impl OrreryApp {
                         && d.generation == generation
                     {
                         d.semantic.clear();
+                        d.rev += 1;
                         cx.notify();
                     }
                     return;
@@ -1017,6 +1369,7 @@ impl OrreryApp {
                     && d.generation == generation
                 {
                     d.semantic = hits;
+                    d.rev += 1;
                     cx.notify();
                 }
             });
@@ -1119,12 +1472,20 @@ impl OrreryApp {
     pub fn load_inbox(&mut self, cx: &mut Context<Self>) {
         use crate::views::inbox::{InboxData, InboxState, inbox_row, notice_row};
         self.inbox = InboxState::Loading;
+        // A refresh supersedes any load still in flight (its result is dropped).
+        self.passes.inbox_seq += 1;
+        let seq = self.passes.inbox_seq;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let items = crate::task::run(async { orrery_core::inbox::github_inbox().await }).await;
+            let items =
+                crate::task::try_run(async { orrery_core::inbox::github_inbox().await }).await;
             let notes =
-                crate::task::run(async { orrery_core::inbox::github_notifications().await }).await;
+                crate::task::try_run(async { orrery_core::inbox::github_notifications().await })
+                    .await;
             let _ = this.update(cx, |this, cx| {
+                if this.passes.inbox_seq != seq {
+                    return;
+                }
                 this.inbox = match items {
                     Ok(i) => InboxState::Ready(InboxData {
                         items: i.iter().cloned().map(inbox_row).collect(),
@@ -1210,7 +1571,7 @@ impl OrreryApp {
             &regex_pat,
             &regex_text,
         ] {
-            subs.push(cx.observe(input, |_this, _e, cx| cx.notify()));
+            subs.push(cx.subscribe(input, repaint_on_change));
         }
         self.devtools = Some(DevToolsState {
             search,
@@ -1279,7 +1640,8 @@ impl OrreryApp {
         cx.spawn(async move |this, cx| {
             let id = client_id.clone();
             let started =
-                crate::task::run(async move { orrery_core::oauth::device_start(&id).await }).await;
+                crate::task::try_run(async move { orrery_core::oauth::device_start(&id).await })
+                    .await;
             let start = match started {
                 Ok(d) => d,
                 Err(e) => {
@@ -1321,11 +1683,10 @@ impl OrreryApp {
                 }
                 let id = client_id.clone();
                 let code = device_code.clone();
-                let poll =
-                    crate::task::run(
-                        async move { orrery_core::oauth::device_poll(&id, &code).await },
-                    )
-                    .await;
+                let poll = crate::task::try_run(async move {
+                    orrery_core::oauth::device_poll(&id, &code).await
+                })
+                .await;
                 let status = match poll {
                     Ok(p) => p.status,
                     Err(e) => e,
@@ -1377,9 +1738,13 @@ impl OrreryApp {
         self.services.ai_status = AiStatus::Checking;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let up = crate::task::run(orrery_core::ai::available()).await;
+            let up = crate::task::run(orrery_core::ai::available())
+                .await
+                .unwrap_or(false);
             let status = if up {
-                let models = crate::task::run(orrery_core::ai::installed_models()).await;
+                let models = crate::task::run(orrery_core::ai::installed_models())
+                    .await
+                    .unwrap_or_default();
                 AiStatus::Ready(
                     models
                         .into_iter()
@@ -1396,7 +1761,7 @@ impl OrreryApp {
                 // Reachable now → (re)build the semantic index so the palette can
                 // search by meaning.
                 if ready {
-                    this.index_semantic();
+                    this.index_semantic(cx);
                 }
                 cx.notify();
             });
@@ -1420,7 +1785,8 @@ impl OrreryApp {
                     Err(e) => format!("AI test failed: {e}"),
                 }
             })
-            .await;
+            .await
+            .unwrap_or_else(|| "AI test failed unexpectedly".into());
             let _ = this.update(cx, |this, cx| {
                 if let Some(s) = &mut this.settings {
                     s.ai_note = note.into();
@@ -1450,6 +1816,9 @@ impl OrreryApp {
                     s.ai_note = note.into();
                 }
                 this.load_index_stats(cx);
+                // Reload the rows so the cleared summaries leave the cards and
+                // drawer (the reload re-derives summaries from the AI cache).
+                this.request_snapshot(SnapKind::Reload, cx);
                 cx.notify();
             });
         })
@@ -1497,7 +1866,8 @@ impl OrreryApp {
                         crate::task::run(
                             async move { orrery_core::semantic::index_fleet(repos).await },
                         )
-                        .await;
+                        .await
+                        .unwrap_or(0);
                     format!(
                         "Rebuilt index — embedded {n} repo{}",
                         if n == 1 { "" } else { "s" }
@@ -1557,7 +1927,7 @@ impl OrreryApp {
 
         cx.spawn(async move |this, cx| {
             let tx_progress = tx.clone();
-            let result = crate::task::run(async move {
+            let result = crate::task::try_run(async move {
                 let mut last_pct = u64::MAX;
                 orrery_core::llama::download_model(&url, move |downloaded, total| {
                     let msg = match (downloaded * 100).checked_div(total) {
@@ -1600,7 +1970,8 @@ impl OrreryApp {
             return;
         }
         let repo = self.drawer.repo.clone();
-        self.drawer.commit_suggestion = Some(("Generating…".into(), "".into()));
+        self.drawer.commit_suggestion =
+            Some(crate::drawer::CommitSuggestion::new("Generating…", ""));
         cx.notify();
         cx.spawn(async move |this, cx| {
             let id = repo.to_string();
@@ -1611,7 +1982,7 @@ impl OrreryApp {
             let result = if diff.trim().is_empty() {
                 Err("Nothing staged — `git add` your changes first.".to_string())
             } else {
-                crate::task::run(async move { orrery_core::ai::commit_message(&diff).await })
+                crate::task::try_run(async move { orrery_core::ai::commit_message(&diff).await })
                     .await
                     .map(|m| orrery_core::ai::split_commit_message(&m))
             };
@@ -1632,11 +2003,14 @@ impl OrreryApp {
                         if let Some(input) = &this.drawer.commit_body_input {
                             input.update(cx, |st, cx| st.set_value(body.clone(), window, cx));
                         }
-                        this.drawer.commit_suggestion = Some((subject.into(), body.into()));
+                        this.drawer.commit_suggestion =
+                            Some(crate::drawer::CommitSuggestion::new(subject, body));
                     }
                     Err(e) => {
-                        this.drawer.commit_suggestion =
-                            Some((crate::data::oneline(e).into(), "".into()));
+                        this.drawer.commit_suggestion = Some(crate::drawer::CommitSuggestion::new(
+                            crate::data::oneline(e),
+                            "",
+                        ));
                     }
                 }
                 cx.notify();
@@ -1660,9 +2034,13 @@ impl OrreryApp {
                 .background_executor()
                 .spawn(async move { recent_summaries(&id, 30) })
                 .await;
-            let text = crate::task::run(async move { orrery_core::ai::changelog(&commits).await })
-                .await
-                .unwrap_or_else(|e| format!("Changelog failed: {e}"));
+            let text =
+                crate::task::try_run(async move { orrery_core::ai::changelog(&commits).await })
+                    .await
+                    .unwrap_or_else(|e| format!("Changelog failed: {e}"));
+            // Reflow once here, not per frame (the markdown renderer panics on
+            // a run's embedded newlines).
+            let text = crate::data::unwrap_soft_breaks(&text);
             let _ = this.update(cx, |this, cx| {
                 if this.drawer.repo == repo {
                     this.drawer.changelog = Some(text.into());
@@ -1692,10 +2070,11 @@ impl OrreryApp {
                 .spawn(async move { recent_summaries(&id, 30) })
                 .await;
             let text =
-                crate::task::run(async move { orrery_core::ai::resume(&name, &commits).await })
+                crate::task::try_run(async move { orrery_core::ai::resume(&name, &commits).await })
                     .await
                     .map(|m| m.trim().to_string())
                     .unwrap_or_else(|e| format!("Catch-up failed: {e}"));
+            let text = crate::data::unwrap_soft_breaks(&text);
             let _ = this.update(cx, |this, cx| {
                 if this.drawer.repo == repo
                     && let Some(n) = &mut this.drawer.notes
@@ -1803,72 +2182,46 @@ impl OrreryApp {
                 });
                 return;
             }
-            // 2. The branch's commit range, for drafting the title/body.
-            let (id, base2) = (repo.to_string(), base.clone());
-            let commits: Vec<String> = cx
-                .background_executor()
-                .spawn(async move {
-                    orrery_core::git_ops::commits_ahead_of(&id, &base2, 30)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|c| c.summary)
-                        .collect()
-                })
-                .await;
-            // 3. Title/body: AI-drafted when available, else the fallback —
-            //    only the drafting is aiReady-gated, never the button.
-            let drafted = if ai_ready && !commits.is_empty() {
-                let (h, c) = (head.clone(), commits.clone());
-                crate::task::run(async move { orrery_core::ai::pr_description(&h, &c).await })
-                    .await
-                    .ok()
-                    .and_then(|d| orrery_core::ai::split_pr_draft(&d))
-            } else {
-                None
-            };
-            let (title, body) =
-                drafted.unwrap_or_else(|| orrery_core::ai::fallback_pr_draft(&head, &commits));
-            // 4. Create the PR (network → the shared tokio runtime).
-            let (s, h, b) = (slug.clone(), head.clone(), base.clone());
-            let (t2, b2) = (title.clone(), body.clone());
-            let result = crate::task::run(async move {
-                let token =
-                    orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
-                orrery_core::forge::create_pr(&s, &h, &b, &t2, &b2, &token).await
-            })
-            .await;
+            // 2–4. Draft the title/body from the commit range and create it.
+            let (title, result) =
+                draft_and_create_pr(cx, ai_ready, repo.to_string(), slug, head, base).await;
             let _ = this.update(cx, |this, cx| {
                 if this.drawer.repo == repo {
                     this.drawer.pr_busy = false;
-                }
-                match result {
-                    Ok(url) => {
-                        if this.drawer.repo == repo {
-                            this.drawer.pr_url = Some(url.clone().into());
-                        }
-                        this.upsert_toast_link(
-                            key,
-                            ToastKind::Success,
-                            "PR opened",
-                            Some(title.into()),
-                            url.into(),
-                            cx,
-                        );
-                    }
-                    Err(e) => {
-                        this.upsert_toast(
-                            key,
-                            ToastKind::Error,
-                            "Open PR failed",
-                            Some(e.into()),
-                            cx,
-                        );
+                    if let Ok(url) = &result {
+                        this.drawer.pr_url = Some(url.clone().into());
                     }
                 }
+                this.finish_pr_toast(key, title, result, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Resolve an "Open PR" flow's keyed progress toast to its outcome: a
+    /// success toast linking to the new PR, or the error.
+    fn finish_pr_toast(
+        &mut self,
+        key: String,
+        title: String,
+        result: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        // (The toast ids these return aren't needed here.)
+        let _ = match result {
+            Ok(url) => self.upsert_toast_link(
+                key,
+                ToastKind::Success,
+                "PR opened",
+                Some(title.into()),
+                url.into(),
+                cx,
+            ),
+            Err(e) => {
+                self.upsert_toast(key, ToastKind::Error, "Open PR failed", Some(e.into()), cx)
+            }
+        };
     }
 
     /// One-shot at launch: if AI is enabled and reachable, mark it ready and
@@ -1878,12 +2231,16 @@ impl OrreryApp {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let up = crate::task::run(orrery_core::ai::available()).await;
-            let _ = this.update(cx, |this, _cx| {
+            let up = crate::task::run(orrery_core::ai::available())
+                .await
+                .unwrap_or(false);
+            let _ = this.update(cx, |this, cx| {
                 this.services.ai_ready = up;
                 if up {
-                    this.index_semantic();
+                    this.index_semantic(cx);
                 }
+                // AI affordances (summaries, Summarize) appear with readiness.
+                cx.notify();
             });
         })
         .detach();
@@ -1894,14 +2251,22 @@ impl OrreryApp {
     /// Incremental and self-pacing: unchanged (repo, source) pairs skip via
     /// signatures and core throttles the embed bursts, so post-rescan calls
     /// are cheap. Gated on `aiReady` — no model, no indexing, no errors.
-    pub fn index_semantic(&self) {
-        if !self.services.ai_ready {
+    /// Single-flight: a request mid-pass reruns once afterwards, on the
+    /// then-current snapshot.
+    pub fn index_semantic(&mut self, cx: &mut Context<Self>) {
+        if !self.services.ai_ready || !self.passes.index.begin() {
             return;
         }
         let repos = self.repos.clone();
-        crate::task::spawn_detached(async move {
-            let _ = orrery_core::semantic::index_fleet(repos).await;
-        });
+        cx.spawn(async move |this, cx| {
+            let _ = crate::task::run(orrery_core::semantic::index_fleet(repos)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.passes.index.finish() {
+                    this.index_semantic(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Pull (download) a model on the AI backend, then refresh the status.
@@ -2004,38 +2369,53 @@ impl OrreryApp {
             .unwrap_or(draft.scan_depth)
             .clamp(1, 8);
 
-        let _ = orrery_core::config::save(&draft);
         self.config = draft.clone();
+        let to_save = draft.clone();
         if let Some(s) = &mut self.settings {
             s.draft = draft;
             s.saved = true;
         }
-        self.rescan(cx);
         cx.notify();
+        // Write the config off the UI thread, and rescan only once it has
+        // landed — the rescan re-reads the roots from it.
+        cx.spawn(async move |this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move { orrery_core::config::save(&to_save) })
+                .await;
+            let _ = this.update(cx, |this, cx| this.rescan(cx));
+        })
+        .detach();
     }
 
     /// Load the activity/release feed over the network.
     pub fn load_feed(&mut self, cx: &mut Context<Self>) {
         use crate::views::feed::{FeedState, feed_row};
         self.feed = FeedState::Loading;
+        self.passes.feed_seq += 1;
+        let seq = self.passes.feed_seq;
         cx.notify();
         let now = crate::data::now_unix();
-        // Items newer than the last time the Feed was viewed are "new". Read the
-        // mark before the load, then advance it to now so the next visit compares
-        // against this one.
-        let since = orrery_core::cache::get_meta("feed_seen_at")
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
         cx.spawn(async move |this, cx| {
-            let res = crate::task::run(async { orrery_core::inbox::github_feed().await }).await;
+            // Items newer than the last time the Feed was viewed are "new". Read
+            // the mark (off the UI thread) before the load, then advance it to
+            // now so the next visit compares against this one.
+            let since = cx
+                .background_executor()
+                .spawn(async {
+                    orrery_core::cache::get_meta("feed_seen_at")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0)
+                })
+                .await;
+            let res = crate::task::try_run(async { orrery_core::inbox::github_feed().await }).await;
             let _ = this.update(cx, |this, cx| {
+                if this.passes.feed_seq != seq {
+                    return; // a refresh superseded this load
+                }
                 this.feed = match res {
                     Ok(items) => {
-                        cx.background_executor()
-                            .spawn(async move {
-                                orrery_core::cache::set_meta("feed_seen_at", &now.to_string());
-                            })
-                            .detach();
+                        crate::task::persist_meta("feed_seen_at", now.to_string());
                         FeedState::Ready(
                             items.into_iter().map(|f| feed_row(f, now, since)).collect(),
                         )
@@ -2052,10 +2432,16 @@ impl OrreryApp {
     pub fn load_starred(&mut self, cx: &mut Context<Self>) {
         use crate::views::explore::{ExploreState, star_row};
         self.explore = ExploreState::Loading;
+        self.passes.explore_seq += 1;
+        let seq = self.passes.explore_seq;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let res = crate::task::run(async { orrery_core::inbox::github_starred().await }).await;
+            let res =
+                crate::task::try_run(async { orrery_core::inbox::github_starred().await }).await;
             let _ = this.update(cx, |this, cx| {
+                if this.passes.explore_seq != seq {
+                    return; // a refresh superseded this load
+                }
                 this.explore = match res {
                     Ok(repos) => ExploreState::Ready(repos.into_iter().map(star_row).collect()),
                     Err(e) => ExploreState::Error(e.into()),
@@ -2095,21 +2481,18 @@ impl OrreryApp {
             .into_owned();
         let url = clone_url.to_string();
         cx.spawn(async move |this, cx| {
-            let (result, snap) = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = if std::path::Path::new(&dest).exists() {
+                    if std::path::Path::new(&dest).exists() {
                         Ok(())
                     } else {
                         orrery_core::git_ops::clone(&url, &dest).map(|_| ())
-                    };
-                    (result, crate::data::rescan())
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 use crate::toast::ToastKind;
-                this.apply_snapshot(snap);
-                this.explore_cloning.remove(&slug);
                 match result {
                     Ok(()) => {
                         this.upsert_toast(
@@ -2119,8 +2502,14 @@ impl OrreryApp {
                             None,
                             cx,
                         );
+                        // Keep the card on "cloning" until a rescan has picked
+                        // the repo up (then it shows as cloned), and watch the
+                        // freshly cloned repo for live changes too.
+                        this.passes.snapshot.settle_clones.push(slug.clone());
+                        this.rescan(cx);
                     }
                     Err(e) => {
+                        this.explore_cloning.remove(&slug);
                         let msg = SharedString::from(format!("Failed: {e}"));
                         // Keep the inline card error AND raise a toast, so the
                         // failure is visible even away from the Explore view.
@@ -2134,8 +2523,6 @@ impl OrreryApp {
                         );
                     }
                 }
-                // Watch the freshly cloned repo for live changes too.
-                this.watcher.rearm();
                 cx.notify();
             });
         })
@@ -2175,12 +2562,17 @@ impl OrreryApp {
     /// Scan running agents off the UI thread, then update both the Agents list and
     /// the `active_agents` set (which drives the card indicator). `loading` shows
     /// the spinner; the poll passes `false` to refresh in place. Only repaints when
-    /// the active set changed or the Agents view is showing.
+    /// the active set changed or the Agents view is showing. Single-flight: two
+    /// overlapping scans could both see a session finish and toast it twice,
+    /// so a request mid-scan reruns once afterwards instead.
     fn scan_agents(&mut self, loading: bool, cx: &mut Context<Self>) {
         use crate::views::agents::AgentsState;
         if loading {
             self.agents = AgentsState::Loading;
             cx.notify();
+        }
+        if !self.passes.agents.begin() {
+            return;
         }
         let rows = self.rows.clone();
         let agent_command = self.config.agent_command.clone();
@@ -2260,18 +2652,12 @@ impl OrreryApp {
                 if changed || this.view == View::Agents {
                     cx.notify();
                 }
+                if this.passes.agents.finish() {
+                    this.scan_agents(false, cx);
+                }
             });
         })
         .detach();
-    }
-
-    /// Launch-time outcome sweep (#185): scan agent sessions once so a
-    /// dispatched session that ended while Orrery was closed is detected
-    /// right away (persisted `last_seen_alive` + no live process = finished),
-    /// and — via the scan's self-healing poll start — keep supervising any
-    /// dispatched session that is still running.
-    pub fn agents_startup(&mut self, cx: &mut Context<Self>) {
-        self.scan_agents(false, cx);
     }
 
     /// Re-scan agents every 5s while the Agents view is open — so the list
@@ -2461,7 +2847,7 @@ impl OrreryApp {
                         // Show the new worktree in the open drawer's Overview
                         // and the Agents view without waiting for the poll.
                         if this.drawer.repo == repo {
-                            crate::drawer::load_overview(repo.clone(), cx);
+                            crate::drawer::load_overview(this, cx);
                         }
                         this.scan_agents(false, cx);
                     }
@@ -2666,39 +3052,15 @@ impl OrreryApp {
                     return;
                 }
             };
-            // 2. The branch's commit range, for drafting the title/body.
-            let (p2, base2) = (path.to_string(), base.clone());
-            let commits: Vec<String> = cx
-                .background_executor()
-                .spawn(async move {
-                    orrery_core::git_ops::commits_ahead_of(&p2, &base2, 30)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|c| c.summary)
-                        .collect()
-                })
-                .await;
-            // 3. Title/body: AI-drafted when available, else the fallback.
-            let head = branch.to_string();
-            let drafted = if ai_ready && !commits.is_empty() {
-                let (h, c) = (head.clone(), commits.clone());
-                crate::task::run(async move { orrery_core::ai::pr_description(&h, &c).await })
-                    .await
-                    .ok()
-                    .and_then(|d| orrery_core::ai::split_pr_draft(&d))
-            } else {
-                None
-            };
-            let (title, body) =
-                drafted.unwrap_or_else(|| orrery_core::ai::fallback_pr_draft(&head, &commits));
-            // 4. Create the PR (network → the shared tokio runtime).
-            let (s, h, b) = (slug.clone(), head.clone(), base.clone());
-            let (t2, b2) = (title.clone(), body.clone());
-            let result = crate::task::run(async move {
-                let token =
-                    orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
-                orrery_core::forge::create_pr(&s, &h, &b, &t2, &b2, &token).await
-            })
+            // 2–4. Draft the title/body from the commit range and create it.
+            let (title, result) = draft_and_create_pr(
+                cx,
+                ai_ready,
+                path.to_string(),
+                slug,
+                branch.to_string(),
+                base,
+            )
             .await;
             // 5. Persist the hand-off so the attention item clears (and stays
             //    cleared across restarts), then refresh the cards.
@@ -2712,27 +3074,10 @@ impl OrreryApp {
             }
             let _ = this.update(cx, |this, cx| {
                 this.agents_pr_busy.remove(&path);
-                match result {
-                    Ok(url) => {
-                        this.upsert_toast_link(
-                            key,
-                            ToastKind::Success,
-                            "PR opened",
-                            Some(title.into()),
-                            url.into(),
-                            cx,
-                        );
-                        this.scan_agents(false, cx);
-                    }
-                    Err(e) => {
-                        this.upsert_toast(
-                            key,
-                            ToastKind::Error,
-                            "Open PR failed",
-                            Some(e.into()),
-                            cx,
-                        );
-                    }
+                let opened = result.is_ok();
+                this.finish_pr_toast(key, title, result, cx);
+                if opened {
+                    this.scan_agents(false, cx);
                 }
                 cx.notify();
             });
@@ -2859,42 +3204,26 @@ impl OrreryApp {
         .detach();
     }
 
-    /// Re-scan the roots from disk (off the UI thread) and reload the grid, then
-    /// refresh host enrichment.
+    /// Re-scan the roots from disk (off the UI thread) and reload the grid,
+    /// then run the post-snapshot fan-out (see [`Self::request_snapshot`]).
     pub(crate) fn rescan(&mut self, cx: &mut Context<Self>) {
         // Explicit rescans follow repo/root additions (Settings save, New
         // Project, header/palette refresh) — re-arm the fs watcher so the new
-        // paths get live change events too. The watcher-driven rescan doesn't
-        // come through here, so routine fs events never churn the watches.
+        // paths get live change events too. The watcher-driven rescan
+        // (`live.rs`) requests the snapshot directly, so routine fs events
+        // never churn the watches.
         self.watcher.rearm();
-        cx.spawn(async move |this, cx| {
-            let snap = cx
-                .background_executor()
-                .spawn(async { crate::data::rescan() })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.apply_snapshot(snap);
-                // Drop selected ids for repos that vanished in the rescan.
-                this.prune_selection();
-                this.enrich_hosts(cx);
-                this.refresh_ci(cx);
-                this.load_activity(cx);
-                // Refresh which repos have a live agent, so Mission Control shows
-                // the indicator without needing the Agents view open.
-                this.scan_agents(false, cx);
-                // Fold the fresh snapshot into the semantic index (incremental;
-                // a no-op with AI off/unreachable).
-                this.index_semantic();
-                cx.notify();
-            });
-        })
-        .detach();
+        self.request_snapshot(SnapKind::Rescan, cx);
     }
 
     /// Recompute the contribution graph (commits/day across all repos) on the
     /// background pool — git history walking is slow — then store it. Cheap to
     /// call on rescan; the revwalk stops past the one-year window.
+    /// Single-flight, so an older pass can't overwrite a newer graph.
     pub fn load_activity(&mut self, cx: &mut Context<Self>) {
+        if !self.passes.activity.begin() {
+            return;
+        }
         let paths: Vec<String> = self.rows.iter().map(|r| r.id.to_string()).collect();
         cx.spawn(async move |this, cx| {
             let activity = cx
@@ -2903,6 +3232,9 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.grid.activity = Some(activity);
+                if this.passes.activity.finish() {
+                    this.load_activity(cx);
+                }
                 cx.notify();
             });
         })
@@ -2955,18 +3287,11 @@ impl OrreryApp {
             let now = crate::data::now_unix();
             let updated =
                 crate::task::run(async move { orrery_core::enrich::refresh_cached_all(now).await })
-                    .await;
-            if updated == 0 {
-                return;
+                    .await
+                    .unwrap_or(0);
+            if updated > 0 {
+                let _ = this.update(cx, |this, cx| this.request_snapshot(SnapKind::Reload, cx));
             }
-            let snap = cx
-                .background_executor()
-                .spawn(async { crate::data::load(crate::data::now_unix()) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.apply_snapshot(snap);
-                cx.notify();
-            });
         })
         .detach();
     }
@@ -3076,26 +3401,40 @@ impl OrreryApp {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let updated =
-                crate::task::run(async { orrery_core::summarize::run_cached().await }).await;
-            if updated == 0 {
-                return;
+            let updated = crate::task::run(async { orrery_core::summarize::run_cached().await })
+                .await
+                .unwrap_or(0);
+            if updated > 0 {
+                let _ = this.update(cx, |this, cx| this.request_snapshot(SnapKind::Reload, cx));
             }
-            let snap = cx
-                .background_executor()
-                .spawn(async { crate::data::load(crate::data::now_unix()) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.apply_snapshot(snap);
-                cx.notify();
-            });
         })
         .detach();
     }
 
     /// Absolute row indices passing every active filter (chip AND root AND
-    /// language), in the active sort order.
-    pub(crate) fn visible_rows(&self) -> Vec<usize> {
+    /// language), in the active sort order. Cached until the rows, the
+    /// attention model, or the filters/sort change (it used to be rebuilt on
+    /// every frame).
+    pub(crate) fn visible_rows(&self) -> Rc<Vec<usize>> {
+        let key = VisibleKey {
+            rows_gen: self.derived.rows_gen,
+            attention_gen: self.derived.attention_gen,
+            filter: self.grid.filter,
+            root: self.grid.root.clone(),
+            language: self.grid.language.clone(),
+            sort: self.grid.sort,
+        };
+        if let Some((k, v)) = &*self.derived.visible.borrow()
+            && *k == key
+        {
+            return v.clone();
+        }
+        let v = Rc::new(self.compute_visible_rows());
+        *self.derived.visible.borrow_mut() = Some((key, v.clone()));
+        v
+    }
+
+    fn compute_visible_rows(&self) -> Vec<usize> {
         let mut v: Vec<usize> = self
             .rows
             .iter()
@@ -3116,12 +3455,9 @@ impl OrreryApp {
                     .last_commit_unix
                     .cmp(&self.rows[a].last_commit_unix)
             }),
-            SortMode::Name => v.sort_by(|&a, &b| {
-                self.rows[a]
-                    .name
-                    .to_lowercase()
-                    .cmp(&self.rows[b].name.to_lowercase())
-            }),
+            // Lowercase each name once (not twice per comparison). Stable,
+            // like `sort_by`.
+            SortMode::Name => v.sort_by_cached_key(|&i| self.rows[i].name.to_lowercase()),
         }
         // The Attention filter ranks the most urgent repos first; the sort is
         // stable, so the active sort still orders repos within each severity
@@ -3137,28 +3473,58 @@ impl OrreryApp {
         v
     }
 
+    /// The sidebar ROOTS / LANGUAGES facet counts, cached per rows generation.
+    fn facets(&self) -> Rc<Facets> {
+        let generation = self.derived.rows_gen;
+        if let Some((g, f)) = &*self.derived.facets.borrow()
+            && *g == generation
+        {
+            return f.clone();
+        }
+        let f = Rc::new(compute_facets(&self.rows));
+        *self.derived.facets.borrow_mut() = Some((generation, f.clone()));
+        f
+    }
+
+    /// Slugs of the repos already in the fleet (Explore's "cloned" marks),
+    /// cached per rows generation.
+    fn cloned_slugs(&self) -> Rc<std::collections::HashSet<SharedString>> {
+        let generation = self.derived.rows_gen;
+        if let Some((g, s)) = &*self.derived.slugs.borrow()
+            && *g == generation
+        {
+            return s.clone();
+        }
+        let s: Rc<std::collections::HashSet<SharedString>> =
+            Rc::new(self.rows.iter().map(|r| r.slug.clone()).collect());
+        *self.derived.slugs.borrow_mut() = Some((generation, s.clone()));
+        s
+    }
+
     /// Refresh host enrichment (stars/topics/issues/release/visibility) from
     /// GitHub/GitLab on the tokio runtime, then reload the grid from the freshly
     /// written cache. A no-op when every repo's cache is still within the TTL
     /// (so repeated rescans cost nothing) or when offline. Network failures are
-    /// silent by design — stale enrichment simply persists.
+    /// silent by design — stale enrichment simply persists. Single-flight.
     pub fn enrich_hosts(&mut self, cx: &mut Context<Self>) {
+        if !self.passes.enrich.begin() {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let now = crate::data::now_unix();
             let updated =
                 crate::task::run(async move { orrery_core::enrich::refresh_cached(now).await })
-                    .await;
-            if updated == 0 {
-                return;
-            }
-            // Rebuild rows from the enriched cache, off the UI thread.
-            let snap = cx
-                .background_executor()
-                .spawn(async { crate::data::load(crate::data::now_unix()) })
-                .await;
+                    .await
+                    .unwrap_or(0);
             let _ = this.update(cx, |this, cx| {
-                this.apply_snapshot(snap);
-                cx.notify();
+                // Rebuild rows from the enriched cache (through the snapshot
+                // pass, so it can't race a rescan).
+                if updated > 0 {
+                    this.request_snapshot(SnapKind::Reload, cx);
+                }
+                if this.passes.enrich.finish() {
+                    this.enrich_hosts(cx);
+                }
             });
         })
         .detach();
@@ -3168,7 +3534,7 @@ impl OrreryApp {
     /// runtime, then reload `ci_states` from the cache and recompute
     /// attention — failing default-branch CI flows to badges, tray, and
     /// notifications through the model. TTL-paced in core (~5 min), so
-    /// calling this on every rescan and attention poll is cheap.
+    /// calling this on every rescan and attention poll is cheap. Single-flight.
     ///
     /// A pass where *everything* failed (expired token, rate limit, outage)
     /// surfaces one error toast per distinct error — the cached states are
@@ -3176,40 +3542,93 @@ impl OrreryApp {
     /// the only way an auth problem becomes visible instead of CI silently
     /// going stale.
     pub fn refresh_ci(&mut self, cx: &mut Context<Self>) {
+        if !self.passes.ci.begin() {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let now = crate::data::now_unix();
             let outcome =
                 crate::task::run(async move { orrery_core::ci::refresh_cached(now).await }).await;
-            if outcome.updated == 0 && outcome.errors == 0 {
-                return; // Nothing attempted (all fresh / no token / no repos).
-            }
-            let states = cx
-                .background_executor()
-                .spawn(async { orrery_core::cache::all_ci_states() })
-                .await;
+            // Nothing attempted (all fresh / no token / no repos), or the pass
+            // itself failed — nothing to reload.
+            let attempted = outcome
+                .as_ref()
+                .is_some_and(|o| o.updated > 0 || o.errors > 0);
+            let states = if attempted {
+                Some(
+                    cx.background_executor()
+                        .spawn(async { orrery_core::cache::all_ci_states() })
+                        .await,
+                )
+            } else {
+                None
+            };
             let _ = this.update(cx, |this, cx| {
-                if outcome.all_failed() {
-                    if this.ci_last_error != outcome.last_error
-                        && let Some(err) = &outcome.last_error
-                    {
-                        this.upsert_toast(
-                            "ci-pass",
-                            ToastKind::Error,
-                            "CI status check failed",
-                            Some(err.clone().into()),
-                            cx,
-                        );
-                    }
-                    this.ci_last_error = outcome.last_error;
-                } else {
-                    this.ci_last_error = None;
+                if let (Some(outcome), Some(states)) = (outcome, states) {
+                    this.apply_ci_outcome(outcome, states, cx);
                 }
-                this.ci_states = states;
-                this.recompute_attention();
-                cx.notify();
+                if this.passes.ci.finish() {
+                    this.refresh_ci(cx);
+                }
             });
         })
         .detach();
+    }
+
+    /// Fold a finished CI pass into the app: the error toast (once per
+    /// distinct whole-pass failure), the fresh states, and attention.
+    fn apply_ci_outcome(
+        &mut self,
+        outcome: orrery_core::ci::Outcome,
+        states: std::collections::HashMap<(String, String), orrery_core::cache::CiEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        if outcome.all_failed() {
+            if self.ci_last_error != outcome.last_error
+                && let Some(err) = &outcome.last_error
+            {
+                self.upsert_toast(
+                    "ci-pass",
+                    ToastKind::Error,
+                    "CI status check failed",
+                    Some(err.clone().into()),
+                    cx,
+                );
+            }
+            self.ci_last_error = outcome.last_error;
+        } else {
+            self.ci_last_error = None;
+        }
+        self.ci_states = states;
+        self.recompute_attention();
+        cx.notify();
+    }
+}
+
+/// Aggregate the sidebar facets: repos per root and per (known) language,
+/// most repos first, then by name for a stable order.
+fn compute_facets(rows: &[Row]) -> Facets {
+    use std::collections::HashMap;
+    let mut root_counts: HashMap<&str, usize> = HashMap::new();
+    let mut lang_counts: HashMap<&str, usize> = HashMap::new();
+    for r in rows {
+        *root_counts.entry(r.root.as_ref()).or_default() += 1;
+        let lang: &str = r.language.as_ref();
+        if !lang.is_empty() {
+            *lang_counts.entry(lang).or_default() += 1;
+        }
+    }
+    let sorted = |m: HashMap<&str, usize>| {
+        let mut v: Vec<(SharedString, usize)> = m
+            .into_iter()
+            .map(|(k, n)| (SharedString::from(k.to_string()), n))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    };
+    Facets {
+        roots: sorted(root_counts),
+        langs: sorted(lang_counts),
     }
 }
 
@@ -3267,6 +3686,7 @@ impl OrreryApp {
             urgent: self.attention_by_repo.get(id).copied() == Some(Severity::Urgent),
             selected: selecting && self.selected.contains(id),
             selecting,
+            show_ai: self.services.ai_ready,
         }
     }
 
@@ -3292,7 +3712,7 @@ impl OrreryApp {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(15.))
+                            .text_size(px(t.text_brand))
                             .text_color(rgb(t.fg0))
                             .child("Orrery"),
                     ),
@@ -3467,7 +3887,11 @@ impl OrreryApp {
                     .text_size(px(t.text_data_sm))
                     .text_color(rgb(t.fg3))
                     .child(lucide("hard-drive", 13., t.fg3))
-                    .child("Scanned just now"),
+                    .child(SharedString::from(scanned_label(
+                        self.scanned_at,
+                        crate::data::now_unix(),
+                        self.passes.snapshot.scanning(),
+                    ))),
             )
     }
 
@@ -3795,29 +4219,8 @@ impl OrreryApp {
 
     /// The ROOTS and LANGUAGES filter lists, derived from the current rows.
     fn filter_sections(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        use std::collections::HashMap;
-
-        // Aggregate counts per root and per language.
-        let mut root_counts: HashMap<&str, usize> = HashMap::new();
-        let mut lang_counts: HashMap<&str, usize> = HashMap::new();
-        for r in &self.rows {
-            *root_counts.entry(r.root.as_ref()).or_default() += 1;
-            let lang: &str = r.language.as_ref();
-            if !lang.is_empty() {
-                *lang_counts.entry(lang).or_default() += 1;
-            }
-        }
-        // Sort by descending count, then name, for a stable order.
-        let sorted = |m: HashMap<&str, usize>| {
-            let mut v: Vec<(SharedString, usize)> = m
-                .into_iter()
-                .map(|(k, n)| (SharedString::from(k.to_string()), n))
-                .collect();
-            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            v
-        };
-        let roots = sorted(root_counts);
-        let langs = sorted(lang_counts);
+        // Counts per root and per language — cached per rows generation.
+        let facets = self.facets();
 
         // ── VIEWS (saved quick filters) ────────────────────────────────────
         let mut views_sec = div()
@@ -3905,7 +4308,7 @@ impl OrreryApp {
             t,
             cx.listener(|this, _e, _w, cx| this.set_root(None, cx)),
         ));
-        for (root, n) in roots {
+        for (root, n) in facets.roots.iter().cloned() {
             let active = self.grid.root.as_ref() == Some(&root);
             let pick = root.clone();
             roots_sec = roots_sec.child(sidebar_filter_item(
@@ -3925,7 +4328,7 @@ impl OrreryApp {
             .flex_col()
             .gap(px(2.))
             .child(section_header("LANGUAGES", t));
-        for (lang, n) in langs {
+        for (lang, n) in facets.langs.iter().cloned() {
             let active = self.grid.language.as_ref() == Some(&lang);
             let pick = lang.clone();
             langs_sec = langs_sec.child(sidebar_filter_item(
@@ -3963,8 +4366,7 @@ impl OrreryApp {
                     .into_any_element()
             }
             View::Explore => {
-                let cloned: std::collections::HashSet<SharedString> =
-                    self.rows.iter().map(|r| r.slug.clone()).collect();
+                let cloned = self.cloned_slugs();
                 crate::views::explore::render(
                     &self.explore,
                     crate::views::explore::CloneStatus {
@@ -4195,7 +4597,7 @@ impl OrreryApp {
         t: &Theme,
         cx: &mut Context<Self>,
         cols: usize,
-        visible: Vec<usize>,
+        visible: Rc<Vec<usize>>,
     ) -> impl IntoElement {
         let entity = cx.entity();
         let theme = self.theme.clone();
@@ -4229,11 +4631,13 @@ impl OrreryApp {
             Layout::Grid => {
                 let grid_rows = visible.len().div_ceil(cols);
                 // uniform_list needs one row height, so size it to the tallest
-                // card. The AI-summary line is all-or-nothing per user (gated on
-                // aiReady), so pick the taller height only when summaries are
-                // present — keeping cards snug either way rather than clipping
-                // the launcher row at the bottom.
-                let has_ai = visible.iter().any(|&i| !self.rows[i].ai_summary.is_empty());
+                // card. A card only renders its AI-summary line while AI is
+                // ready, so take the taller height only then, and only when a
+                // visible card actually has a summary — keeping cards snug
+                // either way rather than clipping the launcher row at the
+                // bottom.
+                let has_ai = self.services.ai_ready
+                    && visible.iter().any(|&i| !self.rows[i].ai_summary.is_empty());
                 let row_h = if has_ai { ROW_H_AI } else { ROW_H };
                 gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
                     let app = entity.read(cx);
@@ -4426,14 +4830,7 @@ impl OrreryApp {
                 )
             }
             Some(Overlay::Palette(data)) => {
-                let query = data.query.read(cx).value();
-                let items = crate::palette::items(
-                    &self.rows,
-                    &data.code,
-                    &data.semantic,
-                    &query,
-                    !self.selected.is_empty(),
-                );
+                let items = self.palette_items(cx);
                 Some(
                     crate::palette::render(data, &items, &self.rows, t, &cx.entity())
                         .into_any_element(),
@@ -4563,7 +4960,8 @@ fn badge(n: usize, urgent: bool, t: &Theme) -> impl IntoElement {
         .child(SharedString::from(n.to_string()))
 }
 
-/// Scaffold for a not-yet-ported view: centered title + note.
+/// Centered title + note, shown for a view whose state hasn't been created
+/// yet (a frame or so, until its lazy load runs).
 fn placeholder(view: View, t: &Theme) -> impl IntoElement {
     let (title, sub): (&str, &str) = match view {
         View::Inbox => ("Inbox", "Review queue — PRs & notifications awaiting you"),
@@ -4586,7 +4984,7 @@ fn placeholder(view: View, t: &Theme) -> impl IntoElement {
         .child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(22.))
+                .text_size(px(t.text_display))
                 .text_color(rgb(t.fg0))
                 .child(SharedString::from(title.to_string())),
         )
@@ -4596,19 +4994,19 @@ fn placeholder(view: View, t: &Theme) -> impl IntoElement {
                 .text_color(rgb(t.fg2))
                 .child(SharedString::from(sub.to_string())),
         )
-        .child(
-            div()
-                .mt(px(6.))
-                .px(px(10.))
-                .py(px(4.))
-                .rounded(px(t.r_xs))
-                .border_1()
-                .border_color(rgb(t.border))
-                .font_family("monospace")
-                .text_size(px(t.text_data_sm))
-                .text_color(rgb(t.fg3))
-                .child("Phase 2 scaffold"),
-        )
+}
+
+/// The sidebar footer's scan line: "Scanning…" while a rescan runs, else how
+/// long ago the roots were last scanned from disk.
+fn scanned_label(scanned_at: Option<i64>, now: i64, scanning: bool) -> String {
+    if scanning {
+        return "Scanning…".into();
+    }
+    match scanned_at {
+        None => "Not scanned yet".into(),
+        Some(at) if now - at < 60 => "Scanned just now".into(),
+        Some(at) => format!("Scanned {}", crate::data::rel_age(at, now)),
+    }
 }
 
 #[cfg(test)]
@@ -4669,6 +5067,83 @@ mod tests {
         );
         let unlinked = item(AttentionKind::ReviewRequested, "a", None);
         assert!(attention_key(&unlinked).contains("github.com/o/a"));
+    }
+
+    #[test]
+    fn pass_is_single_flight_with_one_trailing_run() {
+        let mut p = Pass::default();
+        assert!(p.begin());
+        // Requests while running coalesce into one queued run.
+        assert!(!p.begin());
+        assert!(!p.begin());
+        assert!(p.finish(), "a trailing run was requested");
+        assert!(p.begin());
+        assert!(!p.finish(), "nothing queued this time");
+        assert!(p.begin(), "free again after finishing");
+    }
+
+    #[test]
+    fn snapshot_pass_upgrades_a_queued_reload_to_a_rescan() {
+        let mut p = SnapshotPass::default();
+        assert!(p.begin(SnapKind::Reload));
+        assert!(!p.scanning());
+        assert!(!p.begin(SnapKind::Rescan));
+        assert!(!p.begin(SnapKind::Reload));
+        assert!(p.scanning(), "a queued rescan counts as scanning");
+        assert_eq!(p.finish(), Some(SnapKind::Rescan));
+        assert!(p.begin(SnapKind::Rescan));
+        assert!(p.scanning());
+        assert_eq!(p.finish(), None);
+    }
+
+    #[test]
+    fn facets_count_and_order_by_size_then_name() {
+        let row = |root: &str, lang: &str| Row {
+            id: "".into(),
+            url: "".into(),
+            name: "".into(),
+            slug: "".into(),
+            root: root.to_string().into(),
+            path: "".into(),
+            description: "".into(),
+            language: lang.to_string().into(),
+            branch: "".into(),
+            release: "".into(),
+            ai_summary: "".into(),
+            ahead: 0,
+            behind: 0,
+            dirty: 0,
+            stars: "".into(),
+            host: "".into(),
+            private: false,
+            favorite: false,
+            activity: orrery_core::model::Activity::Active,
+            last_commit_unix: 0,
+        };
+        let rows = [
+            row("/b", "Rust"),
+            row("/a", ""),
+            row("/b", "Go"),
+            row("/a", "Rust"),
+        ];
+        let f = compute_facets(&rows);
+        let names = |v: &[(SharedString, usize)]| -> Vec<(String, usize)> {
+            v.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+        };
+        assert_eq!(names(&f.roots), vec![("/a".into(), 2), ("/b".into(), 2)]);
+        // Unknown language ("") is left out.
+        assert_eq!(names(&f.langs), vec![("Rust".into(), 2), ("Go".into(), 1)]);
+    }
+
+    #[test]
+    fn scanned_label_reflects_scan_state_and_age() {
+        assert_eq!(scanned_label(Some(100), 200, true), "Scanning…");
+        assert_eq!(scanned_label(None, 200, false), "Not scanned yet");
+        assert_eq!(scanned_label(Some(170), 200, false), "Scanned just now");
+        assert_eq!(
+            scanned_label(Some(1), 1 + 3 * 3600, false),
+            "Scanned 3h ago"
+        );
     }
 
     #[test]

@@ -12,18 +12,22 @@ license = "MIT"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Repo discovery + metadata (versions match the legacy crate deliberately).
-git2 = "0.20"                                             # libgit2 (vendored)
+# Repo discovery + metadata.
+git2 = { version = "0.21", features = ["https", "ssh"] }   # libgit2 (vendored); 0.21 made https/ssh opt-in (push + clone need them)
 chrono = "0.4"                                            # contribution-graph date math
 walkdir = "2"                                             # repo scanning
 globset = "0.4"                                           # ignore-glob matching
 toml = "1"                                                # config file
-dirs = "6"                                                # XDG config/data paths
+dirs = "6"                                                # XDG config/data paths (7 only changes Windows; 6 matches gpui, so one copy)
 which = "8"                                               # detect IDE/terminal on PATH
-rusqlite = { version = "0.32", features = ["bundled"] }   # cache (SQLite bundled)
+rusqlite = { version = "0.40", features = ["bundled"] }   # cache (SQLite bundled)
 
 # Git host providers + AI HTTP.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# reqwest 0.13's `rustls` feature bundles aws-lc-rs (a large C/cmake build).
+# `rustls-no-provider` + rustls's pure-Rust-and-asm `ring` provider (what 0.12's
+# `rustls-tls` used) keeps the build lean; `http::client_builder` installs it.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 urlencoding = "2"
 futures-util = "0.3"                                      # stream combinators (ai.rs SSE)
 # Timer (oauth device-flow poll backoff), `rt` for `spawn_blocking` (the
@@ -31,7 +35,7 @@ futures-util = "0.3"                                      # stream combinators (
 # lifecycle) and async file I/O (model downloads). No runtime is built here —
 # the caller (app) drives async; these features are already enabled app-wide.
 tokio = { version = "1", features = ["rt", "time", "sync", "fs", "io-util"] }
-sha2 = "0.10"                                             # GGUF download checksum (already in the app's tree)
+sha2 = "0.11"                                             # GGUF download checksum (already in the app's tree)
 
 # prctl(PR_SET_PDEATHSIG) so the llama-server sidecar dies with the app.
 [target.'cfg(target_os = "linux")'.dependencies]
