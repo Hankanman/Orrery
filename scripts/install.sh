@@ -9,7 +9,7 @@
 # on your PATH with a desktop entry + icon. Re-run it to update.
 #
 # Environment overrides:
-#   ORRERY_VERSION=v2026.7.1   install a specific tag instead of the latest
+#   ORRERY_VERSION=v2026.10.1  install a specific tag instead of the latest
 #   ORRERY_PREFIX=~/.local     where to install (bin/, opt/, share/ go under it)
 #
 #   bash install.sh --uninstall   remove everything this script installed

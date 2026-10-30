@@ -3,7 +3,7 @@
 # agent-process detection. The GPUI app (`crates/orrery`) consumes it directly.
 [package]
 name = "orrery-platform"
-version = "2026.7.1"
+version = "2026.10.1"
 edition = "2021"
 license = "MIT"
 
