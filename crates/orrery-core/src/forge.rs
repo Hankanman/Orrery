@@ -125,7 +125,7 @@ pub(crate) fn client() -> reqwest::Client {
                 attempt.stop()
             }
         });
-        reqwest::Client::builder()
+        crate::http::client_builder()
             .user_agent(UA)
             .redirect(policy)
             .connect_timeout(Duration::from_secs(8))

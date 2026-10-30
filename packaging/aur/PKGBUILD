@@ -8,8 +8,9 @@ arch=('x86_64')
 url="https://github.com/Hankanman/Orrery"
 license=('MIT')
 # Native GPUI app: GPU (Vulkan) rendering + Wayland/X11 + fontconfig, and
-# OpenSSL (libgit2 HTTPS). x86_64 only: that is the only arch built and tested.
-depends=('vulkan-icd-loader' 'fontconfig' 'libxkbcommon' 'openssl' 'hicolor-icon-theme')
+# OpenSSL (libgit2 HTTPS), and the system CA store (the host APIs verify TLS
+# against it). x86_64 only: that is the only arch built and tested.
+depends=('vulkan-icd-loader' 'fontconfig' 'libxkbcommon' 'openssl' 'ca-certificates' 'hicolor-icon-theme')
 optdepends=('ripgrep: code search across your repos'
             'ollama: local AI backend (summaries, semantic search)')
 makedepends=('git' 'rust' 'cargo' 'cmake' 'pkgconf' 'vulkan-headers')

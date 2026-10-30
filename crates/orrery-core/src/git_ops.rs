@@ -146,9 +146,11 @@ pub(crate) fn status_of(repo: &Repository) -> GitStatus {
 /// target (`refs/heads/main` → `main`). A detached HEAD yields `"HEAD"`.
 fn head_branch_name(repo: &Repository) -> Option<String> {
     match repo.head() {
-        Ok(h) => h.shorthand().map(String::from),
+        Ok(h) => h.shorthand().ok().map(String::from),
         Err(_) => repo.find_reference("HEAD").ok().and_then(|r| {
             r.symbolic_target()
+                .ok()
+                .flatten()
                 .map(|t| t.strip_prefix("refs/heads/").unwrap_or(t).to_string())
         }),
     }
@@ -163,7 +165,12 @@ fn fetch_origin(repo: &Repository) -> Result<(), String> {
     opts.remote_callbacks(remote_callbacks());
     let refspecs: Vec<String> = remote
         .fetch_refspecs()
-        .map(|r| r.iter().flatten().map(String::from).collect())
+        .map(|r| {
+            r.iter()
+                .filter_map(|s| s.ok().flatten())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
     remote
         .fetch(&refspecs, Some(&mut opts), None)
@@ -211,7 +218,7 @@ fn branches_in(repo: &Repository) -> Result<Vec<BranchInfo>, String> {
     let head_name = repo
         .head()
         .ok()
-        .and_then(|h| h.shorthand().map(String::from));
+        .and_then(|h| h.shorthand().ok().map(String::from));
     let default_oid = default_branch_oid(repo);
     let config = repo.config().ok();
 
@@ -265,7 +272,7 @@ pub fn switch_branch(path: &str, name: &str) -> Result<(), String> {
     repo.checkout_tree(&object, None)
         .map_err(|e| e.to_string())?;
     match reference {
-        Some(r) => repo.set_head(r.name().ok_or("invalid ref")?),
+        Some(r) => repo.set_head(r.name().map_err(|_| "invalid ref")?),
         None => repo.set_head_detached(object.id()),
     }
     .map_err(|e| e.to_string())
@@ -297,7 +304,7 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
         if !head.is_branch() {
             return Ok(OpOutcome::Skipped("detached HEAD".into()));
         }
-        match (head.shorthand().map(String::from), head.target()) {
+        match (head.shorthand().ok().map(String::from), head.target()) {
             (Some(b), Some(o)) => (b, o),
             _ => return Ok(OpOutcome::Skipped("unborn branch".into())),
         }
@@ -352,6 +359,8 @@ fn default_branch_name(repo: &Repository) -> Option<String> {
         // Strip the exact prefix: `rsplit('/')` would turn `release/v1` into `v1`.
         if let Some(name) = r
             .symbolic_target()
+            .ok()
+            .flatten()
             .and_then(|t| t.strip_prefix("refs/remotes/origin/"))
         {
             return Some(name.to_string());
@@ -371,7 +380,7 @@ fn protected_branches(repo: &Repository) -> Vec<String> {
     out.extend(default_branch_name(repo));
     out.extend(head_branch_name(repo));
     if let Ok(names) = repo.worktrees() {
-        for name in names.iter().flatten() {
+        for name in names.iter().filter_map(|n| n.ok().flatten()) {
             let head = repo
                 .find_worktree(name)
                 .ok()
@@ -427,7 +436,7 @@ pub fn worktrees(path: &str) -> Result<Vec<WorktreeInfo>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let names = repo.worktrees().map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    for name in names.iter().flatten() {
+    for name in names.iter().filter_map(|n| n.ok().flatten()) {
         if let Ok(wt) = repo.find_worktree(name) {
             out.push(WorktreeInfo {
                 name: name.to_string(),
@@ -530,7 +539,7 @@ fn collect_commits(repo: &Repository, walk: git2::Revwalk, max: usize) -> Vec<Co
         .take(max)
         .map(|commit| CommitInfo {
             id: short_sha(commit.id()),
-            summary: commit.summary().unwrap_or("").to_string(),
+            summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
             author: commit.author().name().unwrap_or("").to_string(),
             time_unix: commit.time().seconds(),
         })
@@ -1097,14 +1106,14 @@ pub fn push(path: &str) -> Result<String, String> {
     let branch = head
         .shorthand()
         .map(String::from)
-        .ok_or("HEAD has no branch name")?;
+        .map_err(|_| "HEAD has no branch name")?;
 
     // Upstream remote when configured (branch.<name>.remote), else origin.
     let refname = format!("refs/heads/{branch}");
     let upstream_remote = repo
         .branch_upstream_remote(&refname)
         .ok()
-        .and_then(|b| b.as_str().map(String::from));
+        .and_then(|b| b.as_str().ok().map(String::from));
     let has_upstream = upstream_remote.is_some();
     let remote_name = upstream_remote.unwrap_or_else(|| "origin".to_string());
     let mut remote = repo
@@ -1303,7 +1312,7 @@ mod tests {
         // …its HEAD is the namespaced branch…
         let wt_repo = Repository::open(&wt_path).unwrap();
         assert_eq!(
-            wt_repo.head().unwrap().shorthand(),
+            wt_repo.head().unwrap().shorthand().ok(),
             Some("agent/fix-x-abcd")
         );
         // …and the branch exists in the origin repo too.
@@ -1703,7 +1712,7 @@ mod tests {
             .unwrap()
             .peel_to_commit()
             .unwrap();
-        assert_eq!(tip.summary(), Some("add a"));
+        assert_eq!(tip.summary().unwrap(), Some("add a"));
     }
 
     #[test]
@@ -1743,7 +1752,7 @@ mod tests {
             .unwrap()
             .peel_to_commit()
             .unwrap();
-        assert_eq!(tip.summary(), Some("add a"));
+        assert_eq!(tip.summary().unwrap(), Some("add a"));
     }
 
     #[test]

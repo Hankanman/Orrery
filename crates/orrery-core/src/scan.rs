@@ -133,7 +133,7 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
     let (host, slug, remote_host) = repo
         .find_remote("origin")
         .ok()
-        .and_then(|r| r.url().map(String::from))
+        .and_then(|r| r.url().ok().map(String::from))
         .map(|url| parse_remote(&url))
         .unwrap_or((None, None, None));
 
