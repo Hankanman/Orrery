@@ -218,8 +218,11 @@ pub fn read_blocking() -> Appearance {
         .enable_time()
         .build()
     {
+        // The timeout must be created inside `block_on`: building it as the
+        // argument registers its timer before the runtime is entered, which
+        // panics ("no reactor running") on the app's non-tokio main thread.
         Ok(rt) => rt
-            .block_on(tokio::time::timeout(STARTUP_READ_TIMEOUT, read()))
+            .block_on(async { tokio::time::timeout(STARTUP_READ_TIMEOUT, read()).await })
             .unwrap_or_else(|_| {
                 eprintln!("[orrery appearance] portal read timed out; using defaults");
                 kdeglobals_appearance()
@@ -277,6 +280,13 @@ pub fn watch(on_change: impl Fn(Appearance) + Send + 'static) {
 #[cfg(test)]
 mod tests {
     use super::{parse_kdeglobals, parse_rgb_triplet};
+
+    /// App startup calls this from a plain (non-tokio) thread; it must return
+    /// a value — portal, kdeglobals or defaults — rather than panic.
+    #[test]
+    fn read_blocking_works_outside_a_tokio_runtime() {
+        let _ = super::read_blocking();
+    }
 
     #[test]
     fn parse_rgb_triplet_accepts_well_formed_and_rejects_junk() {
