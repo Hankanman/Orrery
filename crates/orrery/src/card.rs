@@ -8,7 +8,7 @@ use gpui::{
     App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
-use orrery_core::{cache, launch};
+use orrery_core::launch;
 
 use crate::data::Row;
 use crate::icon::{brand, langicon, lucide};
@@ -30,6 +30,9 @@ pub struct CardState {
     /// Any selection exists — keeps every card's checkbox visible (not just
     /// hover-revealed) while a selection is being built.
     pub selecting: bool,
+    /// AI is ready — gates the (cached) AI summary line, per the `aiReady`
+    /// contract: with AI off, every AI affordance is hidden.
+    pub show_ai: bool,
 }
 
 /// The fleet multi-select checkbox: filled with a check when selected;
@@ -182,7 +185,6 @@ pub fn card(
     // ── head: select box + language mark + name, and the favorite star ─────
     let fav_star = {
         let app = app.clone();
-        let id = row.id.clone();
         let fav = row.favorite;
         div()
             .id(SharedString::from(format!("fav-{idx}")))
@@ -194,14 +196,7 @@ pub fn card(
             .on_click(move |_ev, _win, cx| {
                 // Don't let the star toggle also open the drawer.
                 cx.stop_propagation();
-                let next = !fav;
-                let _ = cache::set_favorite(&id, next);
-                app.update(cx, |this, cx| {
-                    if let Some(r) = this.rows.get_mut(idx) {
-                        r.favorite = next;
-                    }
-                    cx.notify();
-                });
+                app.update(cx, |this, cx| this.set_favorite(idx, !fav, cx));
             })
     };
 
@@ -316,7 +311,7 @@ pub fn card(
     if !row.release.is_empty() {
         host = host.child(seg("tag", row.release.clone(), t.fg2));
     }
-    host = host.child(seg("clock", row.age.clone(), t.fg2));
+    host = host.child(seg("clock", row.age(), t.fg2));
     if !row.host.is_empty() {
         host = host
             .child(div().flex_1())
@@ -401,8 +396,9 @@ pub fn card(
         .child(slug)
         .child(desc);
 
-    // AI summary, when present, sits between description and status.
-    if !row.ai_summary.is_empty() {
+    // AI summary, when present and AI is ready, sits between description and
+    // status (a cached summary stays hidden with AI off — the aiReady contract).
+    if state.show_ai && !row.ai_summary.is_empty() {
         body = body.child(
             div()
                 .flex()
@@ -469,7 +465,6 @@ pub(crate) fn list_item(
     );
     let fav_star = {
         let app = app.clone();
-        let id = row.id.clone();
         let fav = row.favorite;
         div()
             .id(SharedString::from(format!("lfav-{idx}")))
@@ -480,14 +475,7 @@ pub(crate) fn list_item(
             .child(lucide("star", 15., if fav { t.star } else { t.fg3 }))
             .on_click(move |_ev, _win, cx| {
                 cx.stop_propagation();
-                let next = !fav;
-                let _ = cache::set_favorite(&id, next);
-                app.update(cx, |this, cx| {
-                    if let Some(r) = this.rows.get_mut(idx) {
-                        r.favorite = next;
-                    }
-                    cx.notify();
-                });
+                app.update(cx, |this, cx| this.set_favorite(idx, !fav, cx));
             })
     };
 
@@ -573,7 +561,7 @@ pub(crate) fn list_item(
     if !row.host.is_empty() {
         status = status.child(seg("star", row.stars.clone(), t.star));
     }
-    status = status.child(seg("clock", row.age.clone(), t.fg2));
+    status = status.child(seg("clock", row.age(), t.fg2));
 
     // Launchers — narrow icon buttons.
     let ide_action = {

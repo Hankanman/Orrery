@@ -144,7 +144,7 @@ impl OrreryApp {
     /// so a hand-picked repo outside the filter isn't dropped.
     pub fn select_all_visible(&mut self, cx: &mut Context<Self>) {
         self.fleet_prune = None;
-        for i in self.visible_rows() {
+        for &i in self.visible_rows().iter() {
             let id = self.rows[i].id.clone();
             self.selected.insert(id);
         }
