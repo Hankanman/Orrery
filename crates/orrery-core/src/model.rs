@@ -75,6 +75,15 @@ pub struct Repo {
     pub favorite: bool,
     /// Local-AI summary (Phase 3).
     pub ai_summary: Option<String>,
+    /// For a linked worktree: the id (absolute path) of the main checkout it
+    /// belongs to, so the UI can group it under the parent's card. `None` for
+    /// a main checkout. See `scan::scan_with_worktrees`.
+    #[serde(default)]
+    pub worktree_of: Option<String>,
+    /// For a linked worktree: the branch it has checked out (`None` when its
+    /// HEAD is detached, and always `None` for a main checkout).
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
 }
 
 /// Host-side enrichment for a repo, fetched from GitHub/GitLab.

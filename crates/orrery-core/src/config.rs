@@ -63,10 +63,20 @@ impl Default for AppConfig {
         Self {
             roots: vec![home],
             scan_depth: 3,
-            ignore: ["node_modules", ".cache", "vendor", "target", "dist", ".git"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            // `.claude` keeps tool-managed worktrees (`.claude/worktrees/`)
+            // out of `scan::scan_with_worktrees`.
+            ignore: [
+                "node_modules",
+                ".cache",
+                "vendor",
+                "target",
+                "dist",
+                ".git",
+                ".claude",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             ide_command,
             agent_command,
             agent_dispatch_args: crate::model::default_agent_dispatch_args(),

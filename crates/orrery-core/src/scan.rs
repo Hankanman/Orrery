@@ -18,7 +18,8 @@ const THIRTY_DAYS: i64 = 30 * 24 * 3600;
 /// Scan all roots and return the discovered repos, marking favorites.
 /// `gitlab_hosts` is the user's self-hosted GitLab allowlist, so a GitLab
 /// whose hostname doesn't start with `gitlab.` is still recognised (see
-/// [`parse_remote`]).
+/// [`parse_remote`]). Linked worktrees are not included; see
+/// [`scan_with_worktrees`].
 pub fn scan(
     roots: &[String],
     depth: usize,
@@ -27,23 +28,194 @@ pub fn scan(
     gitlab_hosts: &[String],
     now: i64,
 ) -> Vec<Repo> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     let ignore_set = build_ignore(ignore);
-
     // Discover unique repo paths first (cheap directory walk), then build the
-    // per-repo metadata (libgit2 status + README + language) in parallel — each
-    // repo is independent and this is the bulk of scan time.
+    // per-repo metadata in parallel.
+    let targets = main_targets(roots, depth, &ignore_set, favorites);
+    build_all(&targets, gitlab_hosts, now)
+}
+
+/// [`scan`], plus every linked worktree of the fleet as its own [`Repo`],
+/// marked with `worktree_of` (the main checkout's id) and `worktree_branch`,
+/// so the UI can group it under the parent's card rather than show it as an
+/// unrelated repo.
+///
+/// Worktrees come from two places: each main checkout's own worktree list
+/// (libgit2), which finds them wherever they live, and directories under a
+/// root whose `.git` is a *file* pointing at a linked worktree (so a worktree
+/// whose main checkout sits outside every root is still found). Submodules
+/// also have a `.git` file but aren't worktrees, so they stay skipped.
+///
+/// Tool-managed worktrees are skipped: any whose path (below the main
+/// checkout, or below the root it sits under) has a component matching the
+/// `ignore` globs (the default config ignores `.claude`, which covers
+/// `.claude/worktrees/`), and Orrery's own dispatch worktrees under the app
+/// data dir, which the agent views already track.
+pub fn scan_with_worktrees(
+    roots: &[String],
+    depth: usize,
+    ignore: &[String],
+    favorites: &HashSet<String>,
+    gitlab_hosts: &[String],
+    now: i64,
+) -> Vec<Repo> {
+    let ignore_set = build_ignore(ignore);
+    let mut targets = main_targets(roots, depth, &ignore_set, favorites);
+    let worktrees = worktree_targets(roots, depth, &ignore_set, favorites, &targets);
+    targets.extend(worktrees);
+    build_all(&targets, gitlab_hosts, now)
+}
+
+/// One checkout to build a [`Repo`] for.
+struct Target {
+    path: PathBuf,
+    root: String,
+    favorite: bool,
+    /// The main checkout's id, for a linked worktree.
+    worktree_of: Option<String>,
+}
+
+/// The main checkouts under every root, deduped across overlapping roots.
+fn main_targets(
+    roots: &[String],
+    depth: usize,
+    ignore_set: &GlobSet,
+    favorites: &HashSet<String>,
+) -> Vec<Target> {
     let mut seen = HashSet::new();
-    let mut targets: Vec<(PathBuf, &str, bool)> = Vec::new();
+    let mut targets = Vec::new();
     for root in roots {
-        for repo_path in find_repos(&expand(root), depth, &ignore_set) {
+        for repo_path in find_repos(&expand(root), depth, ignore_set) {
             let id = repo_path.to_string_lossy().into_owned();
             if seen.insert(id.clone()) {
-                targets.push((repo_path, root.as_str(), favorites.contains(&id)));
+                targets.push(Target {
+                    path: repo_path,
+                    root: root.clone(),
+                    favorite: favorites.contains(&id),
+                    worktree_of: None,
+                });
             }
         }
     }
+    targets
+}
+
+/// Linked worktrees of the main checkouts in `mains`, plus linked worktrees
+/// found directly under a root (see [`scan_with_worktrees`]).
+fn worktree_targets(
+    roots: &[String],
+    depth: usize,
+    ignore_set: &GlobSet,
+    favorites: &HashSet<String>,
+    mains: &[Target],
+) -> Vec<Target> {
+    let expanded: Vec<(PathBuf, &String)> = roots.iter().map(|r| (expand(r), r)).collect();
+    let dispatch_dir = dirs::data_dir().map(|d| d.join("orrery").join("worktrees"));
+    let mut seen: HashSet<PathBuf> = mains.iter().map(|t| canonical(&t.path)).collect();
+    let mut out = Vec::new();
+    let mut push = |path: PathBuf, parent: &Path, root: &str| {
+        let skip = dispatch_dir.as_ref().is_some_and(|d| path.starts_with(d))
+            || worktree_ignored(&path, parent, &expanded, ignore_set)
+            || !seen.insert(canonical(&path));
+        if skip {
+            return;
+        }
+        let id = path.to_string_lossy().into_owned();
+        out.push(Target {
+            favorite: favorites.contains(&id),
+            path,
+            root: root.to_string(),
+            worktree_of: Some(parent.to_string_lossy().into_owned()),
+        });
+    };
+
+    for main in mains {
+        for wt in linked_worktree_paths(&main.path) {
+            push(wt, &main.path, &main.root);
+        }
+    }
+    for (root_path, root) in &expanded {
+        for path in find_linked_worktrees(root_path, depth, ignore_set) {
+            if let Some(parent) = worktree_parent(&path) {
+                push(path, &parent, root.as_str());
+            }
+        }
+    }
+    out
+}
+
+/// Live linked worktrees of the repo at `main` (missing/pruned ones skipped).
+fn linked_worktree_paths(main: &Path) -> Vec<PathBuf> {
+    let Ok(repo) = Repository::open(main) else {
+        return Vec::new();
+    };
+    let Ok(names) = repo.worktrees() else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .filter_map(|n| n.ok().flatten())
+        .filter_map(|name| repo.find_worktree(name).ok())
+        .filter(|wt| wt.validate().is_ok())
+        .map(|wt| wt.path().to_path_buf())
+        .collect()
+}
+
+/// The main checkout a linked worktree belongs to: the working directory of
+/// its common git dir (or the common dir itself for a bare main repo). `None`
+/// when `path` isn't a linked worktree (e.g. a submodule).
+fn worktree_parent(path: &Path) -> Option<PathBuf> {
+    let repo = Repository::open(path).ok()?;
+    if !repo.is_worktree() {
+        return None;
+    }
+    let common = canonical(repo.commondir());
+    Some(match common.file_name() {
+        Some(n) if n == ".git" => common.parent()?.to_path_buf(),
+        _ => common,
+    })
+}
+
+/// Whether a worktree is tool-managed per the ignore globs: any component of
+/// its path below the main checkout (when it lives inside it), else below the
+/// root it sits under, matches. Components *above* that base are the user's
+/// own directory layout and aren't matched.
+fn worktree_ignored(
+    path: &Path,
+    parent: &Path,
+    roots: &[(PathBuf, &String)],
+    ignore_set: &GlobSet,
+) -> bool {
+    let base = if path.starts_with(parent) {
+        Some(parent)
+    } else {
+        roots
+            .iter()
+            .map(|(p, _)| p.as_path())
+            .filter(|p| path.starts_with(p))
+            .max_by_key(|p| p.as_os_str().len())
+    };
+    let rel = match base.and_then(|b| path.strip_prefix(b).ok()) {
+        Some(rel) => rel,
+        // Outside every root: judge only its own directory name.
+        None => match path.file_name() {
+            Some(name) => Path::new(name),
+            None => return false,
+        },
+    };
+    rel.components()
+        .any(|c| ignore_set.is_match(c.as_os_str().to_string_lossy().as_ref()))
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Build every target's [`Repo`] in parallel: each repo is independent, and
+/// the per-repo metadata (libgit2 status + README + language) is the bulk of
+/// scan time.
+fn build_all(targets: &[Target], gitlab_hosts: &[String], now: i64) -> Vec<Repo> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -52,16 +224,23 @@ pub fn scan(
     let out = std::sync::Mutex::new(Vec::with_capacity(targets.len()));
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let (out, next, targets) = (&out, &next, &targets);
+        let (out, next) = (&out, &next);
         for _ in 0..threads {
             scope.spawn(move || loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some((path, root, fav)) = targets.get(i) else {
+                let Some(t) = targets.get(i) else {
                     break;
                 };
-                if let Some(repo) = build_repo(path, root, *fav, gitlab_hosts, now) {
-                    out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
+                let Some(mut repo) = build_repo(&t.path, &t.root, t.favorite, gitlab_hosts, now)
+                else {
+                    continue;
+                };
+                if let Some(parent) = &t.worktree_of {
+                    repo.worktree_of = Some(parent.clone());
+                    repo.worktree_branch =
+                        (repo.git.branch != "HEAD").then(|| repo.git.branch.clone());
                 }
+                out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
             });
         }
     });
@@ -137,6 +316,34 @@ fn find_repos(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
     repos
 }
 
+/// Directories under `root` (to `depth`) whose `.git` is a *file*: linked
+/// worktree candidates, with the same ignore/no-descend rules as
+/// [`find_repos`]. Submodule pointers (also `.git` files) are filtered out
+/// later by [`worktree_parent`].
+fn find_linked_worktrees(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut it = WalkDir::new(root).max_depth(depth).into_iter();
+    while let Some(entry) = it.next() {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name != "." && ignore.is_match(name.as_ref()) {
+            it.skip_current_dir();
+            continue;
+        }
+        let dotgit = entry.path().join(".git");
+        if dotgit.exists() {
+            if dotgit.is_file() {
+                found.push(entry.path().to_path_buf());
+            }
+            it.skip_current_dir();
+        }
+    }
+    found
+}
+
 fn build_repo(
     path: &Path,
     root: &str,
@@ -195,6 +402,8 @@ fn build_repo(
         private: false,
         favorite,
         ai_summary: None,
+        worktree_of: None,
+        worktree_branch: None,
     })
 }
 
@@ -860,6 +1069,63 @@ mod tests {
                 .as_deref(),
             Some("Rust")
         );
+    }
+
+    #[test]
+    fn scan_with_worktrees_marks_linked_worktrees_and_skips_tool_managed() {
+        let (dir, main_path) = crate::git_ops::test_support::init_repo();
+        let root = tempfile::tempdir().unwrap();
+        // Move the main checkout under a root so the walk finds it.
+        let main = root.path().join("proj");
+        fs::rename(&main_path, &main).unwrap();
+        drop(dir);
+        let repo = Repository::open(&main).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+
+        // A sibling worktree on its own branch: a fleet member.
+        let branch = repo.branch("feature", &head, false).unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch.get()));
+        let sibling = root.path().join("proj-feature");
+        repo.worktree("feature", &sibling, Some(&opts)).unwrap();
+
+        // A tool-managed worktree inside the repo under `.claude/`: skipped.
+        fs::create_dir_all(main.join(".claude/worktrees")).unwrap();
+        let tool = main.join(".claude/worktrees/agent-1");
+        repo.worktree("agent-1", &tool, None).unwrap();
+
+        // A `.git` file that isn't a worktree (broken submodule pointer).
+        fs::create_dir_all(root.path().join("stray")).unwrap();
+        fs::write(root.path().join("stray/.git"), "gitdir: /nowhere\n").unwrap();
+
+        let roots = vec![root.path().to_string_lossy().into_owned()];
+        let ignore = vec![".claude".to_string()];
+        let none = HashSet::new();
+
+        // Plain `scan` is unchanged: just the main checkout.
+        let plain = scan(&roots, 3, &ignore, &none, &[], 0);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].worktree_of, None);
+
+        let mut repos = scan_with_worktrees(&roots, 3, &ignore, &none, &[], 0);
+        repos.sort_by(|a, b| a.id.cmp(&b.id));
+        let ids: Vec<&str> = repos.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(repos.len(), 2, "{ids:?}");
+        let main_id = main.to_string_lossy().into_owned();
+        assert_eq!(repos[0].id, main_id);
+        assert_eq!(repos[0].worktree_of, None);
+        let wt = &repos[1];
+        assert!(wt.id.ends_with("proj-feature"), "{}", wt.id);
+        assert_eq!(
+            canonical(Path::new(wt.worktree_of.as_deref().unwrap())),
+            canonical(&main)
+        );
+        assert_eq!(wt.worktree_branch.as_deref(), Some("feature"));
+        assert_eq!(wt.root, roots[0]);
+
+        // Without the ignore glob the `.claude` worktree is a member too.
+        let all = scan_with_worktrees(&roots, 3, &[], &none, &[], 0);
+        assert_eq!(all.len(), 3);
     }
 
     #[test]
