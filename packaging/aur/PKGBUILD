@@ -40,6 +40,10 @@ package() {
 	install -Dm644 "packaging/$_pkgname.desktop" \
 		"$pkgdir/usr/share/applications/$_pkgname.desktop"
 
+	# GNOME Shell search provider (Activities overview repo search).
+	install -Dm644 "packaging/$_pkgname-search-provider.ini" \
+		"$pkgdir/usr/share/gnome-shell/search-providers/$_pkgname-search-provider.ini"
+
 	# Icons.
 	local s
 	for s in 32 64 128; do
