@@ -140,14 +140,14 @@ pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> Outcome {
         .collect()
         .await;
 
-    match cache::open() {
-        Ok(conn) => apply_results_on(&conn, results, now),
-        Err(e) => Outcome {
+    let fetched = results.len();
+    cache::try_with_conn(|conn| Ok(apply_results_on(conn, results, now))).unwrap_or_else(|e| {
+        Outcome {
             updated: 0,
-            errors: results.len(),
+            errors: fetched,
             last_error: Some(e),
-        },
-    }
+        }
+    })
 }
 
 /// Refresh CI state for the current cached repo snapshot, honoring the TTL.

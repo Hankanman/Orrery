@@ -4841,6 +4841,7 @@ dependencies = [
  "ashpd",
  "dirs",
  "futures-util",
+ "git2",
  "ksni",
  "libc",
  "notify-debouncer-mini",

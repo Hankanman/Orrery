@@ -38,10 +38,12 @@ const POLL_SECS: u64 = 180;
 /// tick (immediately, then every `POLL_SECS`) it polls GitHub, fires a desktop
 /// notification for every newly-appeared item via [`crate::notify`], and calls
 /// `on_glance` with the current glance lines + the raw inbox facts so the
-/// caller can paint a tray or a nav badge and feed its attention model. Owns
-/// all threading + the runtime, so callers stay synchronous and UI-agnostic.
-/// No-ops (the thread exits) if a runtime can't be built.
-pub fn watch(on_glance: impl Fn(Vec<String>, Vec<inbox::InboxItem>) + Send + 'static) {
+/// caller can paint a tray or a nav badge and feed its attention model. The
+/// inbox facts are `None` when the inbox fetch failed this tick, so the caller
+/// keeps its last-known items rather than blanking them on a network blip.
+/// Owns all threading + the runtime, so callers stay synchronous and
+/// UI-agnostic. No-ops (the thread exits) if a runtime can't be built.
+pub fn watch(on_glance: impl Fn(Vec<String>, Option<Vec<inbox::InboxItem>>) + Send + 'static) {
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -89,7 +91,9 @@ pub struct PollResult {
     pub fresh: Vec<Notice>,
     /// The raw inbox facts behind the glance — the attention model's host
     /// input, kept fresh by this poll even when the Inbox view never loads.
-    pub inbox: Vec<inbox::InboxItem>,
+    /// `None` when the inbox fetch failed (keep the previous facts); empty
+    /// when there's no GitHub token (nothing to show).
+    pub inbox: Option<Vec<inbox::InboxItem>>,
 }
 
 /// Run one attention poll: gather current items, update the dedupe snapshot, and
@@ -185,17 +189,22 @@ fn short_repo(repo: &str) -> &str {
 /// Gather attention items from GitHub per source, plus the raw inbox facts
 /// they came from. A source is `None` (rather than erroring) when there's no
 /// token or its fetch fails — a degraded poll just shows less, and the
-/// dedupe snapshot for that source is left alone.
-async fn collect() -> (Vec<SourceResult>, Vec<inbox::InboxItem>) {
-    let mut raw = Vec::new();
-    if oauth::github_token().is_none() {
-        return (vec![(SRC_INBOX, None), (SRC_NOTIFICATIONS, None)], raw);
+/// dedupe snapshot for that source is left alone. The raw inbox facts follow
+/// the same rule: `None` on a failed fetch, empty with no token.
+async fn collect() -> (Vec<SourceResult>, Option<Vec<inbox::InboxItem>>) {
+    // Async lookup: the `gh auth token` fallback mustn't block the runtime.
+    if oauth::github_token_async().await.is_none() {
+        return (
+            vec![(SRC_INBOX, None), (SRC_NOTIFICATIONS, None)],
+            Some(Vec::new()),
+        );
     }
 
+    let mut raw = None;
     let inbox_items = match inbox::github_inbox().await {
         Ok(items) => {
             let out = inbox_attention(&items);
-            raw = items;
+            raw = Some(items);
             Some(out)
         }
         Err(e) => {
