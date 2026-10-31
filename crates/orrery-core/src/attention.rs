@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::at_risk::AtRisk;
 use crate::inbox::InboxItem;
 use crate::model::{Host, Repo};
 
@@ -38,6 +39,18 @@ pub enum AttentionKind {
     PrunableBranches,
     /// A coding-agent session is currently running.
     AgentRunning,
+    /// Commits on a detached HEAD that are on no branch (`at_risk`).
+    OrphanCommits,
+    /// Local branches with commits on no remote (`at_risk`). The current
+    /// branch is left to `Ahead` when it has an upstream.
+    UnpushedBranches,
+    /// Open security advisories against the repo's dependencies
+    /// (`advisories`).
+    VulnerableDependencies,
+    /// Stashes older than the threshold (`at_risk`).
+    OldStashes,
+    /// The repo has no remote at all (`at_risk`).
+    NoRemote,
 }
 
 /// How urgently a kind needs the user. Variant order is the sort order
@@ -71,16 +84,27 @@ impl AttentionKind {
     ///   `PrAssigned`: your open PR is waiting on reviewers/CI, not on you.
     ///   `PrunableBranches`: hygiene. `AgentRunning`: working as intended —
     ///   a passive readout, not a call to action.
+    ///
+    /// The fleet-hygiene kinds follow the same split: `OrphanCommits` and
+    /// `UnpushedBranches` are work that exists only on this disk (Attention,
+    /// like `Ahead`); `VulnerableDependencies` is your code at risk
+    /// (Attention); `OldStashes` and `NoRemote` are long-standing states the
+    /// user may well have chosen (Info).
     pub fn severity(self) -> Severity {
         match self {
             AttentionKind::CiFailing | AttentionKind::ReviewRequested => Severity::Urgent,
-            AttentionKind::AgentFinished | AttentionKind::DirtyWorktree | AttentionKind::Ahead => {
-                Severity::Attention
-            }
+            AttentionKind::AgentFinished
+            | AttentionKind::DirtyWorktree
+            | AttentionKind::Ahead
+            | AttentionKind::OrphanCommits
+            | AttentionKind::UnpushedBranches
+            | AttentionKind::VulnerableDependencies => Severity::Attention,
             AttentionKind::Behind
             | AttentionKind::PrAssigned
             | AttentionKind::PrunableBranches
-            | AttentionKind::AgentRunning => Severity::Info,
+            | AttentionKind::AgentRunning
+            | AttentionKind::OldStashes
+            | AttentionKind::NoRemote => Severity::Info,
         }
     }
 }
@@ -169,6 +193,25 @@ pub struct AgentFact {
     pub commits: u32,
 }
 
+/// Open security advisories for a local repo (from `advisories::facts`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvisoryFact {
+    /// Matches `Repo::id` (absolute path).
+    pub repo_id: String,
+    /// Display label of the source ("Dependabot", "cargo audit", …).
+    pub source: String,
+    pub counts: crate::advisories::SeverityCounts,
+}
+
+/// Fleet-hygiene inputs to [`compute_with`]: at-risk work reports
+/// (`at_risk::assess_fleet`) and advisory facts (`advisories::facts`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hygiene<'a> {
+    pub at_risk: &'a [AtRisk],
+    pub advisories: &'a [AdvisoryFact],
+}
+
 /// Score everything into one prioritized list. Pure: same inputs, same
 /// output. Sorted by severity (`Urgent` first), then kind (declaration
 /// order), then repo name (case-insensitive), then summary — a total, stable
@@ -180,17 +223,45 @@ pub fn compute(
     prunable: &[PrunableFact],
     agents: &[AgentFact],
 ) -> Vec<AttentionItem> {
+    compute_with(repos, inbox, ci, prunable, agents, Hygiene::default())
+}
+
+/// [`compute`], plus the fleet-hygiene facts (at-risk work, security
+/// advisories).
+pub fn compute_with(
+    repos: &[Repo],
+    inbox: &[InboxItem],
+    ci: &[CiFact],
+    prunable: &[PrunableFact],
+    agents: &[AgentFact],
+    hygiene: Hygiene<'_>,
+) -> Vec<AttentionItem> {
     let mut items: Vec<AttentionItem> = Vec::new();
 
     // Local git state, straight off the scan snapshot.
     for repo in repos {
         let on_branch = || Some(format!("on {}", repo.git.branch));
         if repo.git.dirty > 0 {
+            // A long-dirty tree (at-risk report) says how long in its detail,
+            // rather than raising a second item for the same state.
+            let days = hygiene
+                .at_risk
+                .iter()
+                .find(|r| r.repo_id == repo.id)
+                .and_then(|r| r.dirty_days);
+            let detail = match days {
+                Some(d) => Some(format!(
+                    "on {} · dirty for {}",
+                    repo.git.branch,
+                    count(d, "day", "days")
+                )),
+                None => on_branch(),
+            };
             items.push(item(
                 local_ref(repo),
                 AttentionKind::DirtyWorktree,
                 count(repo.git.dirty, "uncommitted change", "uncommitted changes"),
-                on_branch(),
+                detail,
             ));
         }
         if repo.git.ahead > 0 {
@@ -280,6 +351,100 @@ pub fn compute(
             kind,
             format!("Agent {verb}: {}", a.program),
             detail,
+        ));
+    }
+
+    for risk in hygiene.at_risk {
+        let repo = repos.iter().find(|r| r.id == risk.repo_id);
+        let r#ref = || id_ref(repos, &risk.repo_id);
+        if risk.orphan_commits > 0 {
+            items.push(item(
+                r#ref(),
+                AttentionKind::OrphanCommits,
+                format!(
+                    "{} on a detached HEAD, on no branch",
+                    count(risk.orphan_commits, "commit", "commits")
+                ),
+                None,
+            ));
+        }
+        // The checked-out branch's lead over its upstream is already the
+        // `Ahead` item; list it here only when it was never pushed.
+        let current = repo.map(|r| r.git.branch.as_str());
+        let branches: Vec<&str> = risk
+            .unpushed_branches
+            .iter()
+            .filter(|b| b.upstream.is_none() || Some(b.name.as_str()) != current)
+            .map(|b| b.name.as_str())
+            .collect();
+        if !branches.is_empty() {
+            let n = branches.len() as u32;
+            let shown = branches
+                .iter()
+                .take(3)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail = if n > 3 {
+                format!("{shown} +{} more", n - 3)
+            } else {
+                shown
+            };
+            items.push(item(
+                r#ref(),
+                AttentionKind::UnpushedBranches,
+                format!("{} not pushed", count(n, "local branch", "local branches")),
+                Some(detail),
+            ));
+        }
+        if let Some(oldest) = risk.old_stashes.iter().map(|s| s.age_days).max() {
+            items.push(item(
+                r#ref(),
+                AttentionKind::OldStashes,
+                count(risk.old_stashes.len() as u32, "old stash", "old stashes"),
+                Some(format!("oldest {}", count(oldest, "day", "days"))),
+            ));
+        }
+        if risk.no_remote {
+            items.push(item(
+                r#ref(),
+                AttentionKind::NoRemote,
+                "No remote: this work exists only on this disk".to_string(),
+                None,
+            ));
+        }
+    }
+
+    for adv in hygiene.advisories {
+        let c = &adv.counts;
+        if c.total() == 0 {
+            continue;
+        }
+        let parts: Vec<String> = [
+            (c.critical, "critical"),
+            (c.high, "high"),
+            (c.medium, "medium"),
+            (c.low, "low"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, label)| format!("{n} {label}"))
+        .collect();
+        let summary = count(
+            c.total(),
+            "vulnerable dependency",
+            "vulnerable dependencies",
+        );
+        let summary = if parts.is_empty() {
+            summary
+        } else {
+            format!("{summary} ({})", parts.join(", "))
+        };
+        items.push(item(
+            id_ref(repos, &adv.repo_id),
+            AttentionKind::VulnerableDependencies,
+            summary,
+            Some(adv.source.clone()),
         ));
     }
 
@@ -702,6 +867,11 @@ mod tests {
             (PrAssigned, Severity::Info),
             (PrunableBranches, Severity::Info),
             (AgentRunning, Severity::Info),
+            (OrphanCommits, Severity::Attention),
+            (UnpushedBranches, Severity::Attention),
+            (VulnerableDependencies, Severity::Attention),
+            (OldStashes, Severity::Info),
+            (NoRemote, Severity::Info),
         ] {
             assert_eq!(kind.severity(), severity, "{kind:?}");
         }
@@ -749,5 +919,132 @@ mod tests {
         let items = compute_repos(&[x, y]);
         let names: Vec<&str> = items.iter().map(|i| i.repo.name.as_str()).collect();
         assert_eq!(names, vec!["apricot", "Zed"]);
+    }
+
+    fn hygiene_items(
+        repos: &[Repo],
+        at_risk: &[AtRisk],
+        adv: &[AdvisoryFact],
+    ) -> Vec<AttentionItem> {
+        compute_with(
+            repos,
+            &[],
+            &[],
+            &[],
+            &[],
+            Hygiene {
+                at_risk,
+                advisories: adv,
+            },
+        )
+    }
+
+    #[test]
+    fn at_risk_reports_become_items() {
+        use crate::at_risk::{OldStash, UnpushedBranch};
+        let mut r = repo("/a");
+        r.git.ahead = 1;
+        let branch = |name: &str, upstream: Option<&str>| UnpushedBranch {
+            name: name.into(),
+            upstream: upstream.map(String::from),
+            commits: 2,
+        };
+        let risk = AtRisk {
+            repo_id: "/a".into(),
+            unpushed_branches: vec![
+                // The current branch with an upstream: covered by `Ahead`.
+                branch("main", Some("origin/main")),
+                branch("feature", None),
+                branch("spike", Some("origin/spike")),
+            ],
+            old_stashes: vec![OldStash {
+                index: 0,
+                message: "wip".into(),
+                created_unix: 0,
+                age_days: 45,
+            }],
+            no_remote: false,
+            orphan_commits: 2,
+            ..AtRisk::default()
+        };
+        let items = hygiene_items(&[r], &[risk], &[]);
+        let got: Vec<(AttentionKind, &str, Option<&str>)> = items
+            .iter()
+            .map(|i| (i.kind, i.summary.as_str(), i.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (AttentionKind::Ahead, "1 commit not pushed", Some("on main")),
+                (
+                    AttentionKind::OrphanCommits,
+                    "2 commits on a detached HEAD, on no branch",
+                    None
+                ),
+                (
+                    AttentionKind::UnpushedBranches,
+                    "2 local branches not pushed",
+                    Some("feature, spike")
+                ),
+                (
+                    AttentionKind::OldStashes,
+                    "1 old stash",
+                    Some("oldest 45 days")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn long_dirty_and_no_remote() {
+        let mut r = repo("/a");
+        r.git.dirty = 2;
+        let risk = AtRisk {
+            repo_id: "/a".into(),
+            dirty_since: Some(0),
+            dirty_days: Some(12),
+            no_remote: true,
+            ..AtRisk::default()
+        };
+        let items = hygiene_items(&[r], &[risk], &[]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, AttentionKind::DirtyWorktree);
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("on main · dirty for 12 days")
+        );
+        assert_eq!(items[1].kind, AttentionKind::NoRemote);
+        assert_eq!(items[1].severity, Severity::Info);
+    }
+
+    #[test]
+    fn advisories_become_items() {
+        use crate::advisories::SeverityCounts;
+        let fact = |counts| AdvisoryFact {
+            repo_id: "/a".into(),
+            source: "Dependabot".into(),
+            counts,
+        };
+        let items = hygiene_items(
+            &[repo("/a")],
+            &[],
+            &[
+                fact(SeverityCounts {
+                    critical: 1,
+                    high: 2,
+                    ..Default::default()
+                }),
+                fact(SeverityCounts::default()),
+            ],
+        );
+        assert_eq!(items.len(), 1, "zero counts raise nothing");
+        assert_eq!(items[0].kind, AttentionKind::VulnerableDependencies);
+        assert_eq!(items[0].severity, Severity::Attention);
+        assert_eq!(
+            items[0].summary,
+            "3 vulnerable dependencies (1 critical, 2 high)"
+        );
+        assert_eq!(items[0].detail.as_deref(), Some("Dependabot"));
+        assert_eq!(items[0].repo.id.as_deref(), Some("/a"));
     }
 }
