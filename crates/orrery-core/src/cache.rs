@@ -215,8 +215,8 @@ fn open_at(path: &std::path::Path) -> Result<Connection, Box<dyn std::error::Err
 }
 
 /// Run `f` on a fresh cache connection, or return `default` if the cache can't
-/// be opened — the shape of every infallible public wrapper below.
-fn with_conn<T>(default: T, f: impl FnOnce(&Connection) -> T) -> T {
+/// be opened — the shape of every infallible public cache wrapper.
+pub(crate) fn with_conn<T>(default: T, f: impl FnOnce(&Connection) -> T) -> T {
     match open() {
         Ok(conn) => f(&conn),
         Err(_) => default,
@@ -224,8 +224,10 @@ fn with_conn<T>(default: T, f: impl FnOnce(&Connection) -> T) -> T {
 }
 
 /// Run a fallible `f` on a fresh cache connection, stringifying any error —
-/// the shape of every `Result`-returning public wrapper below.
-fn try_with_conn<T>(f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T, String> {
+/// the shape of every `Result`-returning public cache wrapper.
+pub(crate) fn try_with_conn<T>(
+    f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> Result<T, String> {
     let conn = open()?;
     f(&conn).map_err(|e| e.to_string())
 }

@@ -55,6 +55,8 @@ pub struct SettingsState {
     pub llama_server: Entity<InputState>,
     /// llama.cpp: a GGUF model URL to download.
     pub llama_url: Entity<InputState>,
+    /// llama.cpp: optional expected SHA-256 of the GGUF download.
+    pub llama_sha256: Entity<InputState>,
     pub client_id: Entity<InputState>,
     pub ignore: Entity<InputState>,
     pub add_root: Entity<InputState>,
@@ -93,6 +95,7 @@ impl SettingsState {
                 &cfg.llama_server_path,
             ),
             llama_url: field(window, cx, "https://…/model.gguf", ""),
+            llama_sha256: field(window, cx, "SHA-256 (optional)", ""),
             client_id: field(window, cx, "GitHub OAuth client id", &cfg.github_client_id),
             ignore: field(window, cx, "node_modules, .cache", &cfg.ignore.join(", ")),
             add_root: field(window, cx, "~/dev", ""),
@@ -441,10 +444,11 @@ fn backend_picker(is_llama: bool, t: &Theme, app: &Entity<OrreryApp>) -> impl In
         )
 }
 
-/// GGUF download row: a URL field + a Download button (progress shows in the AI
+/// GGUF download row: a URL field, an optional SHA-256 field (verified before
+/// the model is installed) and a Download button (progress shows in the AI
 /// note line below). Only shown for the llama.cpp backend.
 fn llama_download_row(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let (app, url_input) = (app.clone(), s.llama_url.clone());
+    let (app, url_input, sha_input) = (app.clone(), s.llama_url.clone(), s.llama_sha256.clone());
     div()
         .flex()
         .flex_col()
@@ -457,9 +461,11 @@ fn llama_download_row(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> 
                 .items_center()
                 .gap(px(8.))
                 .child(div().flex_1().child(Input::new(&s.llama_url)))
+                .child(div().w(px(180.)).child(Input::new(&s.llama_sha256)))
                 .child(button("Download", t, move |cx| {
                     let url = url_input.read(cx).value().to_string();
-                    app.update(cx, |this, cx| this.llama_download(url, cx));
+                    let sha256 = sha_input.read(cx).value().to_string();
+                    app.update(cx, |this, cx| this.llama_download(url, sha256, cx));
                 })),
         )
 }

@@ -2,10 +2,12 @@
 //! The card reads `Row` and never touches the core's serde types directly.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::SharedString;
 use orrery_core::{cache, config, model, scan};
+use orrery_platform::watcher::ChangeSet;
 
 /// Everything the grid card renders, flattened from `model::Repo`.
 #[derive(Clone)]
@@ -351,12 +353,22 @@ pub fn load() -> Snapshot {
 
 /// Re-scan the configured roots from disk (git-heavy — call off the UI thread),
 /// refresh the cache, and return render-ready rows + root count. The filesystem
-/// watcher triggers this so the grid reflects on-disk changes live.
-pub fn rescan() -> Snapshot {
+/// watcher triggers this when something appears under a root, so new repos
+/// are discovered. Repos in `changes` with a working-tree change have their
+/// cached language dropped first, so it's re-detected.
+pub fn rescan(changes: &ChangeSet) -> Snapshot {
+    invalidate_languages(changes);
     let now = now_unix();
     let cfg = config::load();
     let favorites = cache::favorites();
-    let mut repos = scan::scan(&cfg.roots, cfg.scan_depth, &cfg.ignore, &favorites, now);
+    let mut repos = scan::scan(
+        &cfg.roots,
+        cfg.scan_depth,
+        &cfg.ignore,
+        &favorites,
+        &cfg.gitlab_hosts,
+        now,
+    );
     // Carry over persisted host enrichment (stars/visibility) + AI summaries
     // until a fresh pass re-confirms them, then snapshot for instant next-launch
     // paint.
@@ -365,6 +377,56 @@ pub fn rescan() -> Snapshot {
     let _ = cache::store_repos(&repos);
     cache::set_meta(SCANNED_AT_KEY, &now.to_string());
     snapshot(repos, Some(now))
+}
+
+/// Re-scan only the repos in `changes` (the watcher's scoped path), leaving
+/// the rest of `repos` — the app's current snapshot — as they are. A changed
+/// repo that's no longer a repo on disk is dropped; a path that isn't in the
+/// snapshot is ignored (discovery is [`rescan`]'s job). Refreshes the cache
+/// like a full rescan, but leaves the "Scanned …" time alone.
+pub fn rescan_repos(mut repos: Vec<model::Repo>, changes: &ChangeSet) -> Snapshot {
+    invalidate_languages(changes);
+    let now = now_unix();
+    let cfg = config::load();
+    let favorites = cache::favorites();
+    let (mut rebuilt_at, mut rebuilt, mut gone) = (Vec::new(), Vec::new(), HashSet::new());
+    for (i, r) in repos.iter().enumerate() {
+        if !changes.repos.contains_key(Path::new(&r.id)) {
+            continue;
+        }
+        let fav = favorites.contains(&r.id);
+        match scan::scan_repo(Path::new(&r.id), &r.root, fav, &cfg.gitlab_hosts, now) {
+            Some(fresh) => {
+                rebuilt_at.push(i);
+                rebuilt.push(fresh);
+            }
+            None => {
+                gone.insert(r.id.clone());
+            }
+        }
+    }
+    if rebuilt.is_empty() && gone.is_empty() {
+        return snapshot(repos, None);
+    }
+    // Rehydrate host enrichment + summaries on the rebuilt repos only; the
+    // untouched ones already carry theirs.
+    cache::apply_host_info(&mut rebuilt);
+    cache::apply_summaries(&mut rebuilt);
+    for (i, fresh) in rebuilt_at.into_iter().zip(rebuilt) {
+        repos[i] = fresh;
+    }
+    repos.retain(|r| !gone.contains(&r.id));
+    let _ = cache::store_repos(&repos);
+    snapshot(repos, None)
+}
+
+/// Drop the cached language of every repo whose working tree changed.
+fn invalidate_languages(changes: &ChangeSet) {
+    for (path, worktree) in &changes.repos {
+        if *worktree {
+            scan::invalidate_language(path);
+        }
+    }
 }
 
 #[cfg(test)]

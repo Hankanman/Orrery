@@ -16,6 +16,7 @@ use gpui_component::input::{InputEvent, InputState};
 
 use orrery_core::attention::{AttentionItem, AttentionKind, Severity};
 use orrery_core::model::AppConfig;
+use orrery_platform::watcher::ChangeSet;
 
 use crate::card::card;
 use crate::data::Row;
@@ -462,11 +463,14 @@ impl Pass {
 }
 
 /// What a snapshot pass produces: a cheap reload of the cached snapshot (after
-/// enrichment / summaries / cache edits), or a full disk rescan. A rescan
-/// subsumes a reload, so a queued reload is upgraded rather than run twice.
+/// enrichment / summaries / cache edits), a rescan of just the repos the fs
+/// watcher reported, or a full disk rescan. Each subsumes the ones before it,
+/// so a queued request is upgraded rather than run twice.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum SnapKind {
     Reload,
+    /// Rescan the repos in [`SnapshotPass::changes`] only.
+    Refresh,
     Rescan,
 }
 
@@ -480,6 +484,9 @@ pub struct SnapshotPass {
     /// Explore slugs whose clone finished and that should stop showing as
     /// "cloning" once a rescan started after the clone has landed.
     settle_clones: Vec<SharedString>,
+    /// Watcher-reported repo changes not yet picked up by a pass; the next
+    /// Refresh/Rescan to start takes them.
+    changes: ChangeSet,
 }
 
 impl SnapshotPass {
@@ -618,7 +625,9 @@ async fn draft_and_create_pr(
     // Create the PR (network → the shared tokio runtime).
     let t2 = title.clone();
     let result = crate::task::try_run(async move {
-        let token = orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
+        let token = orrery_core::oauth::github_token_async()
+            .await
+            .ok_or("connect GitHub to open a PR")?;
         orrery_core::forge::create_pr(&slug, &head, &base, &t2, &body, &token).await
     })
     .await;
@@ -653,6 +662,32 @@ fn urgent_kind_enabled(cfg: &AppConfig, kind: AttentionKind) -> bool {
         AttentionKind::ReviewRequested => cfg.notify_review_requested,
         AttentionKind::CiFailing => cfg.notify_ci_failure,
         _ => true,
+    }
+}
+
+/// The error toast (title, detail) for a branch-prune outcome, if anything
+/// went wrong: the whole prune failing, or individual branches that couldn't
+/// be deleted. `None` when every prunable branch went.
+fn prune_failure(
+    report: &Result<orrery_core::git_ops::PruneReport, String>,
+) -> Option<(String, String)> {
+    match report {
+        Err(e) => Some(("Prune failed".into(), crate::data::oneline(e.clone()))),
+        Ok(r) if r.failed.is_empty() => None,
+        Ok(r) => {
+            let n = r.failed.len();
+            let title = format!(
+                "Couldn't delete {n} branch{}",
+                if n == 1 { "" } else { "es" }
+            );
+            let detail = r
+                .failed
+                .iter()
+                .map(|(branch, err)| format!("{branch}: {err}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Some((title, crate::data::oneline(detail)))
+        }
     }
 }
 
@@ -711,14 +746,27 @@ impl OrreryApp {
         } else {
             Vec::new()
         };
+        // A rescan of either kind takes every pending watcher change (a full
+        // one still needs their working-tree flags for language invalidation).
+        let changes = if kind == SnapKind::Reload {
+            ChangeSet::default()
+        } else {
+            std::mem::take(&mut self.passes.snapshot.changes)
+        };
+        // A scoped rescan starts from the current fleet; the pass is serial,
+        // so this is the latest applied snapshot.
+        let base = (kind == SnapKind::Refresh).then(|| self.repos.clone());
         cx.notify(); // the footer shows "Scanning…" while a rescan runs
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
                 .spawn(async move {
-                    match kind {
-                        SnapKind::Rescan => crate::data::rescan(),
-                        SnapKind::Reload => crate::data::load(),
+                    match (kind, base) {
+                        (SnapKind::Refresh, Some(repos)) => {
+                            crate::data::rescan_repos(repos, &changes)
+                        }
+                        (SnapKind::Reload, _) => crate::data::load(),
+                        _ => crate::data::rescan(&changes),
                     }
                 })
                 .await;
@@ -728,7 +776,7 @@ impl OrreryApp {
                     this.explore_cloning.remove(slug);
                 }
                 let next = this.passes.snapshot.finish();
-                if kind == SnapKind::Rescan {
+                if kind != SnapKind::Reload {
                     this.after_snapshot(cx);
                 }
                 if let Some(next) = next {
@@ -738,6 +786,22 @@ impl OrreryApp {
             });
         })
         .detach();
+    }
+
+    /// Act on a watcher change set: rescan just the touched repos, or run
+    /// full discovery when something appeared under a root. Changes arriving
+    /// while a pass runs accumulate and are taken by the trailing pass.
+    pub fn request_changes(&mut self, changes: ChangeSet, cx: &mut Context<Self>) {
+        if changes.is_empty() {
+            return;
+        }
+        let kind = if changes.discover {
+            SnapKind::Rescan
+        } else {
+            SnapKind::Refresh
+        };
+        self.passes.snapshot.changes.merge(changes);
+        self.request_snapshot(kind, cx);
     }
 
     /// The fan-out after a fresh scan (launch, watcher, explicit rescan): drop
@@ -1888,9 +1952,11 @@ impl OrreryApp {
 
     /// Download a GGUF model for the llama.cpp backend, streaming progress into
     /// the Settings AI note. The file lands in the app-data models dir; on
-    /// success the model list refreshes so it can be selected.
-    pub fn llama_download(&mut self, url: String, cx: &mut Context<Self>) {
+    /// success the model list refreshes so it can be selected. A non-empty
+    /// `sha256` is verified before the file is installed.
+    pub fn llama_download(&mut self, url: String, sha256: String, cx: &mut Context<Self>) {
         let url = url.trim().to_string();
+        let sha256 = Some(sha256.trim().to_string()).filter(|s| !s.is_empty());
         let note = |this: &mut Self, msg: SharedString| {
             if let Some(s) = &mut this.settings {
                 s.ai_note = msg;
@@ -1929,23 +1995,29 @@ impl OrreryApp {
             let tx_progress = tx.clone();
             let result = crate::task::try_run(async move {
                 let mut last_pct = u64::MAX;
-                orrery_core::llama::download_model(&url, move |downloaded, total| {
-                    let msg = match (downloaded * 100).checked_div(total) {
-                        Some(pct) => {
-                            if pct == last_pct {
-                                return; // throttle to whole-percent steps
+                orrery_core::llama::download_model_verified(
+                    &url,
+                    sha256.as_deref(),
+                    move |downloaded, total| {
+                        let msg = match (downloaded * 100).checked_div(total) {
+                            Some(pct) => {
+                                if pct == last_pct {
+                                    return; // throttle to whole-percent steps
+                                }
+                                last_pct = pct;
+                                format!(
+                                    "Downloading… {pct}% ({} / {})",
+                                    crate::data::human_bytes(downloaded),
+                                    crate::data::human_bytes(total)
+                                )
                             }
-                            last_pct = pct;
-                            format!(
-                                "Downloading… {pct}% ({} / {})",
-                                crate::data::human_bytes(downloaded),
-                                crate::data::human_bytes(total)
-                            )
-                        }
-                        None => format!("Downloading… {}", crate::data::human_bytes(downloaded)),
-                    };
-                    let _ = tx_progress.try_send(msg.into());
-                })
+                            None => {
+                                format!("Downloading… {}", crate::data::human_bytes(downloaded))
+                            }
+                        };
+                        let _ = tx_progress.try_send(msg.into());
+                    },
+                )
                 .await
             })
             .await;
@@ -3182,12 +3254,18 @@ impl OrreryApp {
         cx.notify();
         let path = id.to_string();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .spawn(async move {
-                    let _ = orrery_core::git_ops::prune_branches(&path);
-                })
+            let report = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::prune_branches(&path) })
                 .await;
-            let Ok(rows) = this.update(cx, |this, _| this.rows.clone()) else {
+            let Ok(rows) = this.update(cx, |this, cx| {
+                // Surface what couldn't be pruned (a branch checked out in a
+                // worktree, a permissions error, …) instead of dropping it.
+                if let Some((title, detail)) = prune_failure(&report) {
+                    this.push_toast(ToastKind::Error, title, Some(detail.into()), cx);
+                }
+                this.rows.clone()
+            }) else {
                 return;
             };
             let result = cx
@@ -5027,6 +5105,25 @@ mod tests {
             summary: format!("{kind:?} in {name}"),
             detail: None,
         }
+    }
+
+    #[test]
+    fn prune_failure_reports_only_failures() {
+        use orrery_core::git_ops::PruneReport;
+        let clean = Ok(PruneReport {
+            deleted: vec!["old".into()],
+            failed: Vec::new(),
+        });
+        assert!(prune_failure(&clean).is_none());
+        let partial = Ok(PruneReport {
+            deleted: Vec::new(),
+            failed: vec![("wip".into(), "checked out\nin a worktree".into())],
+        });
+        let (title, detail) = prune_failure(&partial).unwrap();
+        assert_eq!(title, "Couldn't delete 1 branch");
+        assert_eq!(detail, "wip: checked out in a worktree");
+        let (title, _) = prune_failure(&Err("not a repo".into())).unwrap();
+        assert_eq!(title, "Prune failed");
     }
 
     #[test]

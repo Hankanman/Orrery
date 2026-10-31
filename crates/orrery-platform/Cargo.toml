@@ -17,6 +17,7 @@ zbus = "5"               # D-Bus: appearance portal + desktop notifications
 futures-util = "0.3"     # signal stream
 tokio = { version = "1", features = ["rt", "time"] }  # drive the poll interval (+ reqwest) off the UI thread
 notify-debouncer-mini = "0.5"                 # inotify live-watch (debounced); notify 7, same as gpui-component
+git2 = { version = "0.21", default-features = false }  # watcher gitignore filter; the same libgit2 orrery-core already builds
 # StatusNotifierItem tray (pure D-Bus, no GTK). async-io backend to match gpui's
 # zbus (its portal/accessibility connections); the tokio backend would force
 # every zbus connection in the process — including gpui's — through tokio and
