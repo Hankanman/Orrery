@@ -62,9 +62,16 @@ pub fn launch(template: &str, path: &str) -> Result<(), String> {
 }
 
 /// Open a folder path or URL in the system default handler (xdg-open), detached.
+///
+/// Many targets come from remote hosts (inbox items, CI `target_url`s, feed
+/// links), and anyone who can push a commit status controls those strings.
+/// xdg-open dispatches on scheme to arbitrary desktop handlers (`file:`,
+/// `smb:`, custom app schemes), so only http(s) URLs and existing absolute
+/// local paths are opened; everything else is refused.
 pub fn open(target: &str) -> Result<(), String> {
+    let target = openable(target)?;
     Command::new("xdg-open")
-        .arg(target)
+        .arg(&target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -73,9 +80,66 @@ pub fn open(target: &str) -> Result<(), String> {
         .map_err(|e| format!("failed to open `{target}`: {e}"))
 }
 
+/// Validate an [`open`] target: an absolute http(s) URL with a host (returned
+/// normalised by the URL parser), or an absolute path that exists locally.
+fn openable(target: &str) -> Result<String, String> {
+    let target = target.trim();
+    if let Ok(url) = reqwest::Url::parse(target) {
+        return match url.scheme() {
+            "http" | "https" if url.host_str().is_some_and(|h| !h.is_empty()) => {
+                Ok(url.to_string())
+            }
+            _ if std::path::Path::new(target).is_absolute() => local(target),
+            scheme => Err(format!("refusing to open `{scheme}:` link")),
+        };
+    }
+    local(target)
+}
+
+fn local(target: &str) -> Result<String, String> {
+    let path = std::path::Path::new(target);
+    if path.is_absolute() && path.exists() {
+        Ok(target.to_string())
+    } else {
+        Err(format!(
+            "refusing to open `{target}`: not a URL or an existing absolute path"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::dispatch_tokens;
+    use super::{dispatch_tokens, openable};
+
+    #[test]
+    fn opens_http_urls_and_existing_paths() {
+        assert_eq!(
+            openable("https://github.com/o/r/pull/1").unwrap(),
+            "https://github.com/o/r/pull/1"
+        );
+        assert!(openable("http://ci.example.com/build/9").is_ok());
+        assert!(openable("  https://codeberg.org/o/r  ").is_ok());
+        let dir = std::env::temp_dir();
+        assert!(openable(dir.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn refuses_other_schemes_and_junk() {
+        for bad in [
+            "file:///etc/passwd",
+            "smb://evil.example/share",
+            "javascript:alert(1)",
+            "vscode://ext/run",
+            "steam://run/1",
+            "https://",
+            "relative/path",
+            "-flag-looking",
+            "/definitely/not/a/real/path/orrery-test",
+            "",
+        ] {
+            assert!(openable(bad).is_err(), "should refuse {bad:?}");
+        }
+    }
 
     #[test]
     fn prompt_stays_one_token() {
