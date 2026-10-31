@@ -1,4 +1,4 @@
-//! GitHub OAuth device flow (#18) + token resolution.
+//! GitHub OAuth device flow (#18) + token resolution (GitHub, GitLab, Gitea).
 //!
 //! The device flow needs a registered OAuth app `client_id` (set in config).
 //! For enrichment we resolve a token from, in order: the stored OAuth token,
@@ -134,6 +134,14 @@ pub fn gitlab_token() -> Option<String> {
     resolve(None, env_token("ORRERY_GITLAB_TOKEN"), || cli_token("glab"))
 }
 
+/// Resolve a Gitea / Forgejo / Codeberg access token: `$ORRERY_GITEA_TOKEN`.
+/// (Gitea's `tea` CLI has no "print token" command, so there is no CLI
+/// fallback.) One token serves every trusted Gitea host, like GitLab's; it is
+/// only ever sent to `codeberg.org` or a `gitea_hosts` domain.
+pub fn gitea_token() -> Option<String> {
+    env_token("ORRERY_GITEA_TOKEN")
+}
+
 /// Run a blocking token lookup without stalling an async worker: on the
 /// blocking pool when inside a tokio runtime, inline otherwise.
 async fn off_worker(f: fn() -> Option<String>) -> Option<String> {
@@ -152,6 +160,46 @@ pub async fn github_token_async() -> Option<String> {
 /// [`gitlab_token`] for async callers (see [`github_token_async`]).
 pub async fn gitlab_token_async() -> Option<String> {
     off_worker(gitlab_token).await
+}
+
+/// [`gitea_token`] for async callers (see [`github_token_async`]).
+pub async fn gitea_token_async() -> Option<String> {
+    off_worker(gitea_token).await
+}
+
+/// Every host token, resolved once per pass (the CLI lookups run
+/// concurrently, off the async workers).
+#[derive(Debug, Clone, Default)]
+pub struct HostTokens {
+    pub github: Option<String>,
+    pub gitlab: Option<String>,
+    pub gitea: Option<String>,
+}
+
+impl HostTokens {
+    /// The token for `host`, if one was resolved.
+    pub fn get(&self, host: crate::model::Host) -> Option<&str> {
+        match host {
+            crate::model::Host::Github => self.github.as_deref(),
+            crate::model::Host::Gitlab => self.gitlab.as_deref(),
+            crate::model::Host::Gitea => self.gitea.as_deref(),
+        }
+    }
+}
+
+/// Resolve [`HostTokens`] for async callers.
+pub async fn host_tokens_async() -> HostTokens {
+    let (github, gitlab, gitea) = futures_util::future::join3(
+        github_token_async(),
+        gitlab_token_async(),
+        gitea_token_async(),
+    )
+    .await;
+    HostTokens {
+        github,
+        gitlab,
+        gitea,
+    }
 }
 
 /// True if any GitHub token is available.
