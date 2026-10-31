@@ -278,7 +278,8 @@ pub fn to_rows(repos: Vec<model::Repo>) -> Vec<Row> {
             host: match r.host {
                 Some(model::Host::Github) => "github",
                 Some(model::Host::Gitlab) => "gitlab",
-                None => "",
+                // No Gitea brand icon yet; rendered like a remote-less repo.
+                Some(model::Host::Gitea) | None => "",
             }
             .into(),
             private: r.private,
