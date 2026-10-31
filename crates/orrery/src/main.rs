@@ -101,6 +101,9 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Wayland app_id / X11 WM_CLASS: lets the compositor match
+                    // the window to orrery.desktop (icon, taskbar grouping).
+                    app_id: Some(orrery_platform::app_id::APP_ID.to_owned()),
                     ..Default::default()
                 },
                 |window, cx| {
