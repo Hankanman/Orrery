@@ -111,10 +111,16 @@ over untouched code.
   - variable or command expansions (`$VAR`, `${…}`, `$?`, `$(…)`, backticks);
   - `cd other/dir && git …`;
   - in-place edits with `sed -i`, `awk`, `perl -i`, inline `python` or heredoc
-    redirects.
+    redirects;
+  - compound commands: `;`/`&&` chains, pipes, and `find | xargs`;
+  - paths that climb out of the worktree (`../..`).
 
   Instead:
+  - read files with the editor's read and search tools. If no search tool is
+    available, use one plain `grep -rn 'pattern' crates/…` or `ls` with no pipe;
   - make file changes with the editor tools;
+  - keep Bash for `cargo`, `git` (no `cd` first, no `-C`), `gh` and launching
+    the app, one plain command per call from the worktree root;
   - use literal paths;
   - put multi-step logic in a small script file run with `bash ./script.sh`.
 - **Verify before changing.** Check every claimed issue against the code first.
