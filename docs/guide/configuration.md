@@ -21,7 +21,9 @@ Point Orrery at one or more directories. It walks each up to **scan depth** leve
 |---|---|---|
 | Roots | `~/dev` | One or more directories to scan. |
 | Scan depth | `3` | How many levels deep to descend (1–8). |
-| Ignore | `node_modules, .cache, vendor, target, dist, .git` | Comma-separated directory names to skip. |
+| Ignore | `node_modules, .cache, vendor, target, dist, .git, .claude` | Comma-separated directory names to skip. Also hides tool-managed linked worktrees (see [Fleet hygiene](./fleet-hygiene#linked-worktrees)). |
+
+`.claude` joined the default list so worktrees under `.claude/worktrees/` stay out of the fleet. An existing config keeps its own list, so add `.claude` by hand if you want the same behaviour.
 
 ## Hosts
 
