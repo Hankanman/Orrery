@@ -3,7 +3,7 @@
 **Orrery** points at the directories where you keep your projects, discovers every git repo inside them, and lays them out in a dark, dense "mission control" grid. Each card fuses three sources of truth:
 
 1. **Local git** — branch, ahead/behind, uncommitted changes, last commit, detected language
-2. **Your git host** *(GitHub & GitLab, incl. self-hosted)* — stars, topics, releases, issues, visibility
+2. **Your git host** *(GitHub, GitLab and Gitea / Forgejo / Codeberg, incl. self-hosted)* — stars, topics, releases, issues, visibility
 3. **Local AI** — a synthesized "what is this / what's been happening" blurb, generated on-device
 
 …and every card is a launchpad: one click to open the repo in your IDE, or to drop a terminal coding agent (Claude Code, Aider, Codex, …) straight into it.
@@ -39,7 +39,7 @@ Beyond the [Mission Control](./mission-control) grid, Orrery has grown a full co
 | Rendering | GPU via `blade` (Vulkan); Wayland/X11 direct; [gpui-component](https://github.com/longbridge/gpui-component) widgets |
 | Git | `git2` (libgit2, vendored) |
 | Persistence | SQLite + TOML config (XDG dirs) |
-| Hosts | GitHub + GitLab REST/GraphQL (incl. self-hosted) |
+| Hosts | GitHub + GitLab + Gitea / Forgejo REST/GraphQL (incl. self-hosted) |
 | Local AI | [Ollama](https://ollama.com) or a bundled [llama.cpp](https://github.com/ggml-org/llama.cpp) sidecar, over HTTP |
 
 ## How it fits together

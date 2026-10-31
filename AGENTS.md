@@ -38,8 +38,9 @@ crates/orrery-platform/src/ Linux desktop integration (no UI, no Tauri)
   agents.rs                 detect running agent sessions via /proc
 crates/orrery/src/          The GPUI app (UI + the `orrery` binary)
   main.rs                   App/window setup, key bindings, close-to-tray
-  shell.rs                  Header + sidebar nav + view switching + OrreryApp state
-  card.rs drawer.rs palette.rs  RepoCard, the repo drawer, the command palette
+  shell/                    OrreryApp state + Render; header, sidebar, grid, overlay,
+                            attention, passes, confirm; actions/ = per-surface handlers
+  card.rs drawer/ palette.rs  RepoCard, the repo drawer (+ its actions), the command palette
   views/                    inbox feed explore cleanup agents devtools settings newproject
   theme.rs                  The design system as `--orr-*` tokens → gpui colors
   data.rs                   core::model → flat render-ready Row
@@ -57,10 +58,11 @@ cache.rs/ai.rs) and the flattening in `crates/orrery/src/data.rs`.
 
 ```bash
 cargo run -p orrery                 # run the desktop app
-cargo build --workspace             # build everything
-cargo test --workspace              # tests
-cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --locked    # build everything
+cargo test --workspace --locked     # tests
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all                     # format (CI runs --check)
+cargo deny check                    # advisories/licences/bans (CI gate; `cargo install cargo-deny --locked`)
 pnpm install && pnpm icons          # regenerate the committed icon SVGs (optional)
 pnpm docs:dev                       # docs site locally
 ```
@@ -70,12 +72,57 @@ fontconfig). `bash scripts/setup.sh` installs them per-distro.
 
 ## Definition of done
 
-Before you consider a change complete: **`cargo build --workspace`, `cargo test
---workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo
-fmt --all --check` all pass.** These are exactly the CI gates. Match the
-surrounding code's style; don't introduce a formatter/linter pass over untouched
-code. The GUI can't be smoke-tested headlessly, so a panic-free `cargo run` is a
-weak signal for render-path changes — reason about layout/`shape_line` carefully.
+Before you consider a change complete, all of these must pass. They are exactly
+the CI gates:
+
+- `cargo build --workspace --locked`
+- `cargo test --workspace --locked`
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`
+- `cargo fmt --all --check`
+- `cargo deny check`
+
+Then **smoke-run the app**. The gates have missed a startup panic before (a tokio
+timer built outside its runtime). Run
+`timeout -s INT 25 ./target/debug/orrery 2>&1 | tail -20` and check that it doesn't
+panic; exit 124, from the timeout, is success. It uses your real config and cache.
+Leave no `orrery` process running afterwards. A panic-free run is still a weak
+signal for render-path changes, so reason carefully about layout and `shape_line`.
+For visual changes, screenshot the running window
+(`spectacle -b -n -a -o shot.png` on KDE) and look at it.
+
+Match the surrounding code's style, and don't introduce a formatter or linter pass
+over untouched code.
+
+## Working as an agent (and in parallel)
+
+- **One worktree per task.** Each branch gets its own git worktree, created from
+  the latest `origin/main`.
+- **Build in place.** Run plain `cargo …` from the worktree root; it builds into
+  that worktree's own `target/`.
+  - Don't set `CARGO_TARGET_DIR`.
+  - Never share a target dir across worktrees: cargo reports false "Fresh"
+    results and runs stale test binaries built from another tree.
+- **Stay in scope.** When several agents run at once, each owns a stated set of
+  files. If a fix needs something outside your scope, report it rather than
+  editing.
+- **Keep commands checkable by the permission system.** Anything the shell
+  parser can't analyse makes the human approve it by hand. Avoid:
+  - environment-variable prefixes (`FOO=bar cargo …`);
+  - variable or command expansions (`$VAR`, `${…}`, `$?`, `$(…)`, backticks);
+  - `cd other/dir && git …`;
+  - in-place edits with `sed -i`, `awk`, `perl -i`, inline `python` or heredoc
+    redirects.
+
+  Instead:
+  - make file changes with the editor tools;
+  - use literal paths;
+  - put multi-step logic in a small script file run with `bash ./script.sh`.
+- **Verify before changing.** Check every claimed issue against the code first.
+  If it turns out to be wrong, skip it and say why in the PR.
+- **PR body.** List each change, anything skipped and why, and what a human
+  should check by eye in the running app.
+- **Agents don't merge.** The coordinating session (or the human) merges once
+  CI is green.
 
 ## Conventions that matter here
 
@@ -119,5 +166,12 @@ app if needed, keeping private repos out of published images.
   (`gh pr merge --squash --delete-branch`). No force-pushes to `main`.
 - The ruleset requires a PR but **0 approving reviews**, so a solo contributor can self-merge once
   CI passes. Wait for CI (build + tests + clippy) to be green before merging.
+- **Branches must be up to date with `main` before merging** (`gh pr update-branch <n>`, then wait for
+  CI again). When several PRs are queued, merge them one at a time.
+- **The required status check is named `Rust (fmt + clippy + test)`.** Don't rename that CI job. A
+  renamed job never reports under the required name, so every PR is silently blocked.
+- **Versioning follows [Semantic Versioning](https://semver.org).** Tags are `vMAJOR.MINOR.PATCH`,
+  and the three crate versions must match the tag (`packaging/check-version.sh`). Pushing a tag
+  builds a *draft* release; a human publishes it.
 - Small, focused commits; imperative subject line; explain the *why* in the body.
 - Don't commit secrets, tokens, or anything under `~/.config/orrery` / `~/.local/share/orrery`.

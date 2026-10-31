@@ -9,10 +9,10 @@
 //! offered once the app has registered a [`crate::request`] handler to serve it.
 
 use std::collections::{HashMap, VecDeque};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use futures_util::StreamExt;
+use orrery_core::launch;
 use zbus::zvariant::Value;
 use zbus::Connection;
 
@@ -318,17 +318,10 @@ fn resolve<'a>(actions: &'a [NotifyAction], key: &str) -> Option<&'a NotifyActio
 fn run(action: NotifyAction, token: Option<String>) {
     match action {
         NotifyAction::OpenUrl(url) => {
-            // xdg-open directly (not `launch::open`) so the browser gets the
-            // activation token and is allowed to raise itself on Wayland.
-            let mut cmd = Command::new("xdg-open");
-            cmd.arg(&url)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            if let Some(token) = &token {
-                cmd.env("XDG_ACTIVATION_TOKEN", token);
-            }
-            if let Err(e) = cmd.spawn() {
+            // Through `launch::open`, which only opens http(s) URLs and local
+            // paths. It can't pass the activation token on, so on Wayland
+            // the browser may flash rather than take focus.
+            if let Err(e) = launch::open(&url) {
                 eprintln!("[orrery notify] failed to open {url}: {e}");
             }
         }
