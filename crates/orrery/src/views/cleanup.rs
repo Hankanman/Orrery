@@ -23,6 +23,14 @@ pub enum CleanupState {
     Ready(Vec<CleanupRepo>),
 }
 
+/// The Cleanup view's UI state, alongside its loaded [`CleanupState`].
+#[derive(Default)]
+pub(crate) struct CleanupUi {
+    /// Repo id whose "Prune" button is armed, awaiting a confirming second
+    /// click before the (irreversible) bulk branch delete runs.
+    pub(crate) confirm: crate::shell::ArmedConfirm,
+}
+
 /// A repo with prunable branches.
 pub struct CleanupRepo {
     pub id: SharedString,

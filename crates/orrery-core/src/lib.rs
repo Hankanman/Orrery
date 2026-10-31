@@ -1,9 +1,7 @@
-//! orrery-core — Orrery's logic, free of any UI or Tauri.
+//! orrery-core — Orrery's logic, free of any UI.
 //!
-//! Modules are re-exported as-is from the original single-crate layout, so the
-//! inter-module `crate::model` / `crate::config` paths keep resolving here. The
-//! legacy Tauri app re-exports these under its own `crate::` namespace; the
-//! native GPUI app depends on them directly as `orrery_core::*`.
+//! The GPUI app (`crates/orrery`) and `orrery-platform` use these modules
+//! directly as `orrery_core::*`.
 
 pub mod activity;
 pub mod advisories;

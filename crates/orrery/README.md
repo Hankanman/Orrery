@@ -27,9 +27,12 @@ it at your project directories.
 ```
 src/
   main.rs              app/window setup, key bindings, close-to-tray
-  shell.rs             header + sidebar nav + view switching + OrreryApp state
+  shell/               OrreryApp state + Render (mod.rs), header, sidebar, grid,
+                       overlay routing, attention/tray/notify, background passes,
+                       arm-then-confirm; actions/ holds the per-surface handlers
   card.rs              the RepoCard
-  drawer.rs            repo detail drawer (Overview/Changes/PR/Notes/Readme)
+  drawer/              repo detail drawer (Overview/Changes/PR/Notes/Readme);
+                       actions.rs holds its loads and mutations
   palette.rs           command palette (Ctrl+K): actions + repos + code/semantic search
   views/               inbox feed explore cleanup agents devtools settings newproject
   theme.rs             the design system as --orr-* tokens → gpui colors

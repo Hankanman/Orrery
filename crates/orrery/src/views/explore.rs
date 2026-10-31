@@ -24,6 +24,15 @@ pub enum ExploreState {
     Error(SharedString),
 }
 
+/// The Explore view's UI state, alongside its loaded [`ExploreState`].
+#[derive(Default)]
+pub(crate) struct ExploreUi {
+    /// Slugs currently being cloned.
+    pub(crate) cloning: HashSet<SharedString>,
+    /// Clone failures keyed by slug, shown on the card; cleared on retry.
+    pub(crate) errors: HashMap<SharedString, SharedString>,
+}
+
 /// A render-ready starred repo.
 pub struct StarRow {
     pub slug: SharedString,
@@ -42,6 +51,8 @@ pub fn star_row(r: inbox::RemoteRepo) -> StarRow {
     let (host, base) = match r.host {
         Host::Github => ("github", "https://github.com"),
         Host::Gitlab => ("gitlab", "https://gitlab.com"),
+        // Stars only come from GitHub today; no Gitea brand icon yet.
+        Host::Gitea => ("", "https://codeberg.org"),
     };
     StarRow {
         url: format!("{base}/{}", r.slug).into(),

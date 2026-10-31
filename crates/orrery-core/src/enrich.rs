@@ -1,6 +1,7 @@
 //! Refresh host enrichment (stars / topics / open issues / latest release /
-//! visibility) for scanned repos from GitHub & GitLab, then persist it to the
-//! host cache so the grid can overlay it (see [`cache::apply_host_info`]).
+//! visibility) for scanned repos from GitHub, GitLab and Gitea / Forgejo /
+//! Codeberg, then persist it to the host cache so the grid can overlay it
+//! (see [`cache::apply_host_info`]).
 //!
 //! This is the producer side of the enrichment pipeline; `cache::apply_host_info`
 //! / `data` is the consumer. It is network-bearing and async, so the app drives
@@ -10,8 +11,9 @@
 //! **Token egress.** GitHub tokens only ever go to `api.github.com`. GitLab
 //! tokens are attached by [`forge::fetch`] only when the remote's domain is
 //! trusted (`gitlab.com` or a host on the user's `gitlab_hosts` allowlist), so a
-//! hostile repo remote can't exfiltrate one. Public metadata is still fetched
-//! unauthenticated for untrusted hosts.
+//! hostile repo remote can't exfiltrate one. Gitea tokens follow the same rule
+//! (`codeberg.org` or a host on `gitea_hosts`). Public metadata is still
+//! fetched unauthenticated for untrusted hosts.
 
 use std::collections::HashSet;
 
@@ -79,10 +81,9 @@ pub(crate) fn stale_remotes<'a>(
 ///
 /// `force` ignores the TTL and re-fetches every repo (the manual "Fetch all").
 pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> usize {
-    let cfg = config::load();
+    let trusted = forge::TrustedHosts::from_config(&config::load());
     // Resolved once per pass (each may spawn a CLI), off the async workers.
-    let (github, gitlab) =
-        futures_util::future::join(oauth::github_token_async(), oauth::gitlab_token_async()).await;
+    let tokens = oauth::host_tokens_async().await;
     let fresh = if force {
         HashSet::new()
     } else {
@@ -96,15 +97,10 @@ pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> usize {
 
     let results = stream::iter(jobs)
         .map(|(host, domain, slug)| {
-            let github = github.clone();
-            let gitlab = gitlab.clone();
-            let gitlab_hosts = cfg.gitlab_hosts.clone();
+            let (tokens, trusted) = (&tokens, &trusted);
             async move {
-                let token = match host {
-                    Host::Github => github.as_deref(),
-                    Host::Gitlab => gitlab.as_deref(),
-                };
-                match forge::fetch(host, &domain, &slug, token, &gitlab_hosts).await {
+                let token = tokens.get(host);
+                match forge::fetch(host, &domain, &slug, token, trusted).await {
                     Ok(info) => Some((domain, slug, info)),
                     // A failed fetch (offline, rate-limited, 404, untrusted) just
                     // leaves the prior cached value in place — graceful by design.

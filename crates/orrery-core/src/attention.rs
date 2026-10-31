@@ -590,6 +590,9 @@ mod tests {
             number: 7,
             draft,
             host: Host::Github,
+            domain: "github.com".into(),
+            created_at: 0,
+            waiting_since: 0,
         }
     }
 

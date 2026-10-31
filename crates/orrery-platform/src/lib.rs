@@ -1,4 +1,4 @@
-//! orrery-platform — Linux desktop integration, free of UI and Tauri.
+//! orrery-platform — Linux desktop integration, free of UI.
 
 pub mod agents;
 pub mod app_id;

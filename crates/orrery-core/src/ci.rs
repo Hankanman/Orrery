@@ -12,9 +12,11 @@
 //! silently blank out. Only a definitive answer (including a definitive
 //! "none") is written.
 //!
-//! **GitLab is out of scope** for now: [`github_ci`] only speaks the
-//! GitHub Actions API, so jobs are built solely for `Host::Github` repos.
-//! GitLab pipelines can layer on later behind the same cache shape.
+//! **Hosts.** GitHub repos use the Actions API ([`github_ci`]); Gitea /
+//! Forgejo / Codeberg repos use the combined commit-status API ([`gitea_ci`]),
+//! which Gitea/Forgejo Actions, Woodpecker and other CI all report into.
+//! **GitLab is out of scope** for now; its pipelines can layer on later
+//! behind the same cache shape.
 
 use std::collections::HashSet;
 
@@ -35,10 +37,11 @@ const TTL_SECS: i64 = 5 * 60;
 /// Max concurrent CI-API requests in flight during a pass.
 const CONCURRENCY: usize = 8;
 
-/// A pending CI fetch: `(remote domain, slug, repo path)`. Domain + slug is
-/// the `ci_cache` key (the #159 compound-key lesson); the path is where the
-/// default branch is read from (local `origin/HEAD` — no extra API call).
-type Job = (String, String, String);
+/// A pending CI fetch: `(host, remote domain, slug, repo path)`. Domain +
+/// slug is the `ci_cache` key (the #159 compound-key lesson); the path is
+/// where the default branch is read from (local `origin/HEAD` — no extra API
+/// call).
+type Job = (Host, String, String, String);
 
 /// What one pass did. `updated` counts entries (re)written; `errors` counts
 /// fetches that failed *without* touching the cache (last known state kept),
@@ -61,14 +64,27 @@ impl Outcome {
     }
 }
 
-/// Build the work list: GitHub-remoted repos with a slug whose cache entry is
-/// stale/missing, deduped by (domain, slug) exactly like the enrich pass
-/// (shared [`enrich::stale_remotes`]). Pure (no I/O); unit-tested below.
+/// Build the work list: GitHub- and Gitea-remoted repos with a slug whose
+/// cache entry is stale/missing, deduped by (domain, slug) exactly like the
+/// enrich pass (shared [`enrich::stale_remotes`]). Pure (no I/O);
+/// unit-tested below.
 fn build_jobs(repos: &[Repo], fresh: &HashSet<(String, String)>) -> Vec<Job> {
     // GitLab CI is out of scope (module docs).
-    enrich::stale_remotes(repos, fresh, |r| r.host == Some(Host::Github))
-        .into_iter()
-        .map(|(r, domain, slug)| (domain, slug, r.id.clone()))
+    enrich::stale_remotes(repos, fresh, |r| {
+        matches!(r.host, Some(Host::Github | Host::Gitea))
+    })
+    .into_iter()
+    .filter_map(|(r, domain, slug)| Some((r.host?, domain, slug, r.id.clone())))
+    .collect()
+}
+
+/// Drop the jobs the pass can't run with the tokens it has: GitHub's Actions
+/// API needs a token, so without one GitHub jobs are skipped (nothing is
+/// blanked). Gitea jobs always run — a public repo's statuses are readable
+/// unauthenticated, and the token is attached only to a trusted host.
+fn runnable(jobs: Vec<Job>, have_github_token: bool) -> Vec<Job> {
+    jobs.into_iter()
+        .filter(|(host, ..)| *host != Host::Github || have_github_token)
         .collect()
 }
 
@@ -102,18 +118,14 @@ fn apply_results_on(conn: &rusqlite::Connection, results: Vec<FetchResult>, now:
     outcome
 }
 
-/// Refresh the default-branch CI state for every GitHub-remoted repo whose
-/// cache entry is missing or older than the TTL, and persist the results.
-/// Returns what happened (see [`Outcome`]); with no token the pass is a no-op
-/// (an unconnected app legitimately has no CI source — nothing is blanked).
+/// Refresh the default-branch CI state for every GitHub- or Gitea-remoted
+/// repo whose cache entry is missing or older than the TTL, and persist the
+/// results. Returns what happened (see [`Outcome`]); GitHub repos are skipped
+/// without a GitHub token (an unconnected app legitimately has no CI source —
+/// nothing is blanked).
 ///
 /// `force` ignores the TTL and re-fetches every repo (the manual "Fetch all").
 pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> Outcome {
-    // Resolve the token once for the whole pass (it may spawn `gh`), not once
-    // per repo.
-    let Some(token) = oauth::github_token_async().await else {
-        return Outcome::default();
-    };
     let fresh = if force {
         HashSet::new()
     } else {
@@ -123,18 +135,36 @@ pub async fn refresh(repos: &[Repo], now: i64, force: bool) -> Outcome {
     if jobs.is_empty() {
         return Outcome::default();
     }
+    // Resolve the tokens once for the whole pass (they may spawn `gh`/`glab`),
+    // not once per repo.
+    let tokens = oauth::host_tokens_async().await;
+    let jobs = runnable(jobs, tokens.github.is_some());
+    if jobs.is_empty() {
+        return Outcome::default();
+    }
+    let trusted = forge::TrustedHosts::from_config(&crate::config::load());
 
-    let token = token.as_str();
+    let (tokens, trusted) = (&tokens, &trusted);
     let results: Vec<FetchResult> = stream::iter(jobs)
-        .map(|(domain, slug, path)| async move {
+        .map(|(host, domain, slug, path)| async move {
             // Default branch from the local clone (origin/HEAD, else
             // main/master) — a fast ref read, no API call. `None` (bare
             // oddities) falls back to the latest run on any branch.
             let branch = git_ops::default_branch(&path);
-            match github_ci(token, &slug, branch.as_deref()).await {
-                Ok(status) => Ok((domain, slug, status)),
-                Err(e) => Err(e),
-            }
+            let status = match host {
+                Host::Gitea => {
+                    let token = tokens
+                        .gitea
+                        .as_deref()
+                        .filter(|_| forge::gitea_host_trusted(&domain, &trusted.gitea));
+                    gitea_ci(&domain, &slug, branch.as_deref(), token).await
+                }
+                _ => match tokens.github.as_deref() {
+                    Some(token) => github_ci(token, &slug, branch.as_deref()).await,
+                    None => Err("no GitHub token".into()),
+                },
+            };
+            status.map(|status| (domain, slug, status))
         })
         .buffer_unordered(CONCURRENCY)
         .collect()
@@ -277,6 +307,94 @@ fn workflow_run_state(status: &str, conclusion: Option<&str>) -> &'static str {
     }
 }
 
+// ── Gitea / Forgejo commit status ────────────────────────────────────────────
+
+/// A Gitea `GET /repos/{owner}/{repo}/commits/{ref}/status` response (the
+/// combined status of every context reported on that commit).
+#[derive(Deserialize)]
+struct GiteaCombined {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    statuses: Vec<GiteaStatus>,
+}
+
+#[derive(Deserialize)]
+struct GiteaStatus {
+    /// Older Gitea calls this `status`, newer adds `state`; read either.
+    #[serde(default, alias = "state")]
+    status: Option<String>,
+    #[serde(default)]
+    target_url: Option<String>,
+}
+
+/// Map a Gitea combined status to our four-state vocabulary, linking the
+/// first failing context (else the first context with a link). No contexts
+/// at all is a definitive "none". `warning` is terminal but not a failure,
+/// so it is ambient ("none") rather than raising attention. Pure.
+fn gitea_combined_status(c: GiteaCombined) -> CiStatus {
+    if c.statuses.is_empty() {
+        return CiStatus::none();
+    }
+    let state = match c.state.as_deref() {
+        Some("success") => "success",
+        Some("failure") | Some("error") => "failure",
+        Some("pending") => "pending",
+        _ => "none",
+    };
+    let failing = |s: &&GiteaStatus| matches!(s.status.as_deref(), Some("failure" | "error"));
+    let url = c
+        .statuses
+        .iter()
+        .filter(|s| state != "failure" || failing(s))
+        .find_map(|s| s.target_url.clone().filter(|u| !u.is_empty()));
+    CiStatus {
+        state: state.into(),
+        url,
+    }
+}
+
+/// Latest combined commit status of `branch` on a Gitea / Forgejo /
+/// Codeberg repo. Same error rules as [`github_ci`]: a 404 (unknown repo or
+/// ref) is a definitive "none"; 401/403/429/5xx are errors that leave the
+/// cached state alone. `token` must already be filtered to a trusted host by
+/// the caller. No default branch → "none" (Gitea can't resolve `HEAD` here).
+pub async fn gitea_ci(
+    domain: &str,
+    slug: &str,
+    branch: Option<&str>,
+    token: Option<&str>,
+) -> Result<CiStatus, String> {
+    if !forge::valid_host(domain) {
+        return Err(format!("refusing to query untrusted host: {domain}"));
+    }
+    if !forge::valid_gitea_slug(slug) {
+        return Err(format!("not an owner/name slug: {slug}"));
+    }
+    let Some(branch) = branch else {
+        return Ok(CiStatus::none());
+    };
+    let url = format!(
+        "{}/repos/{slug}/commits/{}/status",
+        forge::gitea_api(domain),
+        urlencoding::encode(branch)
+    );
+    let mut req = forge::client().get(url);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let resp = forge::send(req, domain).await?;
+    let status = resp.status();
+    if !status.is_success() {
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(CiStatus::none());
+        }
+        return Err(format!("Gitea CI {status}"));
+    }
+    let combined: GiteaCombined = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(gitea_combined_status(combined))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn build_jobs_takes_github_repos_only() {
+    fn build_jobs_takes_github_and_gitea_repos_only() {
         // GitLab CI is out of scope; repos without a slug can't be queried.
         let gitlab = sample("/gl", Host::Gitlab, "gitlab.com", "o/gl");
         let no_slug = Repo {
@@ -343,11 +461,75 @@ mod tests {
             ..sample("/nh", Host::Github, "github.com", "o/nh")
         };
         let gh = sample("/gh", Host::Github, "github.com", "o/gh");
-        let jobs = build_jobs(&[gitlab, no_slug, no_host, gh], &HashSet::new());
+        let gt = sample("/gt", Host::Gitea, "codeberg.org", "o/gt");
+        let jobs = build_jobs(&[gitlab, no_slug, no_host, gh, gt], &HashSet::new());
         assert_eq!(
             jobs,
-            vec![("github.com".into(), "o/gh".into(), "/gh".into())]
+            vec![
+                (
+                    Host::Github,
+                    "github.com".into(),
+                    "o/gh".into(),
+                    "/gh".into()
+                ),
+                (
+                    Host::Gitea,
+                    "codeberg.org".into(),
+                    "o/gt".into(),
+                    "/gt".into()
+                ),
+            ]
         );
+        // Without a GitHub token only the Gitea job survives.
+        let kept = runnable(jobs.clone(), false);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, Host::Gitea);
+        assert_eq!(runnable(jobs, true).len(), 2);
+    }
+
+    #[test]
+    fn gitea_combined_status_maps_states_and_links_the_failure() {
+        let parse = |v: serde_json::Value| {
+            gitea_combined_status(serde_json::from_value::<GiteaCombined>(v).unwrap())
+        };
+        // Trimmed from a Codeberg combined-status response.
+        let st = parse(serde_json::json!({
+            "state": "failure",
+            "sha": "abc",
+            "total_count": 2,
+            "statuses": [
+                {"status": "success", "context": "lint", "target_url": "https://ci.example/1"},
+                {"status": "failure", "context": "test", "target_url": "https://ci.example/2"}
+            ]
+        }));
+        assert_eq!(st.state, "failure");
+        assert_eq!(st.url.as_deref(), Some("https://ci.example/2"));
+
+        let st = parse(serde_json::json!({
+            "state": "success",
+            "statuses": [{"state": "success", "target_url": "https://ci.example/9"}]
+        }));
+        assert_eq!(st.state, "success");
+        assert_eq!(st.url.as_deref(), Some("https://ci.example/9"));
+
+        assert_eq!(
+            parse(serde_json::json!({"state": "error", "statuses": [{"status": "error"}]})).state,
+            "failure"
+        );
+        assert_eq!(
+            parse(serde_json::json!({"state": "pending", "statuses": [{"status": "pending"}]}))
+                .state,
+            "pending"
+        );
+        assert_eq!(
+            parse(serde_json::json!({"state": "warning", "statuses": [{"status": "warning"}]}))
+                .state,
+            "none"
+        );
+        // No contexts reported: a definitive "none", whatever `state` says.
+        let st = parse(serde_json::json!({"state": "pending", "statuses": []}));
+        assert_eq!(st.state, "none");
+        assert_eq!(st.url, None);
     }
 
     #[test]
@@ -363,8 +545,18 @@ mod tests {
         assert_eq!(
             jobs,
             vec![
-                ("github.com".into(), "o/test".into(), "/a".into()),
-                ("github.com".into(), "o/stale".into(), "/c".into()),
+                (
+                    Host::Github,
+                    "github.com".into(),
+                    "o/test".into(),
+                    "/a".into()
+                ),
+                (
+                    Host::Github,
+                    "github.com".into(),
+                    "o/stale".into(),
+                    "/c".into()
+                ),
             ]
         );
     }

@@ -31,6 +31,30 @@ Public repos enrich without signing in (and an authenticated `gh` CLI is used au
 
 For **self-hosted GitLab**, only explicitly trusted domains are ever sent a token — a repo's remote domain can't trick Orrery into leaking credentials to an arbitrary host.
 
+| Host | Token source | Trusted domains |
+|---|---|---|
+| GitHub | Sign-in, `ORRERY_GITHUB_TOKEN`, or `gh auth token` | `github.com` |
+| GitLab | `ORRERY_GITLAB_TOKEN`, or `glab auth token` | `gitlab.com` plus `gitlabHosts` |
+| Gitea / Forgejo / Codeberg | `ORRERY_GITEA_TOKEN` | `codeberg.org` plus `giteaHosts` |
+
+A self-hosted GitLab whose name starts with `gitlab.` is recognised automatically (it's still only sent a token when it's on `gitlabHosts`). A self-hosted Gitea or Forgejo is only recognised when it's on `giteaHosts`:
+
+```toml
+gitlabHosts = ["code.acme.io"]
+giteaHosts = ["git.acme.io"]
+```
+
+With a token, the Inbox and notifications cover `gitlab.com` and every `gitlabHosts` entry (one GitLab token for all of them), and `codeberg.org` and every `giteaHosts` entry likewise.
+
+### Stale thresholds
+
+| Key | Default | Meaning |
+|---|---|---|
+| `stalePrDays` | `7` | Days a PR you opened may stay open before it counts as stale. |
+| `staleReviewDays` | `2` | Days a review request may wait on you before it counts as stale. |
+
+Set either to `0` to turn it off. The ages are tracked now; the Inbox badges that show them come in a later release.
+
 ## Where things live
 
 | Path | Contents |
