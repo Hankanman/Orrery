@@ -6,6 +6,7 @@
 //! GNOME) the user can rebind it in their global-shortcuts settings. `on_activate`
 //! fires whenever the shortcut is triggered. Degrades gracefully (logs, and the
 //! thread exits) if the portal is unavailable, like the rest of platform.
+//! Registers the app id with the portal first; see [`crate::app_id`].
 
 use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
@@ -33,16 +34,34 @@ pub fn spawn(on_activate: impl Fn() + Send + 'static) {
 }
 
 async fn run(on_activate: impl Fn()) -> ashpd::Result<()> {
-    let shortcuts = GlobalShortcuts::new().await?;
+    // KDE's portal rejects a GlobalShortcuts session from a caller it can't put
+    // an app id to ("NotAllowed: An app id is required"). Register ours on a
+    // connection of our own: registration must come before any other portal
+    // call on the connection, and ashpd's shared one may already be in use by
+    // gpui. A failure is logged with a hint; we still try, because a launch from
+    // the desktop entry lets the portal infer the id from the systemd scope.
+    let conn = zbus::Connection::session().await?;
+    crate::app_id::register(&conn).await;
+    let shortcuts = GlobalShortcuts::with_connection(conn).await?;
     let session = shortcuts.create_session(Default::default()).await?;
 
     let activate =
         NewShortcut::new(SHORTCUT_ID, "Summon Orrery").preferred_trigger(Some(PREFERRED_TRIGGER));
-    // Await the bind so the registration completes before we listen; the response
-    // itself we don't need (the desktop owns the final trigger).
-    shortcuts
+    // Await the bind's response so the registration completes (or its refusal
+    // surfaces) before we listen. The desktop owns the final trigger, which may
+    // differ from the preferred one; log it so "the hotkey does nothing" is
+    // diagnosable.
+    let bound = shortcuts
         .bind_shortcuts(&session, &[activate], None, Default::default())
-        .await?;
+        .await?
+        .response()?;
+    for s in bound.shortcuts() {
+        let trigger = match s.trigger_description() {
+            "" => "unassigned",
+            t => t,
+        };
+        eprintln!("[orrery shortcut] bound '{}' → {trigger}", s.id());
+    }
 
     // The stream borrows nothing of `session`, but `session` must outlive it:
     // dropping the session ends the registration. Both stay in scope here.

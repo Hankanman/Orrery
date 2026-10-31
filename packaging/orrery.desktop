@@ -9,4 +9,4 @@ Terminal=false
 Categories=Development;RevisionControl;
 Keywords=git;repos;dashboard;developer;
 StartupNotify=true
-StartupWMClass=Orrery
+StartupWMClass=orrery

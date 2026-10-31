@@ -50,10 +50,38 @@ chmod +x "$LD"
 # because the bundled strip chokes on the .relr.dyn section modern linkers emit.
 export APPIMAGE_EXTRACT_AND_RUN=1
 export NO_STRIP=1
+# On a desktop with AppImageLauncher, stop it intercepting linuxdeploy (and
+# the appimagetool it runs) with an "integrate this AppImage?" dialog.
+export APPIMAGELAUNCHER_DISABLE=1
 export OUTPUT="Orrery-x86_64.AppImage"
+
+# Libraries to take from the host instead of bundling. linuxdeploy already
+# skips the AppImage excludelist (glibc, libGL, libxcb, libX11, fontconfig,
+# freetype, libwayland-client, ...); these are the extra ones it would
+# otherwise pull in from the (older) build host:
+# - libxkbcommon(-x11) read the host's XKB data and Compose tables under
+#   /usr/share/X11. An older bundled copy can't parse a newer host's tables
+#   ("unrecognized keysym dead_hamza") and Compose sequences break. Every
+#   desktop that can run a GUI ships both.
+# - libxcb-xkb, libXau and libXdmcp come with libxcb (and go wherever it goes),
+#   which the excludelist already leaves to the host; bundling them pairs our
+#   copies with the host's libxcb. Dropping libXdmcp also drops libbsd/libmd,
+#   which only it pulled in.
+EXCLUDE_LIBS=(
+  'libxkbcommon.so*'
+  'libxkbcommon-x11.so*'
+  'libxcb-xkb.so*'
+  'libXau.so*'
+  'libXdmcp.so*'
+)
+exclude_args=()
+for lib in "${EXCLUDE_LIBS[@]}"; do
+  exclude_args+=(--exclude-library "$lib")
+done
 
 "$LD" \
   --appdir "$APPDIR" \
+  "${exclude_args[@]}" \
   --desktop-file "$APPDIR/usr/share/applications/orrery.desktop" \
   --icon-file "$APPDIR/usr/share/icons/hicolor/512x512/apps/orrery.png" \
   --output appimage
