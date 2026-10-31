@@ -89,6 +89,15 @@ pub struct Repo {
     pub favorite: bool,
     /// Local-AI summary (Phase 3).
     pub ai_summary: Option<String>,
+    /// For a linked worktree: the id (absolute path) of the main checkout it
+    /// belongs to, so the UI can group it under the parent's card. `None` for
+    /// a main checkout. See `scan::scan_with_worktrees`.
+    #[serde(default)]
+    pub worktree_of: Option<String>,
+    /// For a linked worktree: the branch it has checked out (`None` when its
+    /// HEAD is detached, and always `None` for a main checkout).
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
 }
 
 /// Host-side enrichment for a repo, fetched from GitHub/GitLab/Gitea.
@@ -188,6 +197,12 @@ pub struct AppConfig {
     /// + `notify_attention` like the urgent model kinds.
     #[serde(default = "default_true")]
     pub notify_agent_finished: bool,
+    /// Run `cargo-audit` / `npm audit` locally for repos without a GitHub
+    /// remote (`advisories::refresh_local`). Off by default: even sandboxed,
+    /// it runs a tool over a lockfile from a repo that may come from anywhere.
+    /// GitHub repos use Dependabot alerts regardless.
+    #[serde(default)]
+    pub local_audits: bool,
     /// Days a pull request you authored may stay open before it counts as
     /// stale (see `inbox::StaleThresholds`). 0 = never stale.
     #[serde(default = "default_stale_pr_days")]

@@ -47,6 +47,7 @@ export default defineConfig({
           { text: "Mission Control", link: "/guide/mission-control" },
           { text: "The repo drawer", link: "/guide/repo-drawer" },
           { text: "Fleet operations", link: "/guide/fleet" },
+          { text: "Fleet hygiene", link: "/guide/fleet-hygiene" },
           { text: "Launchers", link: "/guide/launchers" },
           { text: "Notifications & tray", link: "/guide/notifications" },
           { text: "Maintenance & tools", link: "/guide/maintenance" },
