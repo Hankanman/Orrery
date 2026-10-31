@@ -47,6 +47,26 @@ pub enum AgentsState {
     Ready(AgentsData),
 }
 
+/// The Agents view's UI state, alongside its loaded [`AgentsState`].
+#[derive(Default)]
+pub(crate) struct AgentsUi {
+    /// Whether the Agents-view poll loop is running (guards against duplicates).
+    pub(crate) polling: bool,
+    /// Worktree path whose "Remove worktree" button is armed, awaiting a
+    /// confirming second click. Discard arms the same slot with a
+    /// `discard:`-prefixed key so the two destructive buttons can't confirm
+    /// each other.
+    pub(crate) confirm: crate::shell::ArmedConfirm,
+    /// Worktree path whose finished-session review diff is expanded, if any
+    /// (one at a time — the diff is the heavy part).
+    pub(crate) review: Option<SharedString>,
+    /// The loaded review diff for `review`; `None` while the background
+    /// branch-diff load is in flight.
+    pub(crate) review_diff: Option<SharedString>,
+    /// Worktree paths with an Open-PR flow in flight (re-click guard).
+    pub(crate) pr_busy: std::collections::HashSet<SharedString>,
+}
+
 /// Everything one agents scan produces: live sessions inside repos, plus the
 /// recorded dispatched worktrees (running or not).
 #[derive(Default)]

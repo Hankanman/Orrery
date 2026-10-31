@@ -1,6 +1,5 @@
 # orrery — the native GPUI desktop app. Depends on orrery-core for all logic;
-# carries the UI (theme, cards, shell, views). This is the whole product now
-# that the legacy Tauri shell (src-tauri/) and React frontend are gone.
+# carries the UI (theme, cards, shell, views).
 [package]
 name = "orrery"
 version = "2026.10.1"

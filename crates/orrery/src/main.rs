@@ -1,10 +1,8 @@
-//! Native Orrery (rewrite) — the desktop GPUI app. All logic comes from the
-//! `orrery-core` crate (scan/git/forge/inbox/ai/cache/config); this crate is
-//! purely the UI: theme, cards, shell, views. No webview, no IPC. Reading the
-//! shipping `~/.local/share/orrery/cache.sqlite` is `orrery_core::cache`.
-//!
-//! Phase 1: real `--orr-*` theme + faithful RepoCard. Phase 2: the app shell —
-//! header + sidebar nav + view switching (`shell.rs`).
+//! Orrery — the desktop GPUI app. All logic comes from the `orrery-core` crate
+//! (scan/git/forge/inbox/ai/cache/config) and desktop integration from
+//! `orrery-platform`; this crate is the UI: the `--orr-*` theme, cards, the
+//! app shell (header + sidebar nav + view switching, `shell/`), the repo
+//! drawer, and the views.
 
 mod assets;
 mod card;
@@ -29,7 +27,7 @@ use gpui::{
 };
 use gpui_component::Root;
 
-use shell::{OrreryApp, View};
+use shell::OrreryApp;
 use theme::Theme;
 
 actions!(
@@ -107,72 +105,7 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| {
-                        // Start the live wiring: filesystem watch, appearance,
-                        // attention poll, and system tray all marshal back onto
-                        // this entity. Returns the tray handle (if the tray
-                        // came up — the app pushes attention summaries to it)
-                        // plus the watcher handle (re-armed when repos are
-                        // added).
-                        let (tray, watcher) = live::spawn(cx);
-                        OrreryApp {
-                            view: View::Grid,
-                            rows: snap.rows,
-                            roots: snap.roots,
-                            repos: snap.repos,
-                            theme,
-                            config,
-                            attention: Vec::new(),
-                            polled_inbox: None,
-                            // Seed CI states from the cache so a failing
-                            // default branch shows on the first attention
-                            // pass, before the CI pass first runs (offline
-                            // included). The pass refreshes them after.
-                            ci_states: orrery_core::cache::all_ci_states(),
-                            ci_last_error: None,
-                            attention_items: Vec::new(),
-                            attention_by_repo: Default::default(),
-                            attention_seen: None,
-                            tray_attention: Default::default(),
-                            overlay: None,
-                            drawer: Default::default(),
-                            inbox: Default::default(),
-                            feed: Default::default(),
-                            explore: Default::default(),
-                            cleanup: Default::default(),
-                            cleanup_confirm: None,
-                            cleanup_confirm_gen: 0,
-                            agents: Default::default(),
-                            active_agents: Default::default(),
-                            agents_polling: false,
-                            agents_confirm: None,
-                            agents_confirm_gen: 0,
-                            agents_review: None,
-                            agents_review_diff: None,
-                            agents_pr_busy: Default::default(),
-                            explore_cloning: Default::default(),
-                            explore_errors: Default::default(),
-                            settings: None,
-                            devtools: None,
-                            services: Default::default(),
-                            tray_active: tray.is_some(),
-                            tray,
-                            watcher,
-                            selected: Default::default(),
-                            fleet_run: None,
-                            fleet_seq: 0,
-                            fleet_prune: None,
-                            fleet_prune_seq: 0,
-                            toasts: Vec::new(),
-                            toast_seq: 0,
-                            grid: Default::default(),
-                            passes: Default::default(),
-                            derived: Default::default(),
-                            scanned_at: snap.scanned_at,
-                            view_filter: None,
-                            focus: cx.focus_handle(),
-                        }
-                    });
+                    let view = cx.new(|cx| OrreryApp::new(snap, theme, config, cx));
                     // Close-to-tray: when the tray is up, the window's close
                     // button minimizes to the tray instead of quitting. Without a
                     // tray we leave the default (close quits) so there's a way out.
