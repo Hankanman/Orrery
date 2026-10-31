@@ -37,7 +37,7 @@ impl OrreryApp {
     pub fn load_cleanup(&mut self, cx: &mut Context<Self>) {
         use crate::views::cleanup::CleanupState;
         self.cleanup = CleanupState::Loading;
-        self.cleanup_confirm = None;
+        self.cleanup_ui.confirm.disarm();
         cx.notify();
         let rows = self.rows.clone();
         cx.spawn(async move |this, cx| {
@@ -61,28 +61,13 @@ impl OrreryApp {
     /// state reverts after a few seconds, and arming another repo's button
     /// replaces it.
     pub fn arm_prune(&mut self, id: SharedString, cx: &mut Context<Self>) {
-        self.cleanup_confirm = Some(id);
-        self.cleanup_confirm_gen += 1;
-        let generation = self.cleanup_confirm_gen;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(4))
-                .await;
-            // Revert only if this timer's arm is still the active one.
-            let _ = this.update(cx, |this, cx| {
-                if this.cleanup_confirm_gen == generation && this.cleanup_confirm.take().is_some() {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.arm_confirm(|app| &mut app.cleanup_ui.confirm, id, cx);
     }
 
     /// Prune the given repo's stale branches, then refresh the Cleanup list.
     /// Only reached via the two-stage confirm in the Cleanup view (`arm_prune`).
     pub fn prune_repo(&mut self, id: SharedString, cx: &mut Context<Self>) {
-        self.cleanup_confirm = None;
+        self.cleanup_ui.confirm.disarm();
         cx.notify();
         let path = id.to_string();
         cx.spawn(async move |this, cx| {

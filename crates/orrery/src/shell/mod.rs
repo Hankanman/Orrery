@@ -21,6 +21,7 @@ use crate::theme::Theme;
 
 mod actions;
 mod attention;
+mod confirm;
 mod grid;
 mod header;
 mod overlay;
@@ -31,6 +32,7 @@ use grid::{Facets, GridState, VisibleKey, columns};
 use passes::{Passes, SnapKind};
 
 pub(crate) use actions::draft_and_create_pr;
+pub(crate) use confirm::ArmedConfirm;
 
 pub(crate) use overlay::{DrawerTab, Overlay};
 
@@ -115,39 +117,18 @@ pub struct OrreryApp {
     pub feed: crate::views::feed::FeedState,
     pub explore: crate::views::explore::ExploreState,
     pub cleanup: crate::views::cleanup::CleanupState,
-    /// Repo id whose Cleanup "Prune" button is armed, awaiting a confirming
-    /// second click before the (irreversible) bulk branch delete runs.
-    pub cleanup_confirm: Option<SharedString>,
-    /// Bumped each time a confirm is armed, so a stale revert timer from an
-    /// earlier arm can't clear a newer one.
-    pub cleanup_confirm_gen: u64,
+    /// Cleanup view UI state (the armed Prune confirm).
+    pub(crate) cleanup_ui: crate::views::cleanup::CleanupUi,
+    /// Explore view UI state (clones in flight, clone errors).
+    pub(crate) explore_ui: crate::views::explore::ExploreUi,
     /// Agents view state (lazy; detected agent sessions on the machine).
     pub agents: crate::views::agents::AgentsState,
+    /// Agents view UI state (poll guard, armed confirm, review panel, PR
+    /// flows in flight).
+    pub(crate) agents_ui: crate::views::agents::AgentsUi,
     /// Repo ids (paths) with a live agent session — drives the card indicator.
     /// Refreshed on rescan and by the Agents-view poll.
     pub active_agents: std::collections::HashSet<SharedString>,
-    /// Whether the Agents-view poll loop is running (guards against duplicates).
-    pub agents_polling: bool,
-    /// Worktree path whose Agents "Remove worktree" button is armed, awaiting a
-    /// confirming second click (the cleanup-confirm pattern). Discard arms the
-    /// same slot with a `discard:`-prefixed key so the two destructive buttons
-    /// can't confirm each other.
-    pub agents_confirm: Option<SharedString>,
-    /// Bumped each time a worktree-remove confirm is armed, so a stale revert
-    /// timer from an earlier arm can't clear a newer one.
-    pub agents_confirm_gen: u64,
-    /// Worktree path whose finished-session review diff is expanded on the
-    /// Agents view, if any (one at a time — the diff is the heavy part).
-    pub agents_review: Option<SharedString>,
-    /// The loaded review diff for [`Self::agents_review`]; `None` while the
-    /// background branch-diff load is in flight.
-    pub agents_review_diff: Option<SharedString>,
-    /// Worktree paths with an Open-PR flow in flight (re-click guard).
-    pub agents_pr_busy: std::collections::HashSet<SharedString>,
-    /// Slugs currently being cloned from the Explore view.
-    pub explore_cloning: std::collections::HashSet<SharedString>,
-    /// Explore clone failures keyed by slug, shown on the card; cleared on retry.
-    pub explore_errors: std::collections::HashMap<SharedString, SharedString>,
     /// Settings editing session (draft config + field inputs); created on first
     /// open, kept so edits survive navigating away.
     pub settings: Option<crate::views::settings::SettingsState>,
@@ -282,8 +263,8 @@ impl OrreryApp {
                     &self.explore,
                     crate::views::explore::CloneStatus {
                         cloned: &cloned,
-                        cloning: &self.explore_cloning,
-                        errors: &self.explore_errors,
+                        cloning: &self.explore_ui.cloning,
+                        errors: &self.explore_ui.errors,
                     },
                     self.view_filter.as_deref(),
                     self.config.roots.first().map(|s| s.as_str()),
@@ -295,7 +276,7 @@ impl OrreryApp {
             View::Janitor => crate::views::cleanup::render(
                 &self.cleanup,
                 self.view_filter.as_deref(),
-                self.cleanup_confirm.as_deref(),
+                self.cleanup_ui.confirm.armed(),
                 t,
                 &cx.entity(),
             )
@@ -303,10 +284,11 @@ impl OrreryApp {
             View::Agents => crate::views::agents::render(
                 &self.agents,
                 self.view_filter.as_deref(),
-                self.agents_confirm.as_deref(),
-                self.agents_review
+                self.agents_ui.confirm.armed(),
+                self.agents_ui
+                    .review
                     .as_deref()
-                    .map(|p| (p, self.agents_review_diff.as_deref())),
+                    .map(|p| (p, self.agents_ui.review_diff.as_deref())),
                 t,
                 &cx.entity(),
             )

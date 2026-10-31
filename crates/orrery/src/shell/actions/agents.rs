@@ -60,11 +60,11 @@ impl OrreryApp {
                 let finished = std::mem::take(&mut result.finished_now);
                 // Collapse the review panel if its worktree vanished (e.g.
                 // discarded from another surface).
-                if let Some(open) = &this.agents_review
+                if let Some(open) = &this.agents_ui.review
                     && !result.dispatched.iter().any(|d| d.worktree_path == *open)
                 {
-                    this.agents_review = None;
-                    this.agents_review_diff = None;
+                    this.agents_ui.review = None;
+                    this.agents_ui.review_diff = None;
                 }
                 this.active_agents = active;
                 this.agents = AgentsState::Ready(result);
@@ -127,10 +127,10 @@ impl OrreryApp {
     /// Exits when neither holds; restarted by `maybe_load_view` on re-entry
     /// and by any scan that sees a live dispatched session.
     pub(super) fn start_agents_poll(&mut self, cx: &mut Context<Self>) {
-        if self.agents_polling {
+        if self.agents_ui.polling {
             return;
         }
-        self.agents_polling = true;
+        self.agents_ui.polling = true;
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -142,7 +142,7 @@ impl OrreryApp {
                     })
                     .unwrap_or(false);
                 if !keep {
-                    let _ = this.update(cx, |this, _| this.agents_polling = false);
+                    let _ = this.update(cx, |this, _| this.agents_ui.polling = false);
                     break;
                 }
                 if this
@@ -321,23 +321,9 @@ impl OrreryApp {
     }
 
     /// First click on a dispatched worktree's "Remove worktree" button: arm the
-    /// two-stage confirm (same pattern as [`Self::arm_prune`]).
+    /// two-stage confirm (see [`crate::shell::ArmedConfirm`]).
     pub fn arm_worktree_remove(&mut self, path: SharedString, cx: &mut Context<Self>) {
-        self.agents_confirm = Some(path);
-        self.agents_confirm_gen += 1;
-        let generation = self.agents_confirm_gen;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(4))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.agents_confirm_gen == generation && this.agents_confirm.take().is_some() {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.arm_confirm(|app| &mut app.agents_ui.confirm, path, cx);
     }
 
     /// Remove a dispatched agent worktree: refused (with a toast) while it has
@@ -352,7 +338,7 @@ impl OrreryApp {
         name: SharedString,
         cx: &mut Context<Self>,
     ) {
-        self.agents_confirm = None;
+        self.agents_ui.confirm.disarm();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (p, o, n) = (path.to_string(), origin.to_string(), name.to_string());
@@ -405,14 +391,14 @@ impl OrreryApp {
         origin: SharedString,
         cx: &mut Context<Self>,
     ) {
-        if self.agents_review.as_ref() == Some(&path) {
-            self.agents_review = None;
-            self.agents_review_diff = None;
+        if self.agents_ui.review.as_ref() == Some(&path) {
+            self.agents_ui.review = None;
+            self.agents_ui.review_diff = None;
             cx.notify();
             return;
         }
-        self.agents_review = Some(path.clone());
-        self.agents_review_diff = None;
+        self.agents_ui.review = Some(path.clone());
+        self.agents_ui.review_diff = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (p, o) = (path.to_string(), origin.to_string());
@@ -426,8 +412,8 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 // Dropped if the panel moved to another card meanwhile.
-                if this.agents_review.as_ref() == Some(&path) {
-                    this.agents_review_diff =
+                if this.agents_ui.review.as_ref() == Some(&path) {
+                    this.agents_ui.review_diff =
                         Some(diff.unwrap_or_else(|e| format!("Diff failed: {e}")).into());
                     cx.notify();
                 }
@@ -450,7 +436,7 @@ impl OrreryApp {
         branch: SharedString,
         cx: &mut Context<Self>,
     ) {
-        if self.agents_pr_busy.contains(&path) {
+        if self.agents_ui.pr_busy.contains(&path) {
             return;
         }
         let Some(row) = self.rows.iter().find(|r| r.id == origin) else {
@@ -473,7 +459,7 @@ impl OrreryApp {
         };
         let slug = slug.to_string();
         let ai_ready = self.services.ai_ready;
-        self.agents_pr_busy.insert(path.clone());
+        self.agents_ui.pr_busy.insert(path.clone());
         let key = format!("wt-pr:{path}");
         self.upsert_toast(
             key.clone(),
@@ -498,7 +484,7 @@ impl OrreryApp {
                 Ok(base) => base,
                 Err(e) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.agents_pr_busy.remove(&path);
+                        this.agents_ui.pr_busy.remove(&path);
                         this.upsert_toast(key, ToastKind::Error, "Push failed", Some(e.into()), cx);
                         cx.notify();
                     });
@@ -526,7 +512,7 @@ impl OrreryApp {
                     .await;
             }
             let _ = this.update(cx, |this, cx| {
-                this.agents_pr_busy.remove(&path);
+                this.agents_ui.pr_busy.remove(&path);
                 let opened = result.is_ok();
                 this.finish_pr_toast(key, title, result, cx);
                 if opened {
@@ -553,7 +539,7 @@ impl OrreryApp {
         branch: SharedString,
         cx: &mut Context<Self>,
     ) {
-        self.agents_confirm = None;
+        self.agents_ui.confirm.disarm();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (p, o, n, b) = (
@@ -594,9 +580,9 @@ impl OrreryApp {
                         this.push_toast(ToastKind::Error, "Discard failed", Some(e.into()), cx)
                     }
                 };
-                if this.agents_review.as_ref() == Some(&path) {
-                    this.agents_review = None;
-                    this.agents_review_diff = None;
+                if this.agents_ui.review.as_ref() == Some(&path) {
+                    this.agents_ui.review = None;
+                    this.agents_ui.review_diff = None;
                 }
                 this.scan_agents(false, cx);
             });

@@ -171,7 +171,7 @@ impl OrreryApp {
             let _ = this.update(cx, |this, cx| {
                 this.apply_snapshot(snap);
                 for slug in &settle {
-                    this.explore_cloning.remove(slug);
+                    this.explore_ui.cloning.remove(slug);
                 }
                 let next = this.passes.snapshot.finish();
                 if kind != SnapKind::Reload {

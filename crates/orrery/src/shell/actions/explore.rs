@@ -41,8 +41,8 @@ impl OrreryApp {
         let Some(root) = self.config.roots.first().cloned() else {
             return;
         };
-        self.explore_cloning.insert(slug.clone());
-        self.explore_errors.remove(&slug);
+        self.explore_ui.cloning.insert(slug.clone());
+        self.explore_ui.errors.remove(&slug);
         // A keyed Progress toast tracks the clone; the completion below upserts
         // the same key to Success/Error, so the op resolves its own toast.
         let toast_key = SharedString::from(format!("clone:{slug}"));
@@ -87,11 +87,11 @@ impl OrreryApp {
                         this.rescan(cx);
                     }
                     Err(e) => {
-                        this.explore_cloning.remove(&slug);
+                        this.explore_ui.cloning.remove(&slug);
                         let msg = SharedString::from(format!("Failed: {e}"));
                         // Keep the inline card error AND raise a toast, so the
                         // failure is visible even away from the Explore view.
-                        this.explore_errors.insert(slug.clone(), msg.clone());
+                        this.explore_ui.errors.insert(slug.clone(), msg.clone());
                         this.upsert_toast(
                             toast_key,
                             ToastKind::Error,

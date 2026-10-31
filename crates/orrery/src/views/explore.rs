@@ -24,6 +24,15 @@ pub enum ExploreState {
     Error(SharedString),
 }
 
+/// The Explore view's UI state, alongside its loaded [`ExploreState`].
+#[derive(Default)]
+pub(crate) struct ExploreUi {
+    /// Slugs currently being cloned.
+    pub(crate) cloning: HashSet<SharedString>,
+    /// Clone failures keyed by slug, shown on the card; cleared on retry.
+    pub(crate) errors: HashMap<SharedString, SharedString>,
+}
+
 /// A render-ready starred repo.
 pub struct StarRow {
     pub slug: SharedString,
