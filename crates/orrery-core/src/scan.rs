@@ -16,11 +16,15 @@ const SEVEN_DAYS: i64 = 7 * 24 * 3600;
 const THIRTY_DAYS: i64 = 30 * 24 * 3600;
 
 /// Scan all roots and return the discovered repos, marking favorites.
+/// `gitlab_hosts` is the user's self-hosted GitLab allowlist, so a GitLab
+/// whose hostname doesn't start with `gitlab.` is still recognised (see
+/// [`parse_remote`]).
 pub fn scan(
     roots: &[String],
     depth: usize,
     ignore: &[String],
     favorites: &HashSet<String>,
+    gitlab_hosts: &[String],
     now: i64,
 ) -> Vec<Repo> {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,7 +59,7 @@ pub fn scan(
                 let Some((path, root, fav)) = targets.get(i) else {
                     break;
                 };
-                if let Some(repo) = build_repo(path, root, *fav, now) {
+                if let Some(repo) = build_repo(path, root, *fav, gitlab_hosts, now) {
                     out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
                 }
             });
@@ -120,7 +124,13 @@ fn find_repos(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
     repos
 }
 
-fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo> {
+fn build_repo(
+    path: &Path,
+    root: &str,
+    favorite: bool,
+    gitlab_hosts: &[String],
+    now: i64,
+) -> Option<Repo> {
     let repo = Repository::open(path).ok()?;
 
     let git = crate::git_ops::status_of(&repo);
@@ -134,7 +144,7 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         .find_remote("origin")
         .ok()
         .and_then(|r| r.url().ok().map(String::from))
-        .map(|url| parse_remote(&url))
+        .map(|url| parse_remote(&url, gitlab_hosts))
         .unwrap_or((None, None, None));
 
     let dir_name = path
@@ -190,8 +200,9 @@ fn classify_activity(last_commit_unix: i64, now: i64) -> Activity {
 /// Parse an origin remote URL into (host, slug, domain).
 ///
 /// The provider is decided by an *exact* host match — `github.com` /
-/// `www.github.com` for GitHub; `gitlab.com`, or a valid DNS host whose first
-/// label is `gitlab` (self-hosted `gitlab.acme.io`), for GitLab — so lookalikes
+/// `www.github.com` for GitHub; `gitlab.com`, a valid DNS host whose first
+/// label is `gitlab` (self-hosted `gitlab.acme.io`), or a host on the user's
+/// `gitlab_hosts` allowlist (`code.acme.io`), for GitLab — so lookalikes
 /// like `notgithub.com` or `github.company.com` aren't sent to the GitHub API
 /// and handed another repo's stars/visibility. (A self-hosted GitLab only ever
 /// gets a token when it's on the user's `gitlab_hosts` allowlist; see
@@ -201,7 +212,10 @@ fn classify_activity(last_commit_unix: i64, now: i64) -> Activity {
 /// segments, else none), every group level on GitLab (`group/sub/proj`). It
 /// is interpolated into API URL paths, so a slug that fails
 /// `forge::valid_slug` (bad chars, `..` segments) is dropped.
-fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
+fn parse_remote(
+    url: &str,
+    gitlab_hosts: &[String],
+) -> (Option<Host>, Option<String>, Option<String>) {
     // Split the authority ([user@]host[:port]) from the path. scp-like remotes
     // ("git@host:owner/repo.git") use ':' as the separator and have no port.
     let (authority, path_part) = match url.split_once("://") {
@@ -229,6 +243,9 @@ fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
         "github.com" | "www.github.com" => Some(Host::Github),
         "gitlab.com" | "www.gitlab.com" => Some(Host::Gitlab),
         d if d.starts_with("gitlab.") && crate::forge::valid_host(d) => Some(Host::Gitlab),
+        // Allowlisted self-hosted GitLab under any name. Detection only: the
+        // token-egress check in `forge` is separate and unchanged.
+        d if crate::forge::gitlab_host_trusted(d, gitlab_hosts) => Some(Host::Gitlab),
         _ => None,
     };
 
@@ -554,7 +571,7 @@ mod tests {
     #[test]
     fn parse_remote_https_and_ssh_github() {
         assert_eq!(
-            parse_remote("https://github.com/owner/repo.git"),
+            parse_remote("https://github.com/owner/repo.git", &[]),
             (
                 Some(Host::Github),
                 Some("owner/repo".into()),
@@ -562,7 +579,7 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_remote("git@github.com:owner/repo.git"),
+            parse_remote("git@github.com:owner/repo.git", &[]),
             (
                 Some(Host::Github),
                 Some("owner/repo".into()),
@@ -571,7 +588,7 @@ mod tests {
         );
         // no trailing .git
         assert_eq!(
-            parse_remote("https://github.com/owner/repo").1,
+            parse_remote("https://github.com/owner/repo", &[]).1,
             Some("owner/repo".into())
         );
     }
@@ -579,7 +596,7 @@ mod tests {
     #[test]
     fn parse_remote_gitlab_including_self_hosted_and_nested() {
         assert_eq!(
-            parse_remote("https://gitlab.com/group/proj.git"),
+            parse_remote("https://gitlab.com/group/proj.git", &[]),
             (
                 Some(Host::Gitlab),
                 Some("group/proj".into()),
@@ -587,21 +604,21 @@ mod tests {
             )
         );
         // self-hosted GitLab → detected by host, domain captured for API base
-        let (host, _, domain) = parse_remote("ssh://git@gitlab.example.com/team/app.git");
+        let (host, _, domain) = parse_remote("ssh://git@gitlab.example.com/team/app.git", &[]);
         assert_eq!(host, Some(Host::Gitlab));
         assert_eq!(domain, Some("gitlab.example.com".into()));
         // nested groups → the full path (the API needs every group level)
         assert_eq!(
-            parse_remote("https://gitlab.com/group/sub/proj.git").1,
+            parse_remote("https://gitlab.com/group/sub/proj.git", &[]).1,
             Some("group/sub/proj".into())
         );
         assert_eq!(
-            parse_remote("git@gitlab.acme.io:a/b/c/proj.git").1,
+            parse_remote("git@gitlab.acme.io:a/b/c/proj.git", &[]).1,
             Some("a/b/c/proj".into())
         );
         // ssh:// with a port: the port is neither domain nor slug.
         assert_eq!(
-            parse_remote("ssh://git@gitlab.acme.io:2222/group/sub/proj.git"),
+            parse_remote("ssh://git@gitlab.acme.io:2222/group/sub/proj.git", &[]),
             (
                 Some(Host::Gitlab),
                 Some("group/sub/proj".into()),
@@ -620,37 +637,46 @@ mod tests {
             "git@github.com.evil.io:o/r.git",
             "https://evilgithub.com/o/r",
         ] {
-            assert_eq!(parse_remote(url).0, None, "{url}");
+            assert_eq!(parse_remote(url, &[]).0, None, "{url}");
         }
         assert_eq!(
-            parse_remote("https://www.github.com/o/r.git").0,
+            parse_remote("https://www.github.com/o/r.git", &[]).0,
             Some(Host::Github)
         );
-        assert_eq!(parse_remote("https://GitHub.com/o/r").0, Some(Host::Github));
+        assert_eq!(
+            parse_remote("https://GitHub.com/o/r", &[]).0,
+            Some(Host::Github)
+        );
         // "gitlab" merely appearing in the host isn't GitLab.
         for url in [
             "https://mygitlab.corp/o/r.git",
             "https://notgitlab.com/o/r.git",
             "https://169.254.169.254/o/r.git",
         ] {
-            assert_eq!(parse_remote(url).0, None, "{url}");
+            assert_eq!(parse_remote(url, &[]).0, None, "{url}");
         }
-        assert_eq!(parse_remote("https://gitlab.com/o/r").0, Some(Host::Gitlab));
+        assert_eq!(
+            parse_remote("https://gitlab.com/o/r", &[]).0,
+            Some(Host::Gitlab)
+        );
     }
 
     #[test]
     fn parse_remote_rejects_unsafe_or_malformed_slugs() {
         // Slugs are interpolated into API paths — traversal must not survive.
-        assert_eq!(parse_remote("https://github.com/o/../../user").1, None);
-        assert_eq!(parse_remote("https://gitlab.com/g/../proj.git").1, None);
-        assert_eq!(parse_remote("https://github.com/o/r%2F..").1, None);
-        assert_eq!(parse_remote("https://github.com/o/r?x=1").1, None);
+        assert_eq!(parse_remote("https://github.com/o/../../user", &[]).1, None);
+        assert_eq!(
+            parse_remote("https://gitlab.com/g/../proj.git", &[]).1,
+            None
+        );
+        assert_eq!(parse_remote("https://github.com/o/r%2F..", &[]).1, None);
+        assert_eq!(parse_remote("https://github.com/o/r?x=1", &[]).1, None);
         // GitHub slugs are exactly owner/name.
-        assert_eq!(parse_remote("https://github.com/o/r/extra").1, None);
-        assert_eq!(parse_remote("https://github.com/o").1, None);
+        assert_eq!(parse_remote("https://github.com/o/r/extra", &[]).1, None);
+        assert_eq!(parse_remote("https://github.com/o", &[]).1, None);
         // Credentials in the URL never leak into the domain.
         assert_eq!(
-            parse_remote("https://user:tok@github.com/o/r.git"),
+            parse_remote("https://user:tok@github.com/o/r.git", &[]),
             (
                 Some(Host::Github),
                 Some("o/r".into()),
@@ -662,7 +688,7 @@ mod tests {
     #[test]
     fn parse_remote_unknown_host_has_no_host_but_keeps_slug_and_domain() {
         assert_eq!(
-            parse_remote("https://example.com/foo/bar.git"),
+            parse_remote("https://example.com/foo/bar.git", &[]),
             (None, Some("foo/bar".into()), Some("example.com".into()))
         );
     }
@@ -699,6 +725,26 @@ mod tests {
         let (title, desc) = read_readme(dir.path());
         assert_eq!(title.as_deref(), Some("my_tool"));
         assert_eq!(desc.as_deref(), Some("A fast tool for things."));
+    }
+
+    #[test]
+    fn parse_remote_detects_allowlisted_self_hosted_gitlab() {
+        let hosts = vec!["Code.Acme.io".to_string()];
+        // Not `gitlab.*`, but on the allowlist (case-insensitive) → GitLab.
+        assert_eq!(
+            parse_remote("git@code.acme.io:team/app.git", &hosts),
+            (
+                Some(Host::Gitlab),
+                Some("team/app".into()),
+                Some("code.acme.io".into())
+            )
+        );
+        // Off the allowlist it stays unknown.
+        assert_eq!(parse_remote("git@code.acme.io:team/app.git", &[]).0, None);
+        assert_eq!(parse_remote("https://other.io/team/app", &hosts).0, None);
+        // An allowlisted IP literal still fails `valid_host`, so isn't GitLab.
+        let ip = vec!["169.254.169.254".to_string()];
+        assert_eq!(parse_remote("https://169.254.169.254/o/r", &ip).0, None);
     }
 
     #[test]
@@ -764,7 +810,7 @@ mod tests {
         let favorites: HashSet<String> = [id.clone()].into_iter().collect();
         let now = sig.when().seconds() + 60;
         let roots = vec![root.path().to_string_lossy().into_owned()];
-        let repos = scan(&roots, 3, &[], &favorites, now);
+        let repos = scan(&roots, 3, &[], &favorites, &[], now);
 
         assert_eq!(repos.len(), 1);
         let r = &repos[0];
@@ -781,7 +827,9 @@ mod tests {
 
         // A rescan of the unchanged repo hits the language cache and agrees.
         assert_eq!(
-            scan(&roots, 3, &[], &favorites, now)[0].language.as_deref(),
+            scan(&roots, 3, &[], &favorites, &[], now)[0]
+                .language
+                .as_deref(),
             Some("Rust")
         );
     }
@@ -800,6 +848,12 @@ mod tests {
         assert_eq!(cached_language(dir.path(), Some(b)), Some("Rust".into()));
         // No HEAD → never cached.
         assert_eq!(cached_language(dir.path(), None), Some("Rust".into()));
+        // A working-tree change on the same HEAD shows once invalidated.
+        fs::write(dir.path().join("go.mod"), "").unwrap();
+        fs::remove_file(dir.path().join("Cargo.toml")).unwrap();
+        assert_eq!(cached_language(dir.path(), Some(b)), Some("Rust".into()));
+        invalidate_language(dir.path());
+        assert_eq!(cached_language(dir.path(), Some(b)), Some("Go".into()));
     }
 
     #[test]

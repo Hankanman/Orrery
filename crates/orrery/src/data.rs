@@ -356,7 +356,14 @@ pub fn rescan() -> Snapshot {
     let now = now_unix();
     let cfg = config::load();
     let favorites = cache::favorites();
-    let mut repos = scan::scan(&cfg.roots, cfg.scan_depth, &cfg.ignore, &favorites, now);
+    let mut repos = scan::scan(
+        &cfg.roots,
+        cfg.scan_depth,
+        &cfg.ignore,
+        &favorites,
+        &cfg.gitlab_hosts,
+        now,
+    );
     // Carry over persisted host enrichment (stars/visibility) + AI summaries
     // until a fresh pass re-confirms them, then snapshot for instant next-launch
     // paint.
