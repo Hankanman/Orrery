@@ -68,6 +68,19 @@ pub fn scan(
     out.into_inner().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Rebuild one already-discovered repo's metadata (a scoped rescan after a
+/// filesystem event), with the same rules as [`scan`]. `None` when `path` is
+/// no longer a repo (deleted or moved), so the caller drops it.
+pub fn scan_repo(
+    path: &Path,
+    root: &str,
+    favorite: bool,
+    gitlab_hosts: &[String],
+    now: i64,
+) -> Option<Repo> {
+    build_repo(path, root, favorite, gitlab_hosts, now)
+}
+
 /// Just the discovered repo paths (no metadata) — used by the watcher to decide
 /// what to watch, far cheaper than a full scan.
 pub fn repo_paths(roots: &[String], depth: usize, ignore: &[String]) -> Vec<PathBuf> {
@@ -374,16 +387,14 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// [`detect_language`], cached per repo for the life of the process and keyed
 /// on the HEAD commit: the extension fallback walks the tree, and most repos
-/// are unchanged between rescans. A new commit re-detects; working-tree-only
-/// changes are picked up at the next commit. Repos with no commits aren't
-/// cached.
+/// are unchanged between rescans. A new commit re-detects; a working-tree-only
+/// change is picked up when the watcher reports it ([`invalidate_language`]).
+/// Repos with no commits aren't cached.
 fn cached_language(path: &Path, head: Option<git2::Oid>) -> Option<String> {
-    type Cache = Mutex<HashMap<PathBuf, (git2::Oid, Option<String>)>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
     let Some(head) = head else {
         return detect_language(path);
     };
-    let cache = CACHE.get_or_init(Default::default);
+    let cache = language_cache();
     if let Some((oid, lang)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
         if *oid == head {
             return lang.clone();
@@ -395,6 +406,23 @@ fn cached_language(path: &Path, head: Option<git2::Oid>) -> Option<String> {
         .unwrap_or_else(|e| e.into_inner())
         .insert(path.to_path_buf(), (head, lang.clone()));
     lang
+}
+
+type LanguageCache = Mutex<HashMap<PathBuf, (git2::Oid, Option<String>)>>;
+
+fn language_cache() -> &'static LanguageCache {
+    static CACHE: OnceLock<LanguageCache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Forget a repo's cached language so its next scan re-detects it — for a
+/// rescan triggered by a working-tree change (a new manifest, a pile of new
+/// source files) that leaves HEAD where it was.
+pub fn invalidate_language(path: &Path) {
+    language_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(path);
 }
 
 /// Heuristic primary language: manifest files first, then a shallow extension
@@ -694,6 +722,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_remote_detects_allowlisted_self_hosted_gitlab() {
+        let hosts = vec!["Code.Acme.io".to_string()];
+        // Not `gitlab.*`, but on the allowlist (case-insensitive) → GitLab.
+        assert_eq!(
+            parse_remote("git@code.acme.io:team/app.git", &hosts),
+            (
+                Some(Host::Gitlab),
+                Some("team/app".into()),
+                Some("code.acme.io".into())
+            )
+        );
+        // Off the allowlist it stays unknown.
+        assert_eq!(parse_remote("git@code.acme.io:team/app.git", &[]).0, None);
+        assert_eq!(parse_remote("https://other.io/team/app", &hosts).0, None);
+        // An allowlisted IP literal still fails `valid_host`, so isn't GitLab.
+        let ip = vec!["169.254.169.254".to_string()];
+        assert_eq!(parse_remote("https://169.254.169.254/o/r", &ip).0, None);
+    }
+
+    #[test]
     fn clean_markdown_strips_emphasis_and_links() {
         assert_eq!(clean_markdown("**Bold** `code` _x_"), "Bold code x");
         assert_eq!(
@@ -725,26 +773,6 @@ mod tests {
         let (title, desc) = read_readme(dir.path());
         assert_eq!(title.as_deref(), Some("my_tool"));
         assert_eq!(desc.as_deref(), Some("A fast tool for things."));
-    }
-
-    #[test]
-    fn parse_remote_detects_allowlisted_self_hosted_gitlab() {
-        let hosts = vec!["Code.Acme.io".to_string()];
-        // Not `gitlab.*`, but on the allowlist (case-insensitive) → GitLab.
-        assert_eq!(
-            parse_remote("git@code.acme.io:team/app.git", &hosts),
-            (
-                Some(Host::Gitlab),
-                Some("team/app".into()),
-                Some("code.acme.io".into())
-            )
-        );
-        // Off the allowlist it stays unknown.
-        assert_eq!(parse_remote("git@code.acme.io:team/app.git", &[]).0, None);
-        assert_eq!(parse_remote("https://other.io/team/app", &hosts).0, None);
-        // An allowlisted IP literal still fails `valid_host`, so isn't GitLab.
-        let ip = vec!["169.254.169.254".to_string()];
-        assert_eq!(parse_remote("https://169.254.169.254/o/r", &ip).0, None);
     }
 
     #[test]

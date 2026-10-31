@@ -16,6 +16,7 @@ use gpui_component::input::{InputEvent, InputState};
 
 use orrery_core::attention::{AttentionItem, AttentionKind, Severity};
 use orrery_core::model::AppConfig;
+use orrery_platform::watcher::ChangeSet;
 
 use crate::card::card;
 use crate::data::Row;
@@ -462,11 +463,14 @@ impl Pass {
 }
 
 /// What a snapshot pass produces: a cheap reload of the cached snapshot (after
-/// enrichment / summaries / cache edits), or a full disk rescan. A rescan
-/// subsumes a reload, so a queued reload is upgraded rather than run twice.
+/// enrichment / summaries / cache edits), a rescan of just the repos the fs
+/// watcher reported, or a full disk rescan. Each subsumes the ones before it,
+/// so a queued request is upgraded rather than run twice.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum SnapKind {
     Reload,
+    /// Rescan the repos in [`SnapshotPass::changes`] only.
+    Refresh,
     Rescan,
 }
 
@@ -480,6 +484,9 @@ pub struct SnapshotPass {
     /// Explore slugs whose clone finished and that should stop showing as
     /// "cloning" once a rescan started after the clone has landed.
     settle_clones: Vec<SharedString>,
+    /// Watcher-reported repo changes not yet picked up by a pass; the next
+    /// Refresh/Rescan to start takes them.
+    changes: ChangeSet,
 }
 
 impl SnapshotPass {
@@ -739,14 +746,27 @@ impl OrreryApp {
         } else {
             Vec::new()
         };
+        // A rescan of either kind takes every pending watcher change (a full
+        // one still needs their working-tree flags for language invalidation).
+        let changes = if kind == SnapKind::Reload {
+            ChangeSet::default()
+        } else {
+            std::mem::take(&mut self.passes.snapshot.changes)
+        };
+        // A scoped rescan starts from the current fleet; the pass is serial,
+        // so this is the latest applied snapshot.
+        let base = (kind == SnapKind::Refresh).then(|| self.repos.clone());
         cx.notify(); // the footer shows "Scanning…" while a rescan runs
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
                 .spawn(async move {
-                    match kind {
-                        SnapKind::Rescan => crate::data::rescan(),
-                        SnapKind::Reload => crate::data::load(),
+                    match (kind, base) {
+                        (SnapKind::Refresh, Some(repos)) => {
+                            crate::data::rescan_repos(repos, &changes)
+                        }
+                        (SnapKind::Reload, _) => crate::data::load(),
+                        _ => crate::data::rescan(&changes),
                     }
                 })
                 .await;
@@ -756,7 +776,7 @@ impl OrreryApp {
                     this.explore_cloning.remove(slug);
                 }
                 let next = this.passes.snapshot.finish();
-                if kind == SnapKind::Rescan {
+                if kind != SnapKind::Reload {
                     this.after_snapshot(cx);
                 }
                 if let Some(next) = next {
@@ -766,6 +786,22 @@ impl OrreryApp {
             });
         })
         .detach();
+    }
+
+    /// Act on a watcher change set: rescan just the touched repos, or run
+    /// full discovery when something appeared under a root. Changes arriving
+    /// while a pass runs accumulate and are taken by the trailing pass.
+    pub fn request_changes(&mut self, changes: ChangeSet, cx: &mut Context<Self>) {
+        if changes.is_empty() {
+            return;
+        }
+        let kind = if changes.discover {
+            SnapKind::Rescan
+        } else {
+            SnapKind::Refresh
+        };
+        self.passes.snapshot.changes.merge(changes);
+        self.request_snapshot(kind, cx);
     }
 
     /// The fan-out after a fresh scan (launch, watcher, explicit rescan): drop
@@ -5072,6 +5108,25 @@ mod tests {
     }
 
     #[test]
+    fn prune_failure_reports_only_failures() {
+        use orrery_core::git_ops::PruneReport;
+        let clean = Ok(PruneReport {
+            deleted: vec!["old".into()],
+            failed: Vec::new(),
+        });
+        assert!(prune_failure(&clean).is_none());
+        let partial = Ok(PruneReport {
+            deleted: Vec::new(),
+            failed: vec![("wip".into(), "checked out\nin a worktree".into())],
+        });
+        let (title, detail) = prune_failure(&partial).unwrap();
+        assert_eq!(title, "Couldn't delete 1 branch");
+        assert_eq!(detail, "wip: checked out in a worktree");
+        let (title, _) = prune_failure(&Err("not a repo".into())).unwrap();
+        assert_eq!(title, "Prune failed");
+    }
+
+    #[test]
     fn tray_summary_counts_actionable_and_caps_top_lines() {
         // 2 urgent + 2 attention + 1 info → total 4, urgent 2, top capped at 3
         // (severity-ordered, like the model's output).
@@ -5109,25 +5164,6 @@ mod tests {
         );
         let unlinked = item(AttentionKind::ReviewRequested, "a", None);
         assert!(attention_key(&unlinked).contains("github.com/o/a"));
-    }
-
-    #[test]
-    fn prune_failure_reports_only_failures() {
-        use orrery_core::git_ops::PruneReport;
-        let clean = Ok(PruneReport {
-            deleted: vec!["old".into()],
-            failed: Vec::new(),
-        });
-        assert!(prune_failure(&clean).is_none());
-        let partial = Ok(PruneReport {
-            deleted: Vec::new(),
-            failed: vec![("wip".into(), "checked out\nin a worktree".into())],
-        });
-        let (title, detail) = prune_failure(&partial).unwrap();
-        assert_eq!(title, "Couldn't delete 1 branch");
-        assert_eq!(detail, "wip: checked out in a worktree");
-        let (title, _) = prune_failure(&Err("not a repo".into())).unwrap();
-        assert_eq!(title, "Prune failed");
     }
 
     #[test]

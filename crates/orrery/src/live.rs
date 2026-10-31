@@ -2,8 +2,9 @@
 //! the running app reacts without a manual refresh. Several sources, each owning
 //! its own thread + runtime in `orrery-platform`:
 //!
-//! - **filesystem watch** → rescan the roots and reload the grid (a burst of
-//!   events coalesces into one single-flight rescan);
+//! - **filesystem watch** → rescan just the repos that changed (a burst of
+//!   events coalesces into one single-flight pass; something new under a root
+//!   triggers full repo discovery instead);
 //! - **appearance change** → recompute the theme with the new system accent;
 //! - **attention poll** → feed the poll's inbox facts into the attention model
 //!   (badges, tray summary, urgent notifications — all downstream of
@@ -24,14 +25,16 @@ use std::rc::Rc;
 use gpui::Context;
 use orrery_platform::appearance::Appearance;
 use orrery_platform::tray::TrayAction;
+use orrery_platform::watcher::ChangeSet;
 
-use crate::shell::{OrreryApp, SnapKind};
+use crate::shell::OrreryApp;
 use crate::theme::Theme;
 
 /// A desktop signal to apply on the GPUI foreground.
 enum Signal {
-    /// Repos changed on disk — rescan and reload the grid.
-    ReposChanged,
+    /// Repos changed on disk — rescan those (or everything, when the set
+    /// asks for discovery) and reload the grid.
+    ReposChanged(ChangeSet),
     /// Desktop theme/accent changed — recompute the theme.
     Appearance(Appearance),
     /// Latest attention-poll result: glance lines (the Inbox nav badge's
@@ -60,11 +63,12 @@ pub fn spawn(
 ) {
     let (tx, rx) = async_channel::unbounded::<Signal>();
 
-    // Filesystem watch → rescan. Debounced inside the platform watcher.
+    // Filesystem watch → scoped rescan. Debounced inside the platform
+    // watcher, which also maps events to the repos they touched.
     let watcher = {
         let tx = tx.clone();
-        orrery_platform::watcher::spawn(move || {
-            let _ = tx.try_send(Signal::ReposChanged);
+        orrery_platform::watcher::spawn(move |changes| {
+            let _ = tx.try_send(Signal::ReposChanged(changes));
         })
     };
 
@@ -106,7 +110,7 @@ pub fn spawn(
         orrery_platform::tray::spawn(move |action| {
             let signal = match action {
                 TrayAction::Show => Signal::ShowWindow,
-                TrayAction::Rescan => Signal::ReposChanged,
+                TrayAction::Rescan => Signal::ReposChanged(ChangeSet::discover()),
                 TrayAction::Quit => Signal::Quit,
                 TrayAction::Open(_) => return, // handled in the tray
             };
@@ -133,20 +137,23 @@ pub fn spawn(
                 },
             };
             match signal {
-                Signal::ReposChanged => {
+                Signal::ReposChanged(mut changes) => {
                     // Coalesce a burst of change events (and tray rescans)
-                    // queued behind this one into a single rescan.
+                    // queued behind this one into a single change set.
                     while let Ok(next) = rx.try_recv() {
-                        if !matches!(next, Signal::ReposChanged) {
-                            pending = Some(next);
-                            break;
+                        match next {
+                            Signal::ReposChanged(more) => changes.merge(more),
+                            other => {
+                                pending = Some(other);
+                                break;
+                            }
                         }
                     }
                     // The snapshot pass scans off the UI thread, is
-                    // single-flight (a request mid-scan becomes one trailing
-                    // rescan), and runs the post-snapshot fan-out.
+                    // single-flight (changes arriving mid-scan merge into one
+                    // trailing pass), and runs the post-snapshot fan-out.
                     let applied = this.update(cx, |app, cx| {
-                        app.request_snapshot(SnapKind::Rescan, cx);
+                        app.request_changes(changes, cx);
                     });
                     if applied.is_err() {
                         break; // entity gone — stop draining
