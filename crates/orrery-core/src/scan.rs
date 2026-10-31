@@ -10,6 +10,7 @@ use git2::Repository;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use walkdir::WalkDir;
 
+use crate::forge::TrustedHosts;
 use crate::model::{Activity, Host, Repo};
 
 const SEVEN_DAYS: i64 = 7 * 24 * 3600;
@@ -19,12 +20,39 @@ const THIRTY_DAYS: i64 = 30 * 24 * 3600;
 /// `gitlab_hosts` is the user's self-hosted GitLab allowlist, so a GitLab
 /// whose hostname doesn't start with `gitlab.` is still recognised (see
 /// [`parse_remote`]).
+///
+/// The Gitea / Forgejo allowlist isn't a parameter here: it is read from the
+/// (cached) loaded config. Prefer [`scan_with_hosts`], which takes both
+/// allowlists explicitly.
 pub fn scan(
     roots: &[String],
     depth: usize,
     ignore: &[String],
     favorites: &HashSet<String>,
     gitlab_hosts: &[String],
+    now: i64,
+) -> Vec<Repo> {
+    let hosts = legacy_hosts(gitlab_hosts);
+    scan_with_hosts(roots, depth, ignore, favorites, &hosts, now)
+}
+
+/// The allowlists for the GitLab-only [`scan`] / [`scan_repo`] signatures:
+/// the given GitLab list plus the configured Gitea list.
+fn legacy_hosts(gitlab_hosts: &[String]) -> TrustedHosts {
+    TrustedHosts {
+        gitlab: gitlab_hosts.to_vec(),
+        gitea: crate::config::load().gitea_hosts,
+    }
+}
+
+/// [`scan`] with both self-hosted allowlists (GitLab and Gitea / Forgejo),
+/// usually `TrustedHosts::from_config(&cfg)`.
+pub fn scan_with_hosts(
+    roots: &[String],
+    depth: usize,
+    ignore: &[String],
+    favorites: &HashSet<String>,
+    hosts: &TrustedHosts,
     now: i64,
 ) -> Vec<Repo> {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -59,7 +87,7 @@ pub fn scan(
                 let Some((path, root, fav)) = targets.get(i) else {
                     break;
                 };
-                if let Some(repo) = build_repo(path, root, *fav, gitlab_hosts, now) {
+                if let Some(repo) = build_repo(path, root, *fav, hosts, now) {
                     out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
                 }
             });
@@ -70,7 +98,8 @@ pub fn scan(
 
 /// Rebuild one already-discovered repo's metadata (a scoped rescan after a
 /// filesystem event), with the same rules as [`scan`]. `None` when `path` is
-/// no longer a repo (deleted or moved), so the caller drops it.
+/// no longer a repo (deleted or moved), so the caller drops it. Reads the
+/// Gitea allowlist from config like [`scan`]; prefer [`scan_repo_with_hosts`].
 pub fn scan_repo(
     path: &Path,
     root: &str,
@@ -78,7 +107,18 @@ pub fn scan_repo(
     gitlab_hosts: &[String],
     now: i64,
 ) -> Option<Repo> {
-    build_repo(path, root, favorite, gitlab_hosts, now)
+    build_repo(path, root, favorite, &legacy_hosts(gitlab_hosts), now)
+}
+
+/// [`scan_repo`] with both self-hosted allowlists (see [`scan_with_hosts`]).
+pub fn scan_repo_with_hosts(
+    path: &Path,
+    root: &str,
+    favorite: bool,
+    hosts: &TrustedHosts,
+    now: i64,
+) -> Option<Repo> {
+    build_repo(path, root, favorite, hosts, now)
 }
 
 /// Just the discovered repo paths (no metadata) — used by the watcher to decide
@@ -141,7 +181,7 @@ fn build_repo(
     path: &Path,
     root: &str,
     favorite: bool,
-    gitlab_hosts: &[String],
+    hosts: &TrustedHosts,
     now: i64,
 ) -> Option<Repo> {
     let repo = Repository::open(path).ok()?;
@@ -157,7 +197,7 @@ fn build_repo(
         .find_remote("origin")
         .ok()
         .and_then(|r| r.url().ok().map(String::from))
-        .map(|url| parse_remote(&url, gitlab_hosts))
+        .map(|url| parse_remote(&url, hosts))
         .unwrap_or((None, None, None));
 
     let dir_name = path
@@ -219,16 +259,14 @@ fn classify_activity(last_commit_unix: i64, now: i64) -> Activity {
 /// like `notgithub.com` or `github.company.com` aren't sent to the GitHub API
 /// and handed another repo's stars/visibility. (A self-hosted GitLab only ever
 /// gets a token when it's on the user's `gitlab_hosts` allowlist; see
-/// `forge::gitlab_host_trusted`.)
+/// `forge::gitlab_host_trusted`.) Gitea / Forgejo is `codeberg.org` or a host
+/// on the `gitea_hosts` allowlist; there is no name heuristic for it.
 ///
-/// The slug is the full project path: `owner/repo` on GitHub (exactly two
-/// segments, else none), every group level on GitLab (`group/sub/proj`). It
-/// is interpolated into API URL paths, so a slug that fails
-/// `forge::valid_slug` (bad chars, `..` segments) is dropped.
-fn parse_remote(
-    url: &str,
-    gitlab_hosts: &[String],
-) -> (Option<Host>, Option<String>, Option<String>) {
+/// The slug is the full project path: `owner/repo` on GitHub and Gitea
+/// (exactly two segments, else none), every group level on GitLab
+/// (`group/sub/proj`). It is interpolated into API URL paths, so a slug that
+/// fails `forge::valid_slug` (bad chars, `..` segments) is dropped.
+fn parse_remote(url: &str, hosts: &TrustedHosts) -> (Option<Host>, Option<String>, Option<String>) {
     // Split the authority ([user@]host[:port]) from the path. scp-like remotes
     // ("git@host:owner/repo.git") use ':' as the separator and have no port.
     let (authority, path_part) = match url.split_once("://") {
@@ -258,13 +296,15 @@ fn parse_remote(
         d if d.starts_with("gitlab.") && crate::forge::valid_host(d) => Some(Host::Gitlab),
         // Allowlisted self-hosted GitLab under any name. Detection only: the
         // token-egress check in `forge` is separate and unchanged.
-        d if crate::forge::gitlab_host_trusted(d, gitlab_hosts) => Some(Host::Gitlab),
+        d if crate::forge::gitlab_host_trusted(d, &hosts.gitlab) => Some(Host::Gitlab),
+        // Codeberg, or an allowlisted Gitea / Forgejo.
+        d if crate::forge::gitea_host_trusted(d, &hosts.gitea) => Some(Host::Gitea),
         _ => None,
     };
 
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let slug = match host {
-        Some(Host::Github) if parts.len() != 2 => None,
+        Some(Host::Github | Host::Gitea) if parts.len() != 2 => None,
         _ if parts.len() < 2 => None,
         _ => Some(parts.join("/")),
     }
@@ -596,6 +636,63 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// The GitLab-allowlist-only form most tests below use (shadows the glob
+    /// import); Gitea detection has its own test against `super::parse_remote`.
+    fn parse_remote(
+        url: &str,
+        gitlab_hosts: &[String],
+    ) -> (Option<Host>, Option<String>, Option<String>) {
+        let hosts = TrustedHosts {
+            gitlab: gitlab_hosts.to_vec(),
+            gitea: Vec::new(),
+        };
+        super::parse_remote(url, &hosts)
+    }
+
+    #[test]
+    fn parse_remote_detects_codeberg_and_allowlisted_gitea() {
+        let none = TrustedHosts::default();
+        assert_eq!(
+            super::parse_remote("https://codeberg.org/forgejo/forgejo.git", &none),
+            (
+                Some(Host::Gitea),
+                Some("forgejo/forgejo".into()),
+                Some("codeberg.org".into())
+            )
+        );
+        assert_eq!(
+            super::parse_remote("git@codeberg.org:o/r.git", &none).0,
+            Some(Host::Gitea)
+        );
+        // Gitea has no nested groups: three segments is not a slug.
+        assert_eq!(
+            super::parse_remote("https://codeberg.org/a/b/c", &none).1,
+            None
+        );
+        // A self-hosted Forgejo is only Gitea when allowlisted.
+        let hosts = TrustedHosts {
+            gitlab: Vec::new(),
+            gitea: vec!["Git.Acme.io".into()],
+        };
+        assert_eq!(
+            super::parse_remote("ssh://git@git.acme.io:2222/team/app.git", &hosts),
+            (
+                Some(Host::Gitea),
+                Some("team/app".into()),
+                Some("git.acme.io".into())
+            )
+        );
+        assert_eq!(
+            super::parse_remote("https://git.acme.io/team/app", &none).0,
+            None
+        );
+        // Lookalikes stay unknown.
+        assert_eq!(
+            super::parse_remote("https://codeberg.org.evil.io/o/r", &none).0,
+            None
+        );
+    }
+
     #[test]
     fn parse_remote_https_and_ssh_github() {
         assert_eq!(
@@ -838,7 +935,9 @@ mod tests {
         let favorites: HashSet<String> = [id.clone()].into_iter().collect();
         let now = sig.when().seconds() + 60;
         let roots = vec![root.path().to_string_lossy().into_owned()];
-        let repos = scan(&roots, 3, &[], &favorites, &[], now);
+        // `scan_with_hosts`, not `scan`: the latter reads the user's config.
+        let none = TrustedHosts::default();
+        let repos = scan_with_hosts(&roots, 3, &[], &favorites, &none, now);
 
         assert_eq!(repos.len(), 1);
         let r = &repos[0];
@@ -855,7 +954,7 @@ mod tests {
 
         // A rescan of the unchanged repo hits the language cache and agrees.
         assert_eq!(
-            scan(&roots, 3, &[], &favorites, &[], now)[0]
+            scan_with_hosts(&roots, 3, &[], &favorites, &none, now)[0]
                 .language
                 .as_deref(),
             Some("Rust")

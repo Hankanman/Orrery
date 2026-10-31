@@ -32,7 +32,7 @@ features:
     linkText: Configure launchers
   - icon: 🌐
     title: Multi-host enrichment
-    details: GitHub and GitLab (incl. self-hosted) — stars, topics, releases, issues, and visibility, cached locally so it survives restarts and works offline.
+    details: GitHub, GitLab and Gitea / Forgejo / Codeberg (incl. self-hosted) — stars, topics, releases, issues, and visibility, cached locally so it survives restarts and works offline.
     link: /guide/inbox-feed-explore
     linkText: Inbox, Feed & Explore
   - icon: ✨

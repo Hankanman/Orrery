@@ -1,9 +1,10 @@
-//! Git host providers (#17–#19). A small abstraction over GitHub and GitLab
-//! (incl. self-hosted) that fetches the enrichment shown on cards: stars,
-//! topics, open issues, latest release.
+//! Git host providers (#17–#19). A small abstraction over GitHub, GitLab and
+//! Gitea / Forgejo / Codeberg (incl. self-hosted) that fetches the enrichment
+//! shown on cards: stars, topics, open issues, latest release.
 //!
-//! GitHub uses `api.github.com`; GitLab uses `https://<domain>/api/v4`, so
-//! self-hosted instances work by routing on the remote's domain. Requests are
+//! GitHub uses `api.github.com`; GitLab uses `https://<domain>/api/v4` and
+//! Gitea `https://<domain>/api/v1`, so self-hosted instances work by routing
+//! on the remote's domain. Requests are
 //! unauthenticated by default (fine for public repos, rate-limited) and use a
 //! bearer token when one is available.
 //!
@@ -27,22 +28,42 @@ const MAX_REDIRECTS: usize = 5;
 /// Rate-limit bucket for GitHub's core REST API (see [`send`]).
 pub(crate) const GH_CORE: &str = "GitHub";
 
-/// Fetch host enrichment for a repo. `domain` routes self-hosted GitLab;
-/// `gitlab_hosts` is the user's trusted self-hosted GitLab allowlist (see
-/// [`gitlab_host_trusted`]) — a GitLab token is attached only when `domain` is
-/// trusted, so a hostile repo remote can't exfiltrate it.
+/// The user's trusted self-hosted forge allowlists (`gitlab_hosts` /
+/// `gitea_hosts` in config). They drive both remote detection (`scan`) and
+/// token egress: a token is only attached to `gitlab.com` / `codeberg.org` or
+/// a domain on the matching list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustedHosts {
+    pub gitlab: Vec<String>,
+    pub gitea: Vec<String>,
+}
+
+impl TrustedHosts {
+    pub fn from_config(cfg: &crate::model::AppConfig) -> Self {
+        TrustedHosts {
+            gitlab: cfg.gitlab_hosts.clone(),
+            gitea: cfg.gitea_hosts.clone(),
+        }
+    }
+}
+
+/// Fetch host enrichment for a repo. `domain` routes self-hosted GitLab and
+/// Gitea; `trusted` is the user's allowlists (see [`gitlab_host_trusted`] /
+/// [`gitea_host_trusted`]) — a GitLab or Gitea token is attached only when
+/// `domain` is trusted, so a hostile repo remote can't exfiltrate it.
 pub async fn fetch(
     host: Host,
     domain: &str,
     slug: &str,
     token: Option<&str>,
-    gitlab_hosts: &[String],
+    trusted: &TrustedHosts,
 ) -> Result<HostInfo, String> {
     match host {
         // GitHub always talks to the fixed api.github.com, so its token egress
         // needs no per-domain check.
         Host::Github => fetch_github(slug, token).await,
-        Host::Gitlab => fetch_gitlab(domain, slug, token, gitlab_hosts).await,
+        Host::Gitlab => fetch_gitlab(domain, slug, token, &trusted.gitlab).await,
+        Host::Gitea => fetch_gitea(domain, slug, token, &trusted.gitea).await,
     }
 }
 
@@ -78,6 +99,45 @@ pub(crate) fn gitlab_host_trusted(domain: &str, gitlab_hosts: &[String]) -> bool
         || gitlab_hosts
             .iter()
             .any(|h| h.trim().eq_ignore_ascii_case(domain))
+}
+
+/// Whether a Gitea / Forgejo token may be sent to `domain`: the same egress
+/// rule as [`gitlab_host_trusted`], with `codeberg.org` as the always-trusted
+/// public instance and `gitea_hosts` as the user's allowlist.
+pub(crate) fn gitea_host_trusted(domain: &str, gitea_hosts: &[String]) -> bool {
+    if !valid_host(domain) {
+        return false;
+    }
+    domain.eq_ignore_ascii_case("codeberg.org")
+        || gitea_hosts
+            .iter()
+            .any(|h| h.trim().eq_ignore_ascii_case(domain))
+}
+
+/// The trusted domains for one forge kind, normalised (trimmed, lowercased,
+/// deduped, SSRF-checked), public instance first. These are the hosts the
+/// inbox/notification passes query with a token. GitHub is always just
+/// `github.com` (its API host is fixed).
+pub(crate) fn trusted_domains(host: Host, trusted: &TrustedHosts) -> Vec<String> {
+    let (public, list): (&str, &[String]) = match host {
+        Host::Github => return vec!["github.com".to_string()],
+        Host::Gitlab => ("gitlab.com", &trusted.gitlab),
+        Host::Gitea => ("codeberg.org", &trusted.gitea),
+    };
+    let mut out = vec![public.to_string()];
+    for h in list {
+        let h = h.trim().to_ascii_lowercase();
+        if valid_host(&h) && !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// A valid Gitea `owner/name` slug — exactly two segments (Gitea and Forgejo
+/// have no nested namespaces).
+pub(crate) fn valid_gitea_slug(slug: &str) -> bool {
+    valid_slug(slug) && slug.split('/').count() == 2
 }
 
 /// Whether a redirect from `prev` to `next` may be followed. Only a same-origin
@@ -457,6 +517,103 @@ async fn fetch_gitlab(
     })
 }
 
+/// The Gitea API base for a domain (`https://<domain>/api/v1`).
+pub(crate) fn gitea_api(domain: &str) -> String {
+    format!("https://{domain}/api/v1")
+}
+
+/// The fields of a Gitea / Forgejo `GET /repos/{owner}/{repo}` response that
+/// enrichment uses. Split out so canned JSON can be tested.
+#[derive(Deserialize)]
+pub(crate) struct GiteaRepo {
+    #[serde(default)]
+    stars_count: u32,
+    #[serde(default)]
+    open_issues_count: u32,
+    /// Present on current Gitea/Forgejo; absent on old instances.
+    #[serde(default)]
+    topics: Option<Vec<String>>,
+    #[serde(default)]
+    private: bool,
+    /// Visible to signed-in users of the instance only.
+    #[serde(default)]
+    internal: bool,
+}
+
+impl GiteaRepo {
+    pub(crate) fn into_host_info(self, latest_release: Option<String>) -> HostInfo {
+        HostInfo {
+            stars: self.stars_count,
+            topics: self.topics.unwrap_or_default(),
+            open_issues: self.open_issues_count,
+            latest_release,
+            private: self.private || self.internal,
+        }
+    }
+}
+
+/// One entry of a Gitea release list (only the tag matters for cards).
+#[derive(Deserialize)]
+pub(crate) struct GiteaRelease {
+    pub(crate) tag_name: String,
+    #[serde(default)]
+    pub(crate) draft: bool,
+}
+
+/// The newest non-draft release tag from a Gitea release list. Pure.
+pub(crate) fn gitea_latest_release(releases: Vec<GiteaRelease>) -> Option<String> {
+    releases.into_iter().find(|r| !r.draft).map(|r| r.tag_name)
+}
+
+/// Enrichment from a Gitea / Forgejo / Codeberg instance: stars, topics,
+/// visibility and open issues from `/api/v1/repos/{owner}/{repo}`, plus the
+/// latest release. Same egress rule as GitLab: the token is attached only to
+/// `codeberg.org` or an allowlisted host, in `Authorization: Bearer` (which
+/// Gitea accepts for access tokens and reqwest strips on a cross-host hop).
+async fn fetch_gitea(
+    domain: &str,
+    slug: &str,
+    token: Option<&str>,
+    gitea_hosts: &[String],
+) -> Result<HostInfo, String> {
+    if !valid_host(domain) {
+        return Err(format!("refusing to query untrusted host: {domain}"));
+    }
+    if !valid_gitea_slug(slug) {
+        return Err(format!("not an owner/name slug: {slug}"));
+    }
+    let token = token.filter(|_| gitea_host_trusted(domain, gitea_hosts));
+    let base = gitea_api(domain);
+    let client = client();
+
+    let mut req = client.get(format!("{base}/repos/{slug}"));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let resp = send(req, domain).await?;
+    if !resp.status().is_success() {
+        return Err(format!("Gitea API {}", resp.status()));
+    }
+    let repo: GiteaRepo = resp.json().await.map_err(|e| e.to_string())?;
+
+    // Latest release is optional; drafts only show up for writers, so they
+    // are filtered client-side as well as by the query.
+    let mut rel = client.get(format!("{base}/repos/{slug}/releases?draft=false&limit=5"));
+    if let Some(t) = token {
+        rel = rel.bearer_auth(t);
+    }
+    let latest_release = match send(rel, domain).await {
+        Ok(r) if r.status().is_success() => r
+            .json::<Vec<GiteaRelease>>()
+            .await
+            .ok()
+            .and_then(gitea_latest_release),
+        _ => None,
+    };
+
+    Ok(repo.into_host_info(latest_release))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +653,91 @@ mod tests {
         // SSRF-shaped hosts are never trusted regardless of the allowlist.
         assert!(!gitlab_host_trusted("169.254.169.254", &allow));
         assert!(!gitlab_host_trusted("gitlab.acme.io:22", &allow));
+    }
+
+    #[test]
+    fn gitea_token_only_trusted_for_codeberg_or_allowlisted() {
+        let allow = vec![" Git.Acme.IO ".to_string()];
+        assert!(gitea_host_trusted("codeberg.org", &[]));
+        assert!(gitea_host_trusted("Codeberg.org", &[]));
+        assert!(gitea_host_trusted("git.acme.io", &allow));
+        // Egress invariant: an arbitrary (even well-formed) host never gets it,
+        // and the GitLab allowlist doesn't leak into Gitea's or vice versa.
+        assert!(!gitea_host_trusted("evil.com", &allow));
+        assert!(!gitea_host_trusted("codeberg.org.evil.com", &allow));
+        assert!(!gitea_host_trusted("gitlab.com", &allow));
+        assert!(!gitlab_host_trusted("codeberg.org", &[]));
+        assert!(!gitea_host_trusted("169.254.169.254", &allow));
+        assert!(!gitea_host_trusted("git.acme.io:3000", &allow));
+    }
+
+    #[test]
+    fn trusted_domains_normalise_and_lead_with_the_public_instance() {
+        let trusted = TrustedHosts {
+            gitlab: vec![
+                " GitLab.Acme.io ".into(),
+                "gitlab.com".into(),
+                "10.0.0.1".into(),
+            ],
+            gitea: vec!["git.acme.io".into(), "git.acme.io".into()],
+        };
+        assert_eq!(
+            trusted_domains(Host::Gitlab, &trusted),
+            vec!["gitlab.com", "gitlab.acme.io"]
+        );
+        assert_eq!(
+            trusted_domains(Host::Gitea, &trusted),
+            vec!["codeberg.org", "git.acme.io"]
+        );
+        assert_eq!(trusted_domains(Host::Github, &trusted), vec!["github.com"]);
+    }
+
+    #[test]
+    fn gitea_repo_json_maps_to_host_info() {
+        // Trimmed from a real Codeberg `GET /api/v1/repos/{owner}/{repo}`.
+        let repo: GiteaRepo = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "full_name": "forgejo/forgejo",
+            "private": false,
+            "internal": false,
+            "stars_count": 2950,
+            "open_issues_count": 1234,
+            "open_pr_counter": 80,
+            "topics": ["forge", "git"],
+            "default_branch": "forgejo"
+        }))
+        .unwrap();
+        let info = repo.into_host_info(Some("v9.0.0".into()));
+        assert_eq!(info.stars, 2950);
+        assert_eq!(info.open_issues, 1234);
+        assert_eq!(info.topics, vec!["forge", "git"]);
+        assert_eq!(info.latest_release.as_deref(), Some("v9.0.0"));
+        assert!(!info.private);
+
+        // Older instances omit topics; internal repos are not public.
+        let repo: GiteaRepo =
+            serde_json::from_value(serde_json::json!({ "internal": true })).unwrap();
+        let info = repo.into_host_info(None);
+        assert!(info.topics.is_empty());
+        assert!(info.private);
+    }
+
+    #[test]
+    fn gitea_latest_release_skips_drafts() {
+        let rels: Vec<GiteaRelease> = serde_json::from_value(serde_json::json!([
+            {"tag_name": "v2.0.0-draft", "draft": true},
+            {"tag_name": "v1.9.0", "draft": false, "prerelease": false},
+        ]))
+        .unwrap();
+        assert_eq!(gitea_latest_release(rels).as_deref(), Some("v1.9.0"));
+        assert_eq!(gitea_latest_release(Vec::new()), None);
+    }
+
+    #[test]
+    fn gitea_slugs_are_exactly_owner_name() {
+        assert!(valid_gitea_slug("forgejo/forgejo"));
+        assert!(!valid_gitea_slug("group/sub/proj"));
+        assert!(!valid_gitea_slug("o/../x"));
     }
 
     fn url(s: &str) -> Url {
