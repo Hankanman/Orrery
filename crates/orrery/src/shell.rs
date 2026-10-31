@@ -1888,9 +1888,11 @@ impl OrreryApp {
 
     /// Download a GGUF model for the llama.cpp backend, streaming progress into
     /// the Settings AI note. The file lands in the app-data models dir; on
-    /// success the model list refreshes so it can be selected.
-    pub fn llama_download(&mut self, url: String, cx: &mut Context<Self>) {
+    /// success the model list refreshes so it can be selected. A non-empty
+    /// `sha256` is verified before the file is installed.
+    pub fn llama_download(&mut self, url: String, sha256: String, cx: &mut Context<Self>) {
         let url = url.trim().to_string();
+        let sha256 = Some(sha256.trim().to_string()).filter(|s| !s.is_empty());
         let note = |this: &mut Self, msg: SharedString| {
             if let Some(s) = &mut this.settings {
                 s.ai_note = msg;
@@ -1929,23 +1931,29 @@ impl OrreryApp {
             let tx_progress = tx.clone();
             let result = crate::task::try_run(async move {
                 let mut last_pct = u64::MAX;
-                orrery_core::llama::download_model(&url, move |downloaded, total| {
-                    let msg = match (downloaded * 100).checked_div(total) {
-                        Some(pct) => {
-                            if pct == last_pct {
-                                return; // throttle to whole-percent steps
+                orrery_core::llama::download_model_verified(
+                    &url,
+                    sha256.as_deref(),
+                    move |downloaded, total| {
+                        let msg = match (downloaded * 100).checked_div(total) {
+                            Some(pct) => {
+                                if pct == last_pct {
+                                    return; // throttle to whole-percent steps
+                                }
+                                last_pct = pct;
+                                format!(
+                                    "Downloading… {pct}% ({} / {})",
+                                    crate::data::human_bytes(downloaded),
+                                    crate::data::human_bytes(total)
+                                )
                             }
-                            last_pct = pct;
-                            format!(
-                                "Downloading… {pct}% ({} / {})",
-                                crate::data::human_bytes(downloaded),
-                                crate::data::human_bytes(total)
-                            )
-                        }
-                        None => format!("Downloading… {}", crate::data::human_bytes(downloaded)),
-                    };
-                    let _ = tx_progress.try_send(msg.into());
-                })
+                            None => {
+                                format!("Downloading… {}", crate::data::human_bytes(downloaded))
+                            }
+                        };
+                        let _ = tx_progress.try_send(msg.into());
+                    },
+                )
                 .await
             })
             .await;
