@@ -3,4 +3,8 @@
 //! async work (network, git, AI) they kick off.
 
 mod ai;
+mod github;
 mod palette;
+mod settings;
+
+pub(crate) use github::draft_and_create_pr;
