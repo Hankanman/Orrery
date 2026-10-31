@@ -634,6 +634,8 @@ mod tests {
             private: false,
             favorite: false,
             ai_summary: None,
+            worktree_of: None,
+            worktree_branch: None,
         }
     }
 
