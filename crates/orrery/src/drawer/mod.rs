@@ -25,6 +25,8 @@ use crate::shell::{DrawerTab, OrreryApp, Overlay};
 use crate::theme::Theme;
 use crate::toast::ToastKind;
 
+mod actions;
+
 const MONO: &str = "monospace";
 const PANEL_W: f32 = 560.;
 /// Recent commits shown in the Overview.
