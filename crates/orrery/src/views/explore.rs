@@ -51,6 +51,8 @@ pub fn star_row(r: inbox::RemoteRepo) -> StarRow {
     let (host, base) = match r.host {
         Host::Github => ("github", "https://github.com"),
         Host::Gitlab => ("gitlab", "https://gitlab.com"),
+        // Stars only come from GitHub today; no Gitea brand icon yet.
+        Host::Gitea => ("", "https://codeberg.org"),
     };
     StarRow {
         url: format!("{base}/{}", r.slug).into(),

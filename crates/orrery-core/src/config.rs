@@ -72,6 +72,7 @@ impl Default for AppConfig {
             agent_dispatch_args: crate::model::default_agent_dispatch_args(),
             github_client_id: String::new(),
             gitlab_hosts: Vec::new(),
+            gitea_hosts: Vec::new(),
             ai_model: crate::model::default_ai_model(),
             ai_enabled: true,
             ai_backend: crate::model::default_ai_backend(),
@@ -85,6 +86,8 @@ impl Default for AppConfig {
             notify_ci_failure: true,
             notify_attention: true,
             notify_agent_finished: true,
+            stale_pr_days: crate::model::default_stale_pr_days(),
+            stale_review_days: crate::model::default_stale_review_days(),
         }
     }
 }
@@ -325,6 +328,10 @@ mod tests {
         assert_eq!(cfg.ignore, d.ignore);
         assert_eq!(cfg.agent_dispatch_args, d.agent_dispatch_args);
         assert!(cfg.ai_enabled);
+        // Keys added later (Gitea hosts, stale thresholds) default too.
+        assert!(cfg.gitea_hosts.is_empty());
+        assert_eq!(cfg.stale_pr_days, 7);
+        assert_eq!(cfg.stale_review_days, 2);
     }
 
     #[test]

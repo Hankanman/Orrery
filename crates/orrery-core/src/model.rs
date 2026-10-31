@@ -18,6 +18,20 @@ pub enum Activity {
 pub enum Host {
     Github,
     Gitlab,
+    /// Gitea, and the forges that speak its API: Forgejo and Codeberg.
+    Gitea,
+}
+
+impl Host {
+    /// Lowercase name, as serialised (`"github"` / `"gitlab"` / `"gitea"`).
+    /// Doubles as a stable key part for per-host state (seen-sets, labels).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Host::Github => "github",
+            Host::Gitlab => "gitlab",
+            Host::Gitea => "gitea",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,7 +91,7 @@ pub struct Repo {
     pub ai_summary: Option<String>,
 }
 
-/// Host-side enrichment for a repo, fetched from GitHub/GitLab.
+/// Host-side enrichment for a repo, fetched from GitHub/GitLab/Gitea.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostInfo {
@@ -123,6 +137,11 @@ pub struct AppConfig {
     /// exfiltrate it to an arbitrary host.
     #[serde(default)]
     pub gitlab_hosts: Vec<String>,
+    /// Trusted self-hosted Gitea / Forgejo domains, mirroring `gitlab_hosts`.
+    /// `codeberg.org` is always recognised and trusted; any other Gitea is
+    /// only detected (and only ever sent a token) when it's on this list.
+    #[serde(default)]
+    pub gitea_hosts: Vec<String>,
     /// Preferred Ollama model for summaries (falls back to smallest installed).
     #[serde(default = "default_ai_model")]
     pub ai_model: String,
@@ -169,6 +188,22 @@ pub struct AppConfig {
     /// + `notify_attention` like the urgent model kinds.
     #[serde(default = "default_true")]
     pub notify_agent_finished: bool,
+    /// Days a pull request you authored may stay open before it counts as
+    /// stale (see `inbox::StaleThresholds`). 0 = never stale.
+    #[serde(default = "default_stale_pr_days")]
+    pub stale_pr_days: u32,
+    /// Days a review request may wait on you before it counts as stale.
+    /// 0 = never stale.
+    #[serde(default = "default_stale_review_days")]
+    pub stale_review_days: u32,
+}
+
+pub(crate) fn default_stale_pr_days() -> u32 {
+    7
+}
+
+pub(crate) fn default_stale_review_days() -> u32 {
+    2
 }
 
 pub(crate) fn default_agent_dispatch_args() -> String {
