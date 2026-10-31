@@ -1,2 +1,11 @@
 allowBuilds:
   esbuild: true
+
+# Security floors for the docs-site toolchain (Dependabot alerts). VitePress
+# 1.6.x still asks for vite ^5, which has no patched release, so vite is moved
+# to the patched 6.4 line (which also brings esbuild >= 0.25).
+overrides:
+  vite: 6.4.4
+  vue: ^3.5.42
+  postcss: ^8.5.23
+  source-map-js: ^1.2.2
