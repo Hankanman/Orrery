@@ -224,24 +224,17 @@ pub fn store_embeddings(
 
 /// Delete a repo's stored chunks (all sources, or one). Returns rows removed.
 pub fn delete_embeddings(host: &str, slug: &str, source: Option<&str>) -> Result<usize, String> {
-    let conn = cache::open()?;
-    delete_embeddings_on(&conn, host, slug, source).map_err(|e| e.to_string())
+    cache::try_with_conn(|conn| delete_embeddings_on(conn, host, slug, source))
 }
 
 /// Load the whole index (empty on error — search just finds nothing).
 pub fn all_embeddings() -> Vec<EmbeddingRow> {
-    match cache::open() {
-        Ok(conn) => all_embeddings_on(&conn),
-        Err(_) => Vec::new(),
-    }
+    cache::with_conn(Vec::new(), all_embeddings_on)
 }
 
 /// Count/size of the index, for the Settings display.
 pub fn index_stats() -> IndexStats {
-    match cache::open() {
-        Ok(conn) => index_stats_on(&conn),
-        Err(_) => IndexStats::default(),
-    }
+    cache::with_conn(IndexStats::default(), index_stats_on)
 }
 
 // ── Similarity + ranking ────────────────────────────────────────────────────
@@ -689,8 +682,7 @@ pub fn purge_legacy_on(conn: &Connection) -> rusqlite::Result<usize> {
 
 /// See [`purge_legacy_on`].
 pub fn purge_legacy() -> Result<usize, String> {
-    let conn = cache::open()?;
-    purge_legacy_on(&conn).map_err(|e| e.to_string())
+    cache::try_with_conn(purge_legacy_on)
 }
 
 /// Drop every stored chunk and skip signature for repos not in `live` (the
@@ -740,8 +732,7 @@ pub fn prune_orphans_on(
 
 /// See [`prune_orphans_on`].
 pub fn prune_orphans(live: &std::collections::HashSet<(String, String)>) -> Result<usize, String> {
-    let conn = cache::open()?;
-    prune_orphans_on(&conn, live).map_err(|e| e.to_string())
+    cache::try_with_conn(|conn| prune_orphans_on(conn, live))
 }
 
 /// Empty the whole index and its skip signatures, so the next pass re-embeds
@@ -754,8 +745,7 @@ pub fn clear_index_on(conn: &Connection) -> rusqlite::Result<usize> {
 
 /// See [`clear_index_on`].
 pub fn clear_index() -> Result<usize, String> {
-    let conn = cache::open()?;
-    clear_index_on(&conn).map_err(|e| e.to_string())
+    cache::try_with_conn(clear_index_on)
 }
 
 fn unix_now() -> i64 {
