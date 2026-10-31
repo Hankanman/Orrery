@@ -6,7 +6,12 @@
 #
 # Downloads the latest release AppImage (the only build that bundles the
 # llama.cpp engine), verifies it against the release's SHA256SUMS, and puts it
-# on your PATH with a desktop entry + icon. Re-run it to update.
+# on your PATH with a desktop entry + icon. Re-run it to update, or to repair
+# the launcher and desktop entry.
+#
+# The launcher and the desktop entry run the AppImage with
+# APPIMAGELAUNCHER_DISABLE=1, so AppImageLauncher (if installed) doesn't
+# "integrate" a second copy into ~/Applications.
 #
 # Environment overrides:
 #   ORRERY_VERSION=v2026.10.1  install a specific tag instead of the latest
@@ -26,6 +31,11 @@ ICON="$PREFIX/share/icons/hicolor/512x512/apps/orrery.png"
 say() { printf '\033[1;35m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Single-quote a string for a POSIX shell script.
+sh_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+# Quote a path for a desktop entry's Exec key (the spec's double-quote rules).
+desktop_quote() { printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"`$]/\\&/g')"; }
+
 refresh_desktop_caches() {
   command -v update-desktop-database >/dev/null 2>&1 &&
     update-desktop-database -q "$PREFIX/share/applications" 2>/dev/null || true
@@ -35,7 +45,7 @@ refresh_desktop_caches() {
 
 if [[ "${1:-}" == "--uninstall" ]]; then
   say "Removing Orrery from $PREFIX"
-  rm -f "$BIN" "$DESKTOP" "$ICON" "$APPIMAGE" "$APP_DIR/VERSION"
+  rm -f "$BIN" "$BIN.new" "$DESKTOP" "$ICON" "$APPIMAGE" "$APPIMAGE.new" "$APP_DIR/VERSION"
   rmdir "$APP_DIR" 2>/dev/null || true
   refresh_desktop_caches
   say "Done. Your config (~/.config/orrery) and cache (~/.local/share/orrery) were left in place."
@@ -63,33 +73,50 @@ appimage_url="$(grep -E '(x86_64|amd64)\.AppImage$' <<<"$urls" | head -n1 || tru
 sums_url="$(grep -E '/SHA256SUMS$' <<<"$urls" | head -n1 || true)"
 [[ -n "$tag" && -n "$appimage_url" ]] || die "no x86_64 AppImage found in release ${tag:-?}."
 
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
 installed=""
 [[ -f "$APP_DIR/VERSION" ]] && installed="$(cat "$APP_DIR/VERSION")"
 if [[ "$installed" == "$tag" && -x "$APPIMAGE" ]]; then
+  # Nothing to download, but the launcher and desktop entry below are still
+  # rewritten, so a re-run repairs them (and migrates an older install).
   say "Orrery $tag is already installed and up to date."
-  exit 0
-fi
-say "${installed:+Updating Orrery $installed → }${installed:-Installing Orrery }$tag"
-
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-asset="$(basename "$appimage_url")"
-curl -fL --progress-bar -o "$tmp/$asset" "$appimage_url" || die "download failed."
-
-if [[ -n "$sums_url" ]]; then
-  curl -fsSL -o "$tmp/SHA256SUMS" "$sums_url" || die "couldn't fetch SHA256SUMS."
-  (cd "$tmp" && grep -E " \*?$asset\$" SHA256SUMS | sha256sum -c --status) ||
-    die "checksum mismatch for $asset — not installing."
-  say "Checksum verified."
 else
-  say "Release $tag has no SHA256SUMS; skipping checksum verification."
+  say "${installed:+Updating Orrery $installed → }${installed:-Installing Orrery }$tag"
+
+  asset="$(basename "$appimage_url")"
+  curl -fL --progress-bar -o "$tmp/$asset" "$appimage_url" || die "download failed."
+
+  if [[ -n "$sums_url" ]]; then
+    curl -fsSL -o "$tmp/SHA256SUMS" "$sums_url" || die "couldn't fetch SHA256SUMS."
+    (cd "$tmp" && grep -E " \*?$asset\$" SHA256SUMS | sha256sum -c --status) ||
+      die "checksum mismatch for $asset — not installing."
+    say "Checksum verified."
+  else
+    say "Release $tag has no SHA256SUMS; skipping checksum verification."
+  fi
+
+  mkdir -p "$APP_DIR"
+  install -m755 "$tmp/$asset" "$APPIMAGE.new"
+  mv -f "$APPIMAGE.new" "$APPIMAGE" # atomic swap, safe while an old copy runs
+  printf '%s\n' "$tag" >"$APP_DIR/VERSION"
 fi
 
-mkdir -p "$APP_DIR" "$(dirname "$BIN")" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"
-install -m755 "$tmp/$asset" "$APPIMAGE.new"
-mv -f "$APPIMAGE.new" "$APPIMAGE" # atomic swap, safe while an old copy runs
-ln -sf "$APPIMAGE" "$BIN"
-printf '%s\n' "$tag" >"$APP_DIR/VERSION"
+mkdir -p "$(dirname "$BIN")" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"
+# A wrapper, not a symlink: AppImageLauncher hooks every AppImage launch (via
+# binfmt_misc) and offers to copy it into ~/Applications with a menu entry of
+# its own, unless APPIMAGELAUNCHER_DISABLE is set. It's written beside $BIN and
+# renamed over it, so an older install's symlink is replaced, not followed
+# (writing through the symlink would clobber the AppImage).
+{
+  printf '#!/bin/sh\n'
+  printf '# Written by Orrery'"'"'s install.sh. APPIMAGELAUNCHER_DISABLE stops\n'
+  printf '# AppImageLauncher integrating a second copy of the AppImage.\n'
+  printf 'APPIMAGELAUNCHER_DISABLE=1 exec %s "$@"\n' "$(sh_quote "$APPIMAGE")"
+} >"$BIN.new"
+chmod 755 "$BIN.new"
+mv -f "$BIN.new" "$BIN"
 
 # Icon and desktop entry come from the repo at the same tag, so they match the
 # installed build (falling back to main for tags older than this layout). A
@@ -100,11 +127,27 @@ fetch_repo_file() { # <repo path> <dest>
 }
 fetch_repo_file packaging/icons/icon.png "$ICON" || say "couldn't fetch the icon (skipped)."
 if fetch_repo_file packaging/orrery.desktop "$tmp/orrery.desktop"; then
-  sed "s|^Exec=.*|Exec=$APPIMAGE|" "$tmp/orrery.desktop" >"$DESKTOP"
+  # Exec runs the wrapper, so menu launches bypass AppImageLauncher too. Keep
+  # the name orrery.desktop: Orrery registers "orrery" as its app id with the
+  # desktop portal (for the global shortcut), and the portal only accepts an
+  # id with a desktop file of the same name.
+  exec_line="Exec=$(desktop_quote "$BIN")"
+  awk -v line="${exec_line//\\/\\\\}" '/^Exec=/ { print line; next } { print }' \
+    "$tmp/orrery.desktop" >"$DESKTOP"
 else
   say "couldn't fetch the desktop entry (skipped)."
 fi
 refresh_desktop_caches
+
+# A copy AppImageLauncher integrated earlier (from running the AppImage
+# directly) keeps a menu entry of its own. Point it out rather than delete it.
+shopt -s nullglob
+ail_copies=("$HOME"/Applications/[Oo]rrery*.[Aa]pp[Ii]mage)
+shopt -u nullglob
+if ((${#ail_copies[@]})); then
+  say "Note: AppImageLauncher also has a copy at ${ail_copies[0]}. This install"
+  say "replaces it; remove it from its menu entry (right-click → Remove AppImage from system)."
+fi
 
 # Older AppImage runtimes mount via FUSE 2; flag it if it looks missing.
 if ! ldconfig -p 2>/dev/null | grep -q 'libfuse\.so\.2'; then

@@ -1,6 +1,7 @@
 //! orrery-platform — Linux desktop integration, free of UI.
 
 pub mod agents;
+pub mod app_id;
 pub mod appearance;
 pub mod krunner;
 pub mod notifier;

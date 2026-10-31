@@ -12,10 +12,12 @@ This installs the latest release AppImage for your user, with no root needed:
 
 - the download is checked against the release's `SHA256SUMS`;
 - it's stored in `~/.local/opt/orrery`;
-- it's linked as `~/.local/bin/orrery`;
-- it gets an app-menu entry and icon.
+- it's launched by a small `~/.local/bin/orrery` script;
+- it gets an app-menu entry (`orrery.desktop`) and icon.
 
-**Updating:** run the same command again. It does nothing if you're already on the latest release.
+**AppImageLauncher:** if you have [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) installed, it normally offers to "integrate" any AppImage you run, copying it into `~/Applications` with a second menu entry. The launcher script and menu entry set `APPIMAGELAUNCHER_DISABLE=1`, so the installed copy runs as it is. If AppImageLauncher already integrated a copy, remove it (right-click its menu entry → *Remove AppImage from system*). Keep the `orrery.desktop` entry this script installs: the global shortcut relies on it (see [below](#the-desktop-entry-and-the-global-shortcut)).
+
+**Updating:** run the same command again. If you're already on the latest release it downloads nothing, and just refreshes the launcher and menu entry.
 
 **Options:**
 
@@ -87,6 +89,16 @@ cargo run -p orrery          # first build is slow: it compiles all of GPUI
 ```
 
 On first launch, open **Settings → Workspace roots** and point Orrery at the directories where you keep your projects (defaults to `~/dev`). Then **Save**.
+
+### The desktop entry and the global shortcut
+
+The summon shortcut (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd>) goes through the desktop's GlobalShortcuts portal, which needs to know which app is asking. Orrery registers the app id `orrery` with the portal at startup, and the portal accepts it only if a desktop entry named `orrery.desktop` is installed. The packages and the install script provide one. A source build doesn't, so install the repo's copy once:
+
+```sh
+install -Dm644 packaging/orrery.desktop ~/.local/share/applications/orrery.desktop
+```
+
+Without it the log shows `couldn't register app id 'orrery' … App info not found`, and on KDE the shortcut fails with `An app id is required`. With it you'll see `registered app id 'orrery'` and `bound 'activate' → Ctrl+Alt+O`.
 
 ## Build a release
 

@@ -27,5 +27,5 @@ Closing the window **hides Orrery to the system tray** rather than quitting, so 
 Prefer Orrery fully closed? Quit from the tray menu.
 
 ::: tip Summon it back
-A global shortcut — <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd> — brings the window back to the front from anywhere. It's registered through the XDG **GlobalShortcuts portal** (KDE Plasma 6, GNOME), where you can rebind it in your desktop's shortcut settings. There's no X11 key-grab fallback, so it's best-effort: on X11 sessions and on desktops without that portal there's no global shortcut.
+A global shortcut — <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd> — brings the window back to the front from anywhere. It's registered through the XDG **GlobalShortcuts portal** (KDE Plasma 6, GNOME), where you can rebind it in your desktop's shortcut settings. There's no X11 key-grab fallback, so it's best-effort: on X11 sessions and on desktops without that portal there's no global shortcut. The portal needs Orrery's `orrery.desktop` entry to be installed; every package provides it, and source builds can add it by hand (see [Getting started](./getting-started#the-desktop-entry-and-the-global-shortcut)).
 :::
