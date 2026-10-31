@@ -226,6 +226,72 @@ impl Derived {
 }
 
 impl OrreryApp {
+    /// The app state for a freshly opened window, from the launch snapshot.
+    /// Also starts the live wiring (see `live::spawn`), whose tray and
+    /// watcher handles the app keeps.
+    pub(crate) fn new(
+        snap: crate::data::Snapshot,
+        theme: Rc<Theme>,
+        config: AppConfig,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Start the live wiring: filesystem watch, appearance, attention
+        // poll, and system tray all marshal back onto this entity. Returns
+        // the tray handle (if the tray came up — the app pushes attention
+        // summaries to it) plus the watcher handle (re-armed when repos are
+        // added).
+        let (tray, watcher) = crate::live::spawn(cx);
+        OrreryApp {
+            view: View::Grid,
+            rows: snap.rows,
+            roots: snap.roots,
+            repos: snap.repos,
+            theme,
+            config,
+            attention: Vec::new(),
+            polled_inbox: None,
+            // Seed CI states from the cache so a failing default branch shows
+            // on the first attention pass, before the CI pass first runs
+            // (offline included). The pass refreshes them after.
+            ci_states: orrery_core::cache::all_ci_states(),
+            ci_last_error: None,
+            attention_items: Vec::new(),
+            attention_by_repo: Default::default(),
+            attention_seen: None,
+            tray_attention: Default::default(),
+            overlay: None,
+            drawer: Default::default(),
+            inbox: Default::default(),
+            feed: Default::default(),
+            explore: Default::default(),
+            cleanup: Default::default(),
+            cleanup_ui: Default::default(),
+            explore_ui: Default::default(),
+            agents: Default::default(),
+            agents_ui: Default::default(),
+            active_agents: Default::default(),
+            settings: None,
+            devtools: None,
+            services: Default::default(),
+            tray_active: tray.is_some(),
+            tray,
+            watcher,
+            selected: Default::default(),
+            fleet_run: None,
+            fleet_seq: 0,
+            fleet_prune: None,
+            fleet_prune_seq: 0,
+            toasts: Vec::new(),
+            toast_seq: 0,
+            grid: Default::default(),
+            passes: Default::default(),
+            derived: Default::default(),
+            scanned_at: snap.scanned_at,
+            view_filter: None,
+            focus: cx.focus_handle(),
+        }
+    }
+
     /// Toggle a repo's favorite (card star): update the row now, persist the
     /// flag off the UI thread.
     pub fn set_favorite(&mut self, idx: usize, next: bool, cx: &mut Context<Self>) {
