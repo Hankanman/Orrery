@@ -656,6 +656,32 @@ fn urgent_kind_enabled(cfg: &AppConfig, kind: AttentionKind) -> bool {
     }
 }
 
+/// The error toast (title, detail) for a branch-prune outcome, if anything
+/// went wrong: the whole prune failing, or individual branches that couldn't
+/// be deleted. `None` when every prunable branch went.
+fn prune_failure(
+    report: &Result<orrery_core::git_ops::PruneReport, String>,
+) -> Option<(String, String)> {
+    match report {
+        Err(e) => Some(("Prune failed".into(), crate::data::oneline(e.clone()))),
+        Ok(r) if r.failed.is_empty() => None,
+        Ok(r) => {
+            let n = r.failed.len();
+            let title = format!(
+                "Couldn't delete {n} branch{}",
+                if n == 1 { "" } else { "es" }
+            );
+            let detail = r
+                .failed
+                .iter()
+                .map(|(branch, err)| format!("{branch}: {err}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Some((title, crate::data::oneline(detail)))
+        }
+    }
+}
+
 /// Max attention items surfaced in the tray menu.
 const TRAY_TOP: usize = 3;
 
@@ -3190,12 +3216,18 @@ impl OrreryApp {
         cx.notify();
         let path = id.to_string();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .spawn(async move {
-                    let _ = orrery_core::git_ops::prune_branches(&path);
-                })
+            let report = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::prune_branches(&path) })
                 .await;
-            let Ok(rows) = this.update(cx, |this, _| this.rows.clone()) else {
+            let Ok(rows) = this.update(cx, |this, cx| {
+                // Surface what couldn't be pruned (a branch checked out in a
+                // worktree, a permissions error, …) instead of dropping it.
+                if let Some((title, detail)) = prune_failure(&report) {
+                    this.push_toast(ToastKind::Error, title, Some(detail.into()), cx);
+                }
+                this.rows.clone()
+            }) else {
                 return;
             };
             let result = cx
@@ -5075,6 +5107,25 @@ mod tests {
         );
         let unlinked = item(AttentionKind::ReviewRequested, "a", None);
         assert!(attention_key(&unlinked).contains("github.com/o/a"));
+    }
+
+    #[test]
+    fn prune_failure_reports_only_failures() {
+        use orrery_core::git_ops::PruneReport;
+        let clean = Ok(PruneReport {
+            deleted: vec!["old".into()],
+            failed: Vec::new(),
+        });
+        assert!(prune_failure(&clean).is_none());
+        let partial = Ok(PruneReport {
+            deleted: Vec::new(),
+            failed: vec![("wip".into(), "checked out\nin a worktree".into())],
+        });
+        let (title, detail) = prune_failure(&partial).unwrap();
+        assert_eq!(title, "Couldn't delete 1 branch");
+        assert_eq!(detail, "wip: checked out in a worktree");
+        let (title, _) = prune_failure(&Err("not a repo".into())).unwrap();
+        assert_eq!(title, "Prune failed");
     }
 
     #[test]
