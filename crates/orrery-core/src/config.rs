@@ -95,6 +95,7 @@ impl Default for AppConfig {
             notify_ci_failure: true,
             notify_attention: true,
             notify_agent_finished: true,
+            local_audits: false,
         }
     }
 }

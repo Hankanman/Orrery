@@ -178,6 +178,12 @@ pub struct AppConfig {
     /// + `notify_attention` like the urgent model kinds.
     #[serde(default = "default_true")]
     pub notify_agent_finished: bool,
+    /// Run `cargo-audit` / `npm audit` locally for repos without a GitHub
+    /// remote (`advisories::refresh_local`). Off by default: even sandboxed,
+    /// it runs a tool over a lockfile from a repo that may come from anywhere.
+    /// GitHub repos use Dependabot alerts regardless.
+    #[serde(default)]
+    pub local_audits: bool,
 }
 
 pub(crate) fn default_agent_dispatch_args() -> String {

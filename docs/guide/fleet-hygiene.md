@@ -79,10 +79,16 @@ For a worktree, the at-risk checks cover only that checkout: its dirty state and
 Orrery shows the number of known-vulnerable dependencies in each repo, broken down by severity.
 
 - **GitHub repos** use open [Dependabot alerts](https://docs.github.com/en/code-security/dependabot/dependabot-alerts). Reading them needs a token with Dependabot-alert access: the `security_events` scope for a classic token, or the "Dependabot alerts: read" permission for a fine-grained one. If GitHub answers 403 or 404 (no permission, alerts disabled, or the repo isn't visible), the repo shows as *unavailable* with the reason; it isn't treated as an error. An expired token, a rate limit or an outage keeps the last known counts.
-- **Other repos** are audited locally, but only if the tool is already installed:
-  - `cargo audit` runs when the repo has a `Cargo.lock` and `cargo-audit` is installed.
+- **Other repos** can be audited locally. This is **off by default**: turn it on with `localAudits = true` in `config.toml`. It only runs if the tool is already installed:
+  - `cargo-audit` runs when the repo has a `Cargo.lock` and `cargo-audit` is installed.
   - `npm audit --package-lock-only` runs when the repo has a `package-lock.json` and `npm` is installed.
 
-  Orrery never installs anything and never runs an audit without a lockfile, because `cargo audit` would otherwise write one into your repo. Each run is limited to 90 seconds and is killed if it takes longer. `cargo audit` may refresh its advisory database, and `npm audit` sends the dependency list to your npm registry, as they do when you run them yourself.
+  Orrery never installs anything and never runs an audit without a lockfile. Each run is limited to 90 seconds and is killed if it takes longer.
+
+  **Why it's opt-in.** Orrery scans repos you may have cloned from anywhere, and a repo's own config can steer these tools. A `.cargo/config.toml` alias can turn `cargo audit` into "build and run this code", and a project `.npmrc` can point npm at another registry and put your environment's secrets into its auth headers. So Orrery never runs either tool inside the repo:
+  - `cargo-audit` is called directly (not through `cargo`), given the lockfile's path, and run from an empty temporary directory with only `PATH`, `HOME` and `CARGO_HOME` in its environment.
+  - npm audits a copy of `package-lock.json` (and `package.json`) in an empty temporary directory, with the registry pinned to `registry.npmjs.org`, empty user and global config, a throwaway `HOME`, and only `PATH` passed through.
+
+  These steps close off the known ways in, but the audit still runs a tool on a file the repo supplies. Keep local audits off unless you trust the repos under your roots. `cargo-audit` may refresh its advisory database, and `npm audit` sends the dependency list to npmjs.org.
 
 Results are cached for six hours. Any repo with open advisories gets a **vulnerable dependencies** item in the attention list, at Attention severity.
