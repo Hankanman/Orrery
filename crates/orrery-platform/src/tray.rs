@@ -1,7 +1,6 @@
-//! System tray, native (no Tauri, no GTK). A `StatusNotifierItem` over D-Bus via
-//! `ksni` — the protocol KDE/Plasma and most freedesktop panels speak directly,
-//! so we avoid pulling in a GTK event loop (which would reintroduce the very CPU
-//! cost the native rewrite left WebKitGTK to escape).
+//! System tray, native (no GTK). A `StatusNotifierItem` over D-Bus via `ksni` —
+//! the protocol KDE/Plasma and most freedesktop panels speak directly, so we
+//! avoid pulling in a GTK event loop and its idle CPU cost.
 //!
 //! The tray owns its own thread + async runtime, like the other platform
 //! integrations. It's UI-agnostic: menu activations are reported through an

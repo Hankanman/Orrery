@@ -1,10 +1,8 @@
-//! Native Orrery (rewrite) — the desktop GPUI app. All logic comes from the
-//! `orrery-core` crate (scan/git/forge/inbox/ai/cache/config); this crate is
-//! purely the UI: theme, cards, shell, views. No webview, no IPC. Reading the
-//! shipping `~/.local/share/orrery/cache.sqlite` is `orrery_core::cache`.
-//!
-//! Phase 1: real `--orr-*` theme + faithful RepoCard. Phase 2: the app shell —
-//! header + sidebar nav + view switching (`shell.rs`).
+//! Orrery — the desktop GPUI app. All logic comes from the `orrery-core` crate
+//! (scan/git/forge/inbox/ai/cache/config) and desktop integration from
+//! `orrery-platform`; this crate is the UI: the `--orr-*` theme, cards, the
+//! app shell (header + sidebar nav + view switching, `shell/`), the repo
+//! drawer, and the views.
 
 mod assets;
 mod card;
