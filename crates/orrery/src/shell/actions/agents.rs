@@ -300,7 +300,7 @@ impl OrreryApp {
                         // Show the new worktree in the open drawer's Overview
                         // and the Agents view without waiting for the poll.
                         if this.drawer.repo == repo {
-                            crate::drawer::load_overview(this, cx);
+                            this.drawer_load_overview(cx);
                         }
                         this.scan_agents(false, cx);
                     }
