@@ -4,8 +4,8 @@
 //! Enter runs it, Esc closes.
 //!
 //! State lives in `Overlay::Palette(PaletteData)`; the action handlers + executor
-//! are methods on `OrreryApp` (shell.rs). This module owns the item model + the
-//! rendering.
+//! are methods on `OrreryApp` (`shell/actions/palette.rs`). This module owns the
+//! item model + the rendering.
 
 use std::cell::RefCell;
 use std::rc::Rc;

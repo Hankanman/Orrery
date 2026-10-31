@@ -38,8 +38,9 @@ crates/orrery-platform/src/ Linux desktop integration (no UI, no Tauri)
   agents.rs                 detect running agent sessions via /proc
 crates/orrery/src/          The GPUI app (UI + the `orrery` binary)
   main.rs                   App/window setup, key bindings, close-to-tray
-  shell.rs                  Header + sidebar nav + view switching + OrreryApp state
-  card.rs drawer.rs palette.rs  RepoCard, the repo drawer, the command palette
+  shell/                    OrreryApp state + Render; header, sidebar, grid, overlay,
+                            attention, passes, confirm; actions/ = per-surface handlers
+  card.rs drawer/ palette.rs  RepoCard, the repo drawer (+ its actions), the command palette
   views/                    inbox feed explore cleanup agents devtools settings newproject
   theme.rs                  The design system as `--orr-*` tokens → gpui colors
   data.rs                   core::model → flat render-ready Row
