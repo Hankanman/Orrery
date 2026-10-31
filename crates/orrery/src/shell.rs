@@ -618,7 +618,9 @@ async fn draft_and_create_pr(
     // Create the PR (network → the shared tokio runtime).
     let t2 = title.clone();
     let result = crate::task::try_run(async move {
-        let token = orrery_core::oauth::github_token().ok_or("connect GitHub to open a PR")?;
+        let token = orrery_core::oauth::github_token_async()
+            .await
+            .ok_or("connect GitHub to open a PR")?;
         orrery_core::forge::create_pr(&slug, &head, &base, &t2, &body, &token).await
     })
     .await;

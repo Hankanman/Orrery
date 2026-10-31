@@ -35,8 +35,9 @@ enum Signal {
     /// Desktop theme/accent changed — recompute the theme.
     Appearance(Appearance),
     /// Latest attention-poll result: glance lines (the Inbox nav badge's
-    /// fallback) + the raw inbox facts for the attention model.
-    Attention(Vec<String>, Vec<orrery_core::inbox::InboxItem>),
+    /// fallback) + the raw inbox facts for the attention model (`None` when
+    /// the fetch failed: keep the last-known facts).
+    Attention(Vec<String>, Option<Vec<orrery_core::inbox::InboxItem>>),
     /// Raise the main window (tray: left-click / "Show Orrery").
     ShowWindow,
     /// Quit the app (tray: "Quit").
@@ -172,7 +173,10 @@ pub fn spawn(
                     if this
                         .update(cx, |app, cx| {
                             app.attention = lines;
-                            app.polled_inbox = Some(items);
+                            // A failed fetch keeps the last-known facts.
+                            if let Some(items) = items {
+                                app.polled_inbox = Some(items);
+                            }
                             // Fresh host facts → refresh the attention
                             // surfaces (badges, tray, urgent notifications).
                             app.recompute_attention();
