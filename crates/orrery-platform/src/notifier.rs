@@ -17,8 +17,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use orrery_core::forge::TrustedHosts;
-use orrery_core::model::{AppConfig, Host};
+use orrery_core::model::{AppConfig, Host, Repo};
 use orrery_core::{cache, config, inbox, oauth};
+
+use crate::notify::NotifyAction;
 
 /// Snapshot of the keys seen per source on the previous successful poll of
 /// that source, for delta detection. (Renamed from the pre-per-source
@@ -78,7 +80,9 @@ pub fn watch(on_glance: impl Fn(Vec<String>, Option<Vec<inbox::InboxItem>>) + Se
                 let result = poll(&config::load()).await;
                 on_glance(result.lines, result.inbox);
                 for notice in &result.fresh {
-                    if let Err(e) = crate::notify::send(&notice.title, &notice.body).await {
+                    if let Err(e) =
+                        crate::notify::send_with(&notice.title, &notice.body, &notice.actions).await
+                    {
                         eprintln!("[orrery notifier] notification failed: {e}");
                     }
                 }
@@ -97,12 +101,21 @@ struct Attention {
     label: String,
     title: String,
     body: String,
+    /// The PR/issue page, for the notification's "Open" button.
+    url: Option<String>,
+    /// The `owner/name` slug and its host, to find the local repo for
+    /// "Show in Orrery".
+    repo: String,
+    host: Host,
 }
 
 /// A newly-appeared item to surface as a desktop notification.
 pub struct Notice {
     pub title: String,
     pub body: String,
+    /// Buttons: "Open" (the item's page), and "Show in Orrery" when the
+    /// item's repo is cloned locally.
+    pub actions: Vec<NotifyAction>,
 }
 
 /// Result of one poll.
@@ -133,13 +146,23 @@ pub async fn poll(cfg: &AppConfig) -> PollResult {
         .unwrap_or_default();
     let (new_items, seen) = diff(&prev, &sources);
 
-    let fresh = if cfg.notify_enabled {
-        new_items
+    let fresh: Vec<Notice> = if cfg.notify_enabled {
+        let wanted: Vec<&Attention> = new_items
             .into_iter()
             .filter(|a| type_enabled(cfg, a.kind))
+            .collect();
+        // Only read the repo list when there's something to notify.
+        let local = if wanted.is_empty() {
+            Vec::new()
+        } else {
+            cache::load_repos()
+        };
+        wanted
+            .into_iter()
             .map(|a| Notice {
                 title: a.title.clone(),
                 body: a.body.clone(),
+                actions: notice_actions(a, &local),
             })
             .collect()
     } else {
@@ -191,6 +214,24 @@ fn diff<'a>(prev: &Seen, sources: &'a [SourceResult]) -> (Vec<&'a Attention>, Se
         );
     }
     (fresh, seen)
+}
+
+/// A notice's buttons: open the item's page, and show its repo in Orrery when
+/// it's cloned locally (matched by host and `owner/name` slug).
+fn notice_actions(a: &Attention, local: &[Repo]) -> Vec<NotifyAction> {
+    let mut actions = Vec::new();
+    if let Some(url) = &a.url {
+        actions.push(NotifyAction::OpenUrl(url.clone()));
+    }
+    if let Some(repo) = local.iter().find(|r| {
+        r.host == Some(a.host)
+            && r.slug
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(&a.repo))
+    }) {
+        actions.push(NotifyAction::ShowRepo(repo.id.clone()));
+    }
+    actions
 }
 
 /// Fold this poll's raw inbox results into the per-source last-known store
@@ -321,6 +362,9 @@ fn ci_attention(notes: &[inbox::Notification]) -> Vec<Attention> {
             label: format!("CI: {}", short_repo(&n.repo)),
             title: "CI alert".into(),
             body: format!("{}: {}", n.repo, n.title),
+            url: n.url.clone(),
+            repo: n.repo.clone(),
+            host: n.host,
         })
         .collect()
 }
@@ -339,6 +383,9 @@ fn inbox_attention(items: &[inbox::InboxItem]) -> Vec<Attention> {
                 label: format!("New PR: {short} #{}", it.number),
                 title: "New pull request".into(),
                 body: format!("{} #{} · {}", it.repo, it.number, it.title),
+                url: Some(it.url.clone()),
+                repo: it.repo.clone(),
+                host: it.host,
             }),
             "review" => out.push(Attention {
                 kind: "review",
@@ -346,6 +393,9 @@ fn inbox_attention(items: &[inbox::InboxItem]) -> Vec<Attention> {
                 label: format!("Review requested: {short} #{}", it.number),
                 title: "Review requested".into(),
                 body: format!("{} #{} · {}", it.repo, it.number, it.title),
+                url: Some(it.url.clone()),
+                repo: it.repo.clone(),
+                host: it.host,
             }),
             _ => {} // assigned issues aren't an attention-notification type
         }
@@ -356,8 +406,8 @@ fn inbox_attention(items: &[inbox::InboxItem]) -> Vec<Attention> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ci_attention, diff, merge_raw, short_repo, source_key, type_enabled, Attention, Seen,
-        SourceResult,
+        ci_attention, diff, merge_raw, notice_actions, short_repo, source_key, type_enabled,
+        Attention, NotifyAction, Seen, SourceResult,
     };
     use orrery_core::inbox::{InboxItem, Notification};
     use orrery_core::model::{AppConfig, Host};
@@ -370,6 +420,9 @@ mod tests {
             label: key.into(),
             title: String::new(),
             body: String::new(),
+            url: None,
+            repo: String::new(),
+            host: Host::Github,
         }
     }
 
@@ -428,6 +481,21 @@ mod tests {
         let (fresh, seen) = diff(&seen, &second);
         assert_eq!(keys(&fresh), ["pr2"]);
         assert!(seen["notifications"].contains("ci"));
+    }
+
+    #[test]
+    fn notices_open_their_page_and_skip_show_without_a_local_clone() {
+        let mut a = item("pr:o/r#1");
+        assert!(notice_actions(&a, &[]).is_empty());
+        a.url = Some("https://gitlab.com/o/r/-/merge_requests/1".into());
+        a.repo = "o/r".into();
+        a.host = Host::Gitlab;
+        assert_eq!(
+            notice_actions(&a, &[]),
+            vec![NotifyAction::OpenUrl(
+                "https://gitlab.com/o/r/-/merge_requests/1".into()
+            )]
+        );
     }
 
     #[test]

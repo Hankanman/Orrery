@@ -27,6 +27,7 @@ APPIMAGE="$APP_DIR/Orrery.AppImage"
 BIN="$PREFIX/bin/orrery"
 DESKTOP="$PREFIX/share/applications/orrery.desktop"
 ICON="$PREFIX/share/icons/hicolor/512x512/apps/orrery.png"
+SEARCH_PROVIDER="$PREFIX/share/gnome-shell/search-providers/orrery-search-provider.ini"
 
 say() { printf '\033[1;35m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -45,7 +46,7 @@ refresh_desktop_caches() {
 
 if [[ "${1:-}" == "--uninstall" ]]; then
   say "Removing Orrery from $PREFIX"
-  rm -f "$BIN" "$BIN.new" "$DESKTOP" "$ICON" "$APPIMAGE" "$APPIMAGE.new" "$APP_DIR/VERSION"
+  rm -f "$BIN" "$BIN.new" "$DESKTOP" "$ICON" "$SEARCH_PROVIDER" "$APPIMAGE" "$APPIMAGE.new" "$APP_DIR/VERSION"
   rmdir "$APP_DIR" 2>/dev/null || true
   refresh_desktop_caches
   say "Done. Your config (~/.config/orrery) and cache (~/.local/share/orrery) were left in place."
@@ -136,6 +137,24 @@ if fetch_repo_file packaging/orrery.desktop "$tmp/orrery.desktop"; then
     "$tmp/orrery.desktop" >"$DESKTOP"
 else
   say "couldn't fetch the desktop entry (skipped)."
+fi
+# GNOME Shell search provider. GNOME Shell only reads providers from the
+# system data dirs (XDG_DATA_DIRS), not ~/.local/share, so on GNOME also say
+# how to enable it system-wide; the per-user copy is what that command copies.
+mkdir -p "$(dirname "$SEARCH_PROVIDER")"
+if fetch_repo_file packaging/orrery-search-provider.ini "$SEARCH_PROVIDER"; then
+  case ":${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:" in
+    *":$PREFIX/share:"* | *":$PREFIX/share/:"*) ;;
+    *)
+      if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]]; then
+        say "To search your repos from the GNOME Activities overview, run once:"
+        say "  sudo install -Dm644 '$SEARCH_PROVIDER' /usr/local/share/gnome-shell/search-providers/orrery-search-provider.ini"
+      fi
+      ;;
+  esac
+else
+  rm -f "$SEARCH_PROVIDER"
+  say "couldn't fetch the GNOME search provider (skipped)."
 fi
 refresh_desktop_caches
 

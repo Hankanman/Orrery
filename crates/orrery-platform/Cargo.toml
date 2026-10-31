@@ -30,6 +30,10 @@ libc = "0.2"             # kill(2) for agent terminate (already in the tree)
 # the default "tokio", which would force zbus/tokio and panic gpui's async-io
 # zbus connections — same constraint as the tray).
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
+# X11 fallback for the summon hotkey (XGrabKey) when there's no portal. Pure
+# Rust with no features (its own wire-protocol connection, no libxcb), and
+# already in the tree via gpui, so it adds no new crates.
+x11rb = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"           # watcher target-computation tests
