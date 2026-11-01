@@ -11,6 +11,9 @@
 //!   `recompute_attention`; the poller itself only notifies the non-model
 //!   PR/CI kinds);
 //! - **global shortcut** (Ctrl+Alt+O) → raise the window;
+//! - **app requests** (`orrery_platform::request`: notification buttons,
+//!   GNOME Shell search) → raise the window (with the desktop's activation
+//!   token), then open a repo's drawer or the palette with a query;
 //! - **system tray** → show / rescan / quit / open-a-repo;
 //! - **clock** → a once-a-minute repaint for relative times.
 //!
@@ -24,6 +27,7 @@ use std::rc::Rc;
 
 use gpui::Context;
 use orrery_platform::appearance::Appearance;
+use orrery_platform::request::AppRequest;
 use orrery_platform::tray::TrayAction;
 use orrery_platform::watcher::ChangeSet;
 
@@ -41,10 +45,72 @@ enum Signal {
     /// fallback) + the raw inbox facts for the attention model (`None` when
     /// the fetch failed: keep the last-known facts).
     Attention(Vec<String>, Option<Vec<orrery_core::inbox::InboxItem>>),
-    /// Raise the main window (tray: left-click / "Show Orrery").
-    ShowWindow,
+    /// Raise the main window (tray: left-click / "Show Orrery"), with the
+    /// desktop's activation token when the request carried one.
+    ShowWindow(Option<String>),
+    /// Raise the main window and open this repo's drawer (a notification's
+    /// "Show in Orrery").
+    ShowRepo(String, Option<String>),
+    /// Raise the main window with this query in the command palette (GNOME
+    /// Shell's LaunchSearch).
+    Search(String, Option<String>),
     /// Quit the app (tray: "Quit").
     Quit,
+}
+
+impl From<AppRequest> for Signal {
+    fn from(request: AppRequest) -> Self {
+        match request {
+            AppRequest::Show { activation_token } => Signal::ShowWindow(activation_token),
+            AppRequest::ShowRepo {
+                id,
+                activation_token,
+            } => Signal::ShowRepo(id, activation_token),
+            AppRequest::Search {
+                query,
+                activation_token,
+            } => Signal::Search(query, activation_token),
+        }
+    }
+}
+
+/// Raise and focus `window`. With an activation token from the desktop (a
+/// notification click) the window activates itself with it, which is what
+/// lets it take focus on Wayland; otherwise, or when that fails (X11, no
+/// `xdg_activation_v1`), gpui's own activation is the fallback.
+fn raise(window: &mut gpui::Window, token: Option<&str>, cx: &mut gpui::App) {
+    let activated = token.is_some_and(|token| {
+        orrery_platform::activation::activate_window(&*window, token)
+            .inspect_err(|e| eprintln!("[orrery] activation with token failed: {e}"))
+            .is_ok()
+    });
+    if !activated {
+        window.activate_window();
+    }
+    cx.activate(true);
+}
+
+/// Run `f` on the main window (raised first) and the app entity, on the
+/// foreground. Returns `false` once the entity is gone.
+fn with_raised_window(
+    this: &gpui::WeakEntity<OrreryApp>,
+    token: Option<&str>,
+    cx: &mut gpui::AsyncApp,
+    f: impl FnOnce(&mut OrreryApp, &mut gpui::Window, &mut Context<OrreryApp>),
+) -> bool {
+    let Some(app) = this.upgrade() else {
+        return false;
+    };
+    cx.update(|cx| {
+        let Some(handle) = cx.windows().into_iter().next() else {
+            return;
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            raise(window, token, cx);
+            app.update(cx, |app, cx| f(app, window, cx));
+        });
+    });
+    true
 }
 
 /// Start the background watchers and the gpui task that applies their signals.
@@ -95,7 +161,17 @@ pub fn spawn(
     {
         let tx = tx.clone();
         orrery_platform::shortcut::spawn(move || {
-            let _ = tx.try_send(Signal::ShowWindow);
+            let _ = tx.try_send(Signal::ShowWindow(None));
+        });
+    }
+
+    // Requests only the running app can serve (notification "Show in
+    // Orrery", GNOME Shell search). Registering the handler is also what
+    // makes notifications offer the "Show in Orrery" button.
+    {
+        let tx = tx.clone();
+        orrery_platform::request::set_handler(move |request| {
+            let _ = tx.try_send(Signal::from(request));
         });
     }
 
@@ -109,7 +185,7 @@ pub fn spawn(
         let tx = tx.clone();
         orrery_platform::tray::spawn(move |action| {
             let signal = match action {
-                TrayAction::Show => Signal::ShowWindow,
+                TrayAction::Show => Signal::ShowWindow(None),
                 TrayAction::Rescan => Signal::ReposChanged(ChangeSet::discover()),
                 TrayAction::Quit => Signal::Quit,
                 TrayAction::Open(_) => return, // handled in the tray
@@ -198,7 +274,32 @@ pub fn spawn(
                         break;
                     }
                 }
-                Signal::ShowWindow => cx.update(|cx| cx.activate(true)),
+                Signal::ShowWindow(token) => {
+                    if !with_raised_window(&this, token.as_deref(), cx, |_, _, _| {}) {
+                        break;
+                    }
+                }
+                Signal::ShowRepo(id, token) => {
+                    let opened =
+                        with_raised_window(&this, token.as_deref(), cx, |app, window, cx| {
+                            // Only a repo the app knows; anything else just raises.
+                            if app.rows.iter().any(|r| r.id.as_ref() == id) {
+                                app.open_drawer(id.into(), window, cx);
+                            }
+                        });
+                    if !opened {
+                        break;
+                    }
+                }
+                Signal::Search(query, token) => {
+                    let opened =
+                        with_raised_window(&this, token.as_deref(), cx, |app, window, cx| {
+                            app.open_palette_with(&query, window, cx);
+                        });
+                    if !opened {
+                        break;
+                    }
+                }
                 Signal::Quit => cx.update(|cx| cx.quit()),
             }
         }
