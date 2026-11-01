@@ -18,6 +18,7 @@ mod task;
 mod theme;
 mod toast;
 mod views;
+mod widgets;
 
 use std::rc::Rc;
 

@@ -22,9 +22,23 @@ pub fn has_icon(path: &str) -> bool {
 /// `assets/icons/`, e.g. `"lucide/git-branch.svg"`, `"brand/github.svg"`.
 pub struct Assets;
 
+/// gpui-component's own icons (`IconName`) load from `icons/<name>.svg`.
+/// Serve the ones the components we use need from our lucide set: the
+/// Checkbox tick and the notification close button (lucide's `x`). Others
+/// stay unresolved, as before — e.g. NumberInput's +/- would otherwise show
+/// a `+` with no matching `-`, which our icon set lacks.
+fn component_icon(path: &str) -> Option<&'static str> {
+    match path {
+        "icons/check.svg" => Some("lucide/check.svg"),
+        "icons/close.svg" => Some("lucide/x.svg"),
+        _ => None,
+    }
+}
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(Icons::get(path).map(|f| f.data))
+        let file = Icons::get(path).or_else(|| component_icon(path).and_then(Icons::get));
+        Ok(file.map(|f| f.data))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
@@ -32,5 +46,19 @@ impl AssetSource for Assets {
             .filter(|p| p.starts_with(path))
             .map(|p| SharedString::from(p.to_string()))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_icons_resolve_to_lucide() {
+        let load = |p: &str| Assets.load(p).unwrap().is_some();
+        assert!(load("icons/check.svg"), "the Checkbox tick");
+        assert!(load("icons/close.svg"), "close maps to lucide's x");
+        assert!(load("lucide/check.svg"), "our own paths are unchanged");
+        assert!(!load("icons/plus.svg"), "only the icons we use are mapped");
     }
 }

@@ -11,19 +11,32 @@
 //! on the index, plus AI commit-message + changelog generation gated on
 //! aiReady), and Notes (catch-up + AI "what changed" narrative + an editable
 //! markdown note via gpui-component's multiline input).
+//!
+//! This module holds the drawer's data, its chrome (header, tab bar, footer)
+//! and the helpers the tabs share; each tab renders from its own submodule.
 
 use gpui::{
-    AppContext, Div, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, div, px, rgb, rgba,
+    Div, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, rgb, rgba,
 };
 use orrery_core::{git_ops, launch};
 
+use gpui_component::tab::{Tab, TabBar};
+
 use crate::data::{self, Row};
 use crate::icon::{brand, lucide};
-use crate::shell::{DrawerTab, OrreryApp, Overlay};
+use crate::shell::{DrawerTab, OrreryApp};
 use crate::theme::Theme;
+use crate::widgets::{self, Header, Tone, tag};
 
 mod actions;
+mod branches;
+mod changes;
+mod commits;
+mod notes;
+mod overview;
+mod pr;
+mod readme;
 
 const MONO: &str = "monospace";
 const PANEL_W: f32 = 560.;
@@ -158,7 +171,8 @@ pub struct DrawerData {
     pub worktrees: Option<Vec<WorktreeRow>>,
     pub readme: ReadmeState,
     pub pr: PrState,
-    /// The selected file's diff (per-file, capped render — see [`diff_block`]).
+    /// The selected file's diff (per-file, capped render — see
+    /// `changes::diff_block`).
     pub diff: DiffState,
     /// The Changes tab's file lists; `None` until the tab first loads them.
     pub changes: Option<Vec<ChangeRow>>,
@@ -328,7 +342,7 @@ pub fn drawer(
         .border_l_1()
         .border_color(rgb(t.border))
         .child(header(row, t, app))
-        .child(tab_bar(tab, t, app, github_slug(row)))
+        .child(tab_bar(tab, t, app))
         .child(body(row, tab, t, data, app, ai_ready, github_authed))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
@@ -415,99 +429,28 @@ pub(crate) fn github_slug(row: &Row) -> Option<SharedString> {
     (row.host.as_ref() == "github" && row.slug.as_ref() != "no remote").then(|| row.slug.clone())
 }
 
-fn tab_bar(
-    active: DrawerTab,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-    pr_slug: Option<SharedString>,
-) -> impl IntoElement {
-    let mut bar = div()
-        .flex()
-        .flex_row()
-        .gap(px(2.))
-        .px(px(12.))
-        .border_b_1()
-        .border_color(rgb(t.border));
-
-    for (tab, label) in TABS {
-        let is_active = tab == active;
-        let fg = if is_active { t.fg0 } else { t.fg2 };
-        let app = app.clone();
-        let pr_slug = pr_slug.clone();
-        // 1px underline on the active tab; page-coloured (invisible) otherwise so
-        // the row height stays constant.
-        let underline = if is_active { t.accent_bright } else { t.page };
-        let item = div()
-            .id(label)
-            .px(px(11.))
-            .py(px(10.))
-            .text_size(px(t.text_small))
-            .text_color(rgb(fg))
-            .cursor_pointer()
-            .border_b_1()
-            .border_color(rgb(underline))
-            .hover(|s| s.text_color(rgb(t.fg0)))
-            .child(SharedString::from(label))
-            .on_click(move |_ev, window, cx| {
-                let pr_slug = pr_slug.clone();
-                app.update(cx, |this, cx| {
-                    if let Some(Overlay::Drawer { tab: cur, .. }) = &mut this.overlay {
-                        *cur = tab;
-                    }
-                    // Lazy-load the tab's data on first view.
-                    if tab == DrawerTab::Readme && this.drawer.readme == ReadmeState::Idle {
-                        this.drawer.readme = ReadmeState::Loading;
-                        this.drawer_load_readme(cx);
-                    } else if tab == DrawerTab::Pr && matches!(this.drawer.pr, PrState::Idle) {
-                        match pr_slug {
-                            Some(slug) => {
-                                this.drawer.pr = PrState::Loading;
-                                this.drawer_load_pr(slug, cx);
-                            }
-                            None => {
-                                this.drawer.pr = PrState::Error("PR triage is GitHub-only.".into());
-                            }
-                        }
-                    } else if tab == DrawerTab::Changes
-                        && matches!(this.drawer.diff, DiffState::Idle)
-                    {
-                        this.drawer.diff = DiffState::Loading;
-                        if this.drawer.commit_input.is_none() {
-                            this.drawer.commit_input = Some(cx.new(|cx| {
-                                gpui_component::input::InputState::new(window, cx)
-                                    .placeholder("Commit subject…")
-                            }));
-                        }
-                        if this.drawer.commit_body_input.is_none() {
-                            this.drawer.commit_body_input = Some(cx.new(|cx| {
-                                gpui_component::input::InputState::new(window, cx)
-                                    .auto_grow(2, 8)
-                                    .placeholder("Body (optional)…")
-                            }));
-                        }
-                        this.drawer_load_changes(cx);
-                    } else if tab == DrawerTab::Notes {
-                        if this.drawer.notes.is_none() {
-                            this.drawer_load_notes(cx);
-                        }
-                        // The editable note field needs the Window, so it's
-                        // created here; the saved note is read off the UI
-                        // thread and seeded into it once loaded.
-                        if this.drawer.note_input.is_none() {
-                            this.drawer.note_input = Some(cx.new(|cx| {
-                                gpui_component::input::InputState::new(window, cx)
-                                    .multi_line(true)
-                                    .placeholder("Notes (markdown)…")
-                            }));
-                            this.drawer_seed_note_input(cx);
-                        }
-                    }
-                    cx.notify();
-                });
-            });
-        bar = bar.child(item);
-    }
-    bar
+/// The tab strip: gpui-component's underline [`TabBar`]. Selecting a tab
+/// lazy-loads its data (see [`OrreryApp::drawer_select_tab`]).
+fn tab_bar(active: DrawerTab, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let app = app.clone();
+    let selected = TABS.iter().position(|(tab, _)| *tab == active).unwrap_or(0);
+    TabBar::new("drawer-tabs")
+        .underline()
+        // Tab labels sit where the hand-rolled ones did: 23px in, 24px apart
+        // (the underline variant's 16px gap + 4px each side).
+        .pl(px(19.))
+        .selected_index(selected)
+        .children(TABS.iter().map(|(_, label)| {
+            Tab::new().px(px(4.)).cursor_pointer().child(
+                div()
+                    .text_size(px(t.text_small))
+                    .child(SharedString::from(*label)),
+            )
+        }))
+        .on_click(move |ix, window, cx| {
+            let tab = TABS[*ix].0;
+            app.update(cx, |this, cx| this.drawer_select_tab(tab, window, cx));
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -521,13 +464,13 @@ fn body(
     github_authed: bool,
 ) -> impl IntoElement {
     let content = match tab {
-        DrawerTab::Overview => overview(row, t, data, app, ai_ready).into_any_element(),
-        DrawerTab::Readme => readme_view(data, t).into_any_element(),
-        DrawerTab::Pr => pr_view(row, data, t, app).into_any_element(),
+        DrawerTab::Overview => overview::overview(row, t, data, app, ai_ready).into_any_element(),
+        DrawerTab::Readme => readme::readme_view(data, t).into_any_element(),
+        DrawerTab::Pr => pr::pr_view(row, data, t, app).into_any_element(),
         DrawerTab::Changes => {
-            changes_view(row, data, t, app, ai_ready, github_authed).into_any_element()
+            changes::changes_view(row, data, t, app, ai_ready, github_authed).into_any_element()
         }
-        DrawerTab::Notes => notes_view(row, data, t, app, ai_ready).into_any_element(),
+        DrawerTab::Notes => notes::notes_view(row, data, t, app, ai_ready).into_any_element(),
     };
     div()
         .id("drawer-body")
@@ -541,1187 +484,20 @@ fn body(
         .child(content)
 }
 
-/// Overview: the synchronous `Row` facts up top, then the async git data
-/// (branches / recent commits / worktrees) loaded via [`OrreryApp::drawer_load_overview`].
-fn overview(
-    row: &Row,
-    t: &Theme,
-    data: &DrawerData,
-    app: &Entity<OrreryApp>,
-    ai_ready: bool,
-) -> impl IntoElement {
-    let mut col = div().flex().flex_col().gap(px(16.));
-
-    // Description.
-    col = col.child(
-        div()
-            .text_size(px(t.text_small))
-            .line_height(px(20.))
-            .text_color(rgb(t.fg1))
-            .child(row.description.clone()),
-    );
-
-    // AI summary, when present — hidden (even if cached) unless AI is ready.
-    if ai_ready && !row.ai_summary.is_empty() {
-        col = col.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap(px(7.))
-                .p(px(11.))
-                .rounded(px(t.r_sm))
-                .bg(rgb(t.surface))
-                .border_1()
-                .border_color(rgb(t.border))
-                .child(lucide("sparkles", 14., t.ai))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(t.text_data_sm))
-                        .line_height(px(18.))
-                        .text_color(rgb(t.ai))
-                        .child(row.ai_summary.clone()),
-                ),
-        );
-    }
-
-    // Git status block.
-    let mut status = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(16.))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .child(seg("git-branch", row.branch.clone(), t.fg1));
-    if row.ahead > 0 || row.behind > 0 {
-        let color = if row.behind > 0 { t.behind } else { t.clean };
-        status = status.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
-                .text_color(rgb(color))
-                .child(lucide("arrow-up", 13., color))
-                .child(SharedString::from(row.ahead.to_string()))
-                .child(lucide("arrow-down", 13., color))
-                .child(SharedString::from(row.behind.to_string())),
-        );
-    }
-    if row.dirty > 0 {
-        status = status.child(seg(
-            "circle-dot",
-            SharedString::from(format!("{} dirty", row.dirty)),
-            t.dirty,
-        ));
-    }
-    col = col.child(status);
-
-    // Host facts.
-    let mut facts = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap(px(16.))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg2));
-    if row.private {
-        facts = facts.child(seg("lock", SharedString::from("private"), t.fg3));
-    }
-    if !row.host.is_empty() {
-        facts = facts.child(seg("star", row.stars.clone(), t.star));
-    }
-    if !row.release.is_empty() {
-        facts = facts.child(seg("tag", row.release.clone(), t.fg2));
-    }
-    facts = facts.child(seg("clock", row.age(), t.fg2));
-    // Default-branch CI state from the central pass (#183); clicking it opens
-    // the run's page when the API offered one.
-    if let Some(ci) = &data.ci {
-        let state = match ci.state.as_str() {
-            "failure" => Some(("circle-alert", "CI failing", t.behind)),
-            "success" => Some(("circle-check", "CI passing", t.clean)),
-            "pending" => Some(("clock", "CI running", t.fg2)),
-            _ => None, // "none": no CI on this repo — show nothing.
-        };
-        if let Some((icon, label, color)) = state {
-            facts = facts.child(match &ci.url {
-                Some(url) => {
-                    let url = url.clone();
-                    div()
-                        .id("ci-run")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.))
-                        .text_color(rgb(color))
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(rgb(t.fg0)))
-                        .child(lucide(icon, 13., color))
-                        .child(SharedString::from(label))
-                        .child(lucide("external-link", 11., t.fg3))
-                        .on_click(move |_ev, _win, _cx| {
-                            let _ = launch::open(&url);
-                        })
-                        .into_any_element()
-                }
-                None => seg(icon, SharedString::from(label), color).into_any_element(),
-            });
-        }
-    }
-    col = col.child(facts);
-
-    // Async git data.
-    col = col.child(branches_section(data, t, app));
-    col = col.child(commits_section(data, t));
-    col = col.child(worktrees_section(data, t, app));
-    col.child(dispatch_section(data, t, app))
-}
-
-/// "Dispatch agent" (#185): a task-prompt field, a fresh-worktree toggle, and
-/// the Dispatch button. Plain dispatch starts the configured agent in the repo
-/// with the task appended (`agent_dispatch_args`); the toggle first creates an
-/// `agent/…` branch + worktree and starts the agent there.
-fn dispatch_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let repo = data.repo.clone();
-    let mut s = section(t, "Dispatch agent", None);
-    let Some(input) = &data.dispatch_input else {
-        return s;
-    };
-
-    let fresh = data.dispatch_fresh;
-    let toggle = {
-        let app = app.clone();
-        div()
-            .id("dispatch-fresh")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.))
-            .cursor_pointer()
-            .child(lucide(
-                if fresh { "circle-check" } else { "circle-dot" },
-                14.,
-                if fresh { t.clean } else { t.fg3 },
-            ))
-            .child(
-                div()
-                    .text_size(px(t.text_data_sm))
-                    .text_color(rgb(t.fg1))
-                    .child("Fresh worktree"),
-            )
-            .on_click(move |_ev, _win, cx| {
-                app.update(cx, |this, cx| this.toggle_dispatch_fresh(cx));
-            })
-    };
-
-    let (app2, repo2, input2) = (app.clone(), repo, input.clone());
-    s = s.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .mt(px(2.))
-            .child(gpui_component::input::Input::new(input))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(toggle)
-                    .child(div().flex_1())
-                    .child(pr_btn(
-                        SharedString::from("dispatch-agent"),
-                        "Dispatch",
-                        t,
-                        move |cx| {
-                            let repo = repo2.clone();
-                            let prompt = input2.read(cx).value().trim().to_string();
-                            if prompt.is_empty() {
-                                return;
-                            }
-                            app2.update(cx, |this, cx| {
-                                this.dispatch_agent(repo, prompt, fresh, cx)
-                            });
-                        },
-                    )),
-            ),
-    );
-    s
-}
-
 /// Section wrapper: an uppercase label (+ optional count) over a list.
 fn section(t: &Theme, title: &str, count: Option<usize>) -> Div {
-    let mut head = div()
+    div()
         .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(SharedString::from(title.to_uppercase()));
-    if let Some(n) = count {
-        head = head.child(SharedString::from(format!("· {n}")));
-    }
-    div().flex().flex_col().gap(px(3.)).child(head.mb(px(3.)))
+        .flex_col()
+        .gap(px(3.))
+        .child(widgets::section_header(title, Header::Caps { count }, t).mb(px(3.)))
 }
 
 /// A muted "Loading…" / empty / error placeholder line.
 fn placeholder(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement {
-    div()
+    widgets::note(text, t)
         .py(px(3.))
         .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(text.into())
-}
-
-/// A small bordered pill tag (merged / gone).
-fn tag(text: &str, color: u32, t: &Theme) -> impl IntoElement {
-    div()
-        .px(px(5.))
-        .py(px(1.))
-        .rounded(px(t.r_xs))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(color))
-        .child(SharedString::from(text.to_string()))
-}
-
-fn branches_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let mut s = section(t, "Branches", data.branches.as_ref().map(|b| b.len()));
-    match &data.branches {
-        None => s = s.child(placeholder("Loading…", t)),
-        Some(list) if list.is_empty() => s = s.child(placeholder("No branches.", t)),
-        Some(list) => {
-            for b in list {
-                s = s.child(branch_item(b, t, app));
-            }
-        }
-    }
-    s
-}
-
-fn branch_item(b: &BranchRow, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let fg = if b.current { t.accent_bright } else { t.fg1 };
-    let icon = if b.current { "check" } else { "git-branch" };
-    let mut item = div()
-        .id(SharedString::from(format!("br-{}", b.name)))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(7.))
-        .px(px(8.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(fg))
-        .child(lucide(icon, 13., fg))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .truncate()
-                .child(b.name.clone()),
-        );
-    if b.merged {
-        item = item.child(tag("merged", t.fg3, t));
-    }
-    if b.gone {
-        item = item.child(tag("gone", t.behind, t));
-    }
-    // Only non-current branches are switchable.
-    if !b.current {
-        let name = b.name.clone();
-        let app = app.clone();
-        item = item
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(t.surface_hover)))
-            .on_click(move |_ev, _win, cx| {
-                let name = name.clone();
-                app.update(cx, |this, cx| {
-                    this.drawer.branches = None; // optimistic loading state
-                    this.drawer_switch_branch(name, cx);
-                    cx.notify();
-                });
-            });
-    }
-    item
-}
-
-fn commits_section(data: &DrawerData, t: &Theme) -> impl IntoElement {
-    let mut s = section(t, "Recent commits", data.commits.as_ref().map(|c| c.len()));
-    match &data.commits {
-        None => s = s.child(placeholder("Loading…", t)),
-        Some(list) if list.is_empty() => s = s.child(placeholder("No commits.", t)),
-        Some(list) => {
-            for c in list {
-                s = s.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.))
-                        .py(px(4.))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(t.text_small))
-                                .text_color(rgb(t.fg1))
-                                .child(c.summary.clone()),
-                        )
-                        .child(
-                            div()
-                                .font_family(MONO)
-                                .text_size(px(t.text_data_sm))
-                                .text_color(rgb(t.fg3))
-                                .child(SharedString::from(format!("{} · {}", c.author, c.age))),
-                        ),
-                );
-            }
-        }
-    }
-    s
-}
-
-fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let mut s = section(t, "Worktrees", data.worktrees.as_ref().map(|w| w.len()));
-    match &data.worktrees {
-        None => s = s.child(placeholder("Loading…", t)),
-        Some(list) if list.is_empty() => s = s.child(placeholder("None.", t)),
-        Some(list) => {
-            for w in list {
-                let remove = {
-                    let (app, name) = (app.clone(), w.name.to_string());
-                    div()
-                        .id(SharedString::from(format!("wt-rm-{}", w.name)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(22.))
-                        .h(px(22.))
-                        .rounded(px(t.r_xs))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(t.surface_hover)))
-                        .child(lucide("x", 12., t.fg3))
-                        .on_click(move |_ev, _win, cx| {
-                            let name = name.clone();
-                            app.update(cx, |this, cx| this.drawer_remove_worktree(name, cx));
-                        })
-                };
-                s = s.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(7.))
-                        .py(px(4.))
-                        .font_family(MONO)
-                        .text_size(px(t.text_data_sm))
-                        .child(lucide("folder-tree", 13., t.fg2))
-                        .child(div().text_color(rgb(t.fg1)).child(w.name.clone()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_color(rgb(t.fg3))
-                                .child(w.path.clone()),
-                        )
-                        .child(remove),
-                );
-            }
-        }
-    }
-
-    // Add a worktree: name field + Add button.
-    if let Some(input) = &data.worktree_input {
-        let (app, input2) = (app.clone(), input.clone());
-        s = s.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .mt(px(4.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(gpui_component::input::Input::new(input)),
-                )
-                .child(pr_btn(SharedString::from("wt-add"), "Add", t, move |cx| {
-                    let name = input2.read(cx).value();
-                    if name.trim().is_empty() {
-                        return;
-                    }
-                    app.update(cx, |this, cx| {
-                        this.drawer_add_worktree(name.trim().to_string(), cx)
-                    });
-                })),
-        );
-    }
-    s
-}
-
-/// Changes tab: a commit composer acting on the index, a push / open-PR row
-/// closing the commit → push → PR loop, the Unstaged/Staged file lists with
-/// per-file stage/unstage, then the selected file's diff.
-fn changes_view(
-    row: &Row,
-    data: &DrawerData,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-    ai_ready: bool,
-    github_authed: bool,
-) -> impl IntoElement {
-    let mut col = div().flex().flex_col().gap(px(12.));
-    let has_staged = data
-        .changes
-        .as_ref()
-        .is_some_and(|list| list.iter().any(|c| c.staged));
-
-    // Commit composer (the fields exist once the tab has been opened): a
-    // single-line subject + an optional multi-line body, joined by a blank
-    // line into the commit message.
-    if let (Some(input), Some(body_input)) = (&data.commit_input, &data.commit_body_input) {
-        let mut actions = div().flex().flex_row().items_center().gap(px(6.));
-        // AI: suggest a commit message for the staged diff (gated on aiReady).
-        if ai_ready {
-            let app3 = app.clone();
-            actions = actions.child(pr_btn(
-                SharedString::from("gen-commit"),
-                "Generate message",
-                t,
-                move |cx: &mut gpui::App| {
-                    app3.update(cx, |this, cx| this.drawer_generate_commit(cx));
-                },
-            ));
-        }
-        actions = actions.child(div().flex_1());
-        if has_staged {
-            let app2 = app.clone();
-            let input2 = input.clone();
-            let body2 = body_input.clone();
-            actions = actions.child(pr_btn(
-                SharedString::from("commit"),
-                "Commit",
-                t,
-                move |cx: &mut gpui::App| {
-                    let subject = input2.read(cx).value();
-                    if subject.trim().is_empty() {
-                        return;
-                    }
-                    let msg = full_commit_message(&subject, &body2.read(cx).value());
-                    app2.update(cx, |this, cx| this.drawer_commit_staged(msg, cx));
-                },
-            ));
-        } else {
-            // Nothing in the index — commit would be a no-op, so say why (once
-            // the lists have actually loaded) instead of offering a live button.
-            if data.changes.is_some() {
-                actions = actions.child(
-                    div()
-                        .font_family(MONO)
-                        .text_size(px(t.text_data_sm))
-                        .text_color(rgb(t.fg3))
-                        .child(SharedString::from("Nothing staged")),
-                );
-            }
-            actions = actions.child(disabled_btn("Commit", t));
-        }
-        col = col
-            .child(gpui_component::input::Input::new(input))
-            .child(gpui_component::input::Input::new(body_input))
-            .child(actions);
-    }
-
-    // The AI commit-message suggestion (subject + optional body), with a
-    // one-click commit using both.
-    if let Some(suggestion) = &data.commit_suggestion {
-        let app4 = app.clone();
-        let (subject2, body2) = (suggestion.subject.clone(), suggestion.body.clone());
-        let mut card = div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .p(px(10.))
-            .rounded(px(t.r_sm))
-            .bg(rgb(t.surface))
-            .border_1()
-            .border_color(rgb(t.border))
-            .child(seg("sparkles", suggestion.subject.clone(), t.fg1));
-        if !suggestion.body.is_empty() {
-            // Multi-line body → markdown, pre-reflowed (the renderer panics on
-            // a run's embedded newlines, see data::unwrap_soft_breaks).
-            card = card.child(
-                div()
-                    .text_size(px(t.text_small))
-                    .text_color(rgb(t.fg2))
-                    .child(gpui_component::text::markdown(suggestion.body_md.clone())),
-            );
-        }
-        col = col.child(
-            card.child(div().flex().flex_row().justify_end().child(pr_btn(
-                SharedString::from("commit-ai"),
-                "Commit this",
-                t,
-                move |cx: &mut gpui::App| {
-                    if subject2.trim().is_empty() {
-                        return;
-                    }
-                    let msg = full_commit_message(&subject2, &body2);
-                    app4.update(cx, |this, cx| this.drawer_commit_staged(msg, cx));
-                },
-            ))),
-        );
-    }
-
-    // Push / Open PR — the last mile after committing. Push shows when there's
-    // something to push (ahead, or a commit made in this drawer session while
-    // the row's ahead count may be stale). Open PR shows only when it can work:
-    // a GitHub remote, a GitHub token, a known default branch, and the current
-    // branch isn't it — hidden otherwise, never broken (the aiReady philosophy;
-    // only the AI *drafting* inside the flow is gated on aiReady).
-    let show_push = row.ahead > 0 || data.committed;
-    let show_pr = github_authed
-        && github_slug(row).is_some()
-        && data
-            .default_branch
-            .as_ref()
-            .is_some_and(|d| *d != row.branch);
-    if show_push || show_pr || data.pr_url.is_some() {
-        let mut sync = div().flex().flex_row().items_center().gap(px(6.));
-        if show_push {
-            if data.push_busy {
-                sync = sync.child(disabled_btn("Pushing…", t));
-            } else {
-                let app6 = app.clone();
-                sync = sync.child(pr_btn(
-                    SharedString::from("push"),
-                    "Push",
-                    t,
-                    move |cx: &mut gpui::App| {
-                        app6.update(cx, |this, cx| this.drawer_push(cx));
-                    },
-                ));
-            }
-        }
-        if show_pr {
-            if data.pr_busy {
-                sync = sync.child(disabled_btn("Opening PR…", t));
-            } else {
-                let app7 = app.clone();
-                sync = sync.child(pr_btn(
-                    SharedString::from("open-pr"),
-                    "Open PR",
-                    t,
-                    move |cx: &mut gpui::App| {
-                        app7.update(cx, |this, cx| this.drawer_open_pr(cx));
-                    },
-                ));
-            }
-        }
-        if let Some(url) = &data.pr_url {
-            let url = url.clone();
-            sync = sync.child(
-                div()
-                    .id("view-pr")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.))
-                    .px(px(8.))
-                    .py(px(5.))
-                    .rounded(px(t.r_sm))
-                    .font_family(MONO)
-                    .text_size(px(t.text_data_sm))
-                    .text_color(rgb(t.fg1))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(t.surface_hover)))
-                    .child(lucide("external-link", 12., t.fg2))
-                    .child(SharedString::from("View PR"))
-                    .on_click(move |_ev, _win, _cx| {
-                        let _ = launch::open(&url);
-                    }),
-            );
-        }
-        col = col.child(sync);
-    }
-
-    // Unstaged / Staged file lists, then the selected file's diff.
-    col = col.child(changes_section(data, false, t, app));
-    col = col.child(changes_section(data, true, t, app));
-    col = col.child(diff_pane(data, t, app));
-
-    // AI changelog from recent commits (gated on aiReady).
-    if ai_ready {
-        let app5 = app.clone();
-        col = col.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .child(pr_btn(
-                    SharedString::from("gen-changelog"),
-                    "Generate changelog",
-                    t,
-                    move |cx: &mut gpui::App| {
-                        app5.update(cx, |this, cx| this.drawer_generate_changelog(cx));
-                    },
-                )),
-        );
-    }
-    if let Some(log) = &data.changelog {
-        col = col.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .p(px(10.))
-                .rounded(px(t.r_sm))
-                .bg(rgb(t.surface))
-                .border_1()
-                .border_color(rgb(t.border))
-                .child(seg("sparkles", "Changelog".into(), t.fg3))
-                .child(
-                    div()
-                        .text_size(px(t.text_small))
-                        .text_color(rgb(t.fg1))
-                        .child(
-                            // The prompt asks for markdown bullets, so render as
-                            // markdown — already reflowed when stored (like the Readme), since
-                            // the renderer panics on a run's embedded newlines.
-                            gpui_component::text::markdown(log.clone()),
-                        ),
-                ),
-        );
-    }
-    col
-}
-
-/// The kind marker for a change row: git's one-letter convention, coloured by
-/// sentiment (M/A/D/R and "?" for untracked — each kind visibly distinct).
-fn kind_badge(kind: git_ops::ChangeKind, t: &Theme) -> (&'static str, u32) {
-    match kind {
-        git_ops::ChangeKind::Modified => ("M", t.dirty),
-        git_ops::ChangeKind::Added => ("A", t.clean),
-        git_ops::ChangeKind::Deleted => ("D", t.behind),
-        git_ops::ChangeKind::Renamed => ("R", t.accent_bright),
-        git_ops::ChangeKind::Untracked => ("?", t.fg2),
-    }
-}
-
-/// One of the Changes tab's file lists (`staged` picks which). Header: label +
-/// count + a "Stage all"/"Unstage all" action; body: one row per file.
-fn changes_section(data: &DrawerData, staged: bool, t: &Theme, app: &Entity<OrreryApp>) -> Div {
-    let title = if staged { "STAGED" } else { "UNSTAGED" };
-    let mut head = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(SharedString::from(title));
-
-    let mut col = div().flex().flex_col().gap(px(2.));
-    match &data.changes {
-        None => col = col.child(placeholder("Loading…", t)),
-        Some(list) => {
-            let files: Vec<&ChangeRow> = list.iter().filter(|c| c.staged == staged).collect();
-            head = head.child(SharedString::from(format!("· {}", files.len())));
-            if files.is_empty() {
-                let empty = if staged {
-                    "Nothing staged."
-                } else {
-                    "No unstaged changes."
-                };
-                col = col.child(placeholder(empty, t));
-            } else {
-                // Stage all / Unstage all on the section header.
-                let label = if staged { "Unstage all" } else { "Stage all" };
-                let all: Vec<String> = files.iter().map(|c| c.path.to_string()).collect();
-                let app2 = app.clone();
-                head = head.child(div().flex_1()).child(pr_btn(
-                    SharedString::from(format!("stage-all-{staged}")),
-                    label,
-                    t,
-                    move |cx: &mut gpui::App| {
-                        let all = all.clone();
-                        app2.update(cx, |this, cx| this.drawer_set_staged(all, !staged, cx));
-                    },
-                ));
-                for c in files {
-                    col = col.child(change_item(c, data, t, app));
-                }
-            }
-        }
-    }
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .child(head.mb(px(3.)))
-        .child(col)
-}
-
-/// One file row: kind letter + path + a stage/unstage icon button. Clicking
-/// the row selects it for the diff pane; the trailing button moves it between
-/// the index and the working tree ("+" stages, "x" unstages — the same
-/// remove-from-list affordance as the worktree rows).
-fn change_item(
-    c: &ChangeRow,
-    data: &DrawerData,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-) -> impl IntoElement {
-    let selected = data
-        .change_sel
-        .as_ref()
-        .is_some_and(|(p, s)| *p == c.path && *s == c.staged);
-    let (letter, color) = kind_badge(c.kind, t);
-
-    let action = {
-        let (app, path) = (app.clone(), c.path.to_string());
-        let (staged, icon) = (c.staged, if c.staged { "x" } else { "plus" });
-        div()
-            .id(SharedString::from(format!(
-                "chg-act-{}-{}",
-                c.staged, c.path
-            )))
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(22.))
-            .h(px(22.))
-            .rounded(px(t.r_xs))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(t.surface_hover)))
-            .child(lucide(icon, 12., t.fg3))
-            .on_click(move |_ev, _win, cx| {
-                // Don't also select the row underneath.
-                cx.stop_propagation();
-                let path = path.clone();
-                app.update(cx, |this, cx| {
-                    this.drawer_set_staged(vec![path], !staged, cx)
-                });
-            })
-    };
-
-    let row = div()
-        .id(SharedString::from(format!("chg-{}-{}", c.staged, c.path)))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(7.))
-        .px(px(8.))
-        .py(px(4.))
-        .rounded(px(t.r_sm))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .cursor_pointer()
-        .child(
-            div()
-                .w(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(color))
-                .child(SharedString::from(letter)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .truncate()
-                .text_color(rgb(if selected { t.fg0 } else { t.fg1 }))
-                .child(c.path.clone()),
-        )
-        .child(action);
-    let row = if selected {
-        row.bg(rgb(t.accent_wash))
-    } else {
-        row.hover(|s| s.bg(rgb(t.surface_hover)))
-    };
-    let (app, path, staged) = (app.clone(), c.path.clone(), c.staged);
-    row.on_click(move |_ev, _win, cx| {
-        let path = path.clone();
-        app.update(cx, |this, cx| this.drawer_select_change(path, staged, cx));
-    })
-}
-
-/// The selected file's diff, under a header naming the file and its side.
-fn diff_pane(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> Div {
-    let mut head = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(SharedString::from("DIFF"));
-    if let Some((path, staged)) = &data.change_sel {
-        let side = if *staged { "staged" } else { "unstaged" };
-        head = head.child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .truncate()
-                .child(SharedString::from(format!("· {path} ({side})"))),
-        );
-    }
-
-    let body = match (&data.changes, &data.diff) {
-        (None, _) => placeholder("Loading…", t).into_any_element(),
-        (Some(list), _) if list.is_empty() => {
-            placeholder("Working tree clean — nothing to commit.", t).into_any_element()
-        }
-        (_, DiffState::Ready(hunks)) if hunks.is_empty() => {
-            placeholder("No diff for this file.", t).into_any_element()
-        }
-        (_, DiffState::Ready(hunks)) => match &data.change_sel {
-            Some((path, staged)) => {
-                diff_block(path.clone(), *staged, hunks, t, app).into_any_element()
-            }
-            None => placeholder("No diff for this file.", t).into_any_element(),
-        },
-        _ => placeholder("Loading…", t).into_any_element(),
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .child(head.mb(px(3.)))
-        .child(body)
-}
-
-/// Cap on rendered diff *content* lines. The whole app re-renders on any
-/// `cx.notify()` (agents poll, attention poll, appearance signals), so an
-/// unbounded diff would rebuild thousands of elements on every background
-/// tick. Hunk headers don't count against the cap.
-const DIFF_MAX_LINES: usize = 500;
-
-/// Render the selected file's hunks: each gets a header row — the `@@` line
-/// plus a "Stage hunk"/"Unstage hunk" affordance matching the pane's side —
-/// then its sentiment-coloured body lines. Content is truncated to
-/// [`DIFF_MAX_LINES`] total with a muted "… n more" footer.
-fn diff_block(
-    path: SharedString,
-    staged: bool,
-    hunks: &[HunkRow],
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-) -> impl IntoElement {
-    let mut block = div()
-        .flex()
-        .flex_col()
-        .p(px(10.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.surface))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm));
-    let mut budget = DIFF_MAX_LINES;
-    for (ix, hunk) in hunks.iter().enumerate() {
-        if budget == 0 {
-            // Cap hit: one muted footer counting everything left.
-            let lines: usize = hunks[ix..].iter().map(|h| h.lines.len()).sum();
-            let hunks_left = hunks.len() - ix;
-            block = block.child(
-                div()
-                    .pt(px(6.))
-                    .text_color(rgb(t.fg3))
-                    .child(SharedString::from(format!(
-                        "… {lines} more lines in {hunks_left} more hunks"
-                    ))),
-            );
-            break;
-        }
-
-        // Hunk header: the @@ line + the stage/unstage-this-hunk affordance.
-        let action = {
-            let (app, path) = (app.clone(), path.clone());
-            let label = if staged { "Unstage hunk" } else { "Stage hunk" };
-            div()
-                .id(SharedString::from(format!("hunk-act-{staged}-{ix}")))
-                .px(px(6.))
-                .py(px(1.))
-                .rounded(px(t.r_xs))
-                .text_color(rgb(t.fg3))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(t.surface_hover)).text_color(rgb(t.fg1)))
-                .child(SharedString::from(label))
-                .on_click(move |_ev, _win, cx| {
-                    let path = path.clone();
-                    app.update(cx, |this, cx| this.drawer_hunk_op(path, staged, ix, cx));
-                })
-        };
-        let mut header_row = div().flex().flex_row().items_center().gap(px(6.));
-        if ix > 0 {
-            header_row = header_row.mt(px(6.));
-        }
-        block = block.child(
-            header_row
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_color(rgb(t.accent_bright))
-                        .child(hunk.header.clone()),
-                )
-                .child(action),
-        );
-
-        for line in hunk.lines.iter().take(budget) {
-            let color = match line.as_bytes().first() {
-                Some(b'+') => t.clean,
-                Some(b'-') => t.behind,
-                _ => t.fg2,
-            };
-            block = block.child(div().text_color(rgb(color)).child(line.clone()));
-        }
-        if hunk.lines.len() > budget {
-            let hidden = hunk.lines.len() - budget;
-            block = block.child(
-                div()
-                    .pt(px(6.))
-                    .text_color(rgb(t.fg3))
-                    .child(SharedString::from(format!("… {hidden} more lines"))),
-            );
-        }
-        budget = budget.saturating_sub(hunk.lines.len());
-    }
-    block
-}
-
-/// Pick an icon for an individual check state.
-fn check_icon(state: &str) -> &'static str {
-    match state {
-        "success" => "circle-check",
-        "failure" => "circle-alert",
-        "pending" => "clock",
-        _ => "circle-dot",
-    }
-}
-
-/// Colour a PR state string (checks / mergeable / review) by sentiment.
-fn state_color(s: &str, t: &Theme) -> u32 {
-    match s {
-        "success" | "clean" | "approved" => t.clean,
-        "failure" | "conflicting" | "changes_requested" => t.behind,
-        "pending" => t.fg2,
-        _ => t.fg3,
-    }
-}
-
-/// PR tab: the open pull requests with checks/review/mergeable rollups and inline
-/// approve / merge actions.
-fn pr_view(row: &Row, data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    match &data.pr {
-        PrState::Ready { prs, .. } if prs.is_empty() => {
-            placeholder("No open pull requests.", t).into_any_element()
-        }
-        PrState::Ready { methods, prs } => {
-            let slug = row.slug.clone();
-            let mut col = div().flex().flex_col().gap(px(10.));
-            for pr in prs {
-                col = col.child(pr_card(pr, methods, slug.clone(), t, app));
-            }
-            col.into_any_element()
-        }
-        PrState::Error(e) => placeholder(e.clone(), t).into_any_element(),
-        _ => placeholder("Loading…", t).into_any_element(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pr_card(
-    pr: &PrRow,
-    methods: &[SharedString],
-    slug: SharedString,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-) -> impl IntoElement {
-    // Title row (click opens the PR on the host).
-    let title = {
-        let url = pr.url.clone();
-        let mut row = div()
-            .id(SharedString::from(format!("pr-{}", pr.number)))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.))
-            .cursor_pointer()
-            .child(
-                div()
-                    .font_family(MONO)
-                    .text_size(px(t.text_data_sm))
-                    .text_color(rgb(t.fg3))
-                    .child(SharedString::from(format!("#{}", pr.number))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .text_size(px(t.text_small))
-                    .text_color(rgb(t.fg0))
-                    .child(pr.title.clone()),
-            )
-            .on_click(move |_ev, _win, _cx| {
-                let _ = launch::open(&url);
-            });
-        if pr.draft {
-            row = row.child(tag("draft", t.fg3, t));
-        }
-        row
-    };
-
-    // State rollups.
-    let states = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(8.))
-        .child(seg("git-pull-request", pr.refs.clone(), t.fg2))
-        .child(seg_str(
-            "circle-check",
-            &pr.checks,
-            state_color(&pr.checks, t),
-        ))
-        .child(seg_str(
-            "git-merge",
-            &pr.mergeable,
-            state_color(&pr.mergeable, t),
-        ))
-        .child(seg_str("eye", &pr.review, state_color(&pr.review, t)));
-
-    // Per-check breakdown: one clickable chip per status check / CI context,
-    // so you can see which check failed and jump to its run (not just the rollup).
-    let check_runs = (!pr.check_runs.is_empty()).then(|| {
-        let mut wrap = div().flex().flex_row().flex_wrap().gap(px(6.));
-        for c in &pr.check_runs {
-            let color = state_color(&c.state, t);
-            let chip = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
-                .px(px(7.))
-                .py(px(3.))
-                .rounded(px(t.r_sm))
-                .bg(rgb(t.button_bg))
-                .text_color(rgb(color))
-                .child(lucide(check_icon(&c.state), 12., color))
-                .child(
-                    div()
-                        .font_family(MONO)
-                        .text_size(px(t.text_data_sm))
-                        .text_color(rgb(t.fg2))
-                        .child(c.name.clone()),
-                );
-            // Clickable (jumps to the CI run) only when the check carries a URL.
-            let chip = match &c.url {
-                Some(url) => {
-                    let (url, hov) = (url.clone(), t.surface_hover);
-                    chip.id(SharedString::from(format!(
-                        "check-{}-{}",
-                        pr.number, c.name
-                    )))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgb(hov)))
-                    .child(lucide("external-link", 11., t.fg3))
-                    .on_click(move |_ev, _win, _cx| {
-                        let _ = launch::open(&url);
-                    })
-                    .into_any_element()
-                }
-                None => chip.into_any_element(),
-            };
-            wrap = wrap.child(chip);
-        }
-        wrap
-    });
-
-    // Actions: approve + each allowed merge method.
-    let mut actions = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(6.))
-        .child(pr_btn(
-            SharedString::from(format!("approve-{}", pr.number)),
-            "Approve",
-            t,
-            {
-                let (slug, number) = (slug.clone(), pr.number);
-                let app = app.clone();
-                move |cx: &mut gpui::App| {
-                    let slug = slug.clone();
-                    app.update(cx, |this, cx| {
-                        this.drawer.pr = PrState::Loading;
-                        this.drawer_approve_pr(slug, number, cx);
-                        cx.notify();
-                    });
-                }
-            },
-        ));
-    for method in methods {
-        let label = capitalize(method);
-        actions = actions.child(pr_btn(
-            SharedString::from(format!("merge-{}-{method}", pr.number)),
-            &label,
-            t,
-            {
-                let (slug, number, method) = (slug.clone(), pr.number, method.to_string());
-                let app = app.clone();
-                move |cx: &mut gpui::App| {
-                    let (slug, method) = (slug.clone(), method.clone());
-                    app.update(cx, |this, cx| {
-                        this.drawer.pr = PrState::Loading;
-                        this.drawer_merge_pr(slug, number, method, cx);
-                        cx.notify();
-                    });
-                }
-            },
-        ));
-    }
-
-    let mut card = div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .p(px(11.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.surface))
-        .border_1()
-        .border_color(rgb(t.border))
-        .child(title)
-        .child(states);
-    if let Some(check_runs) = check_runs {
-        card = card.child(check_runs);
-    }
-    if !pr.author.is_empty() {
-        card = card.child(
-            div()
-                .font_family(MONO)
-                .text_size(px(t.text_data_sm))
-                .text_color(rgb(t.fg3))
-                .child(SharedString::from(format!("by {}", pr.author))),
-        );
-    }
-    card.child(actions)
 }
 
 /// A small PR action button.
@@ -1731,174 +507,23 @@ fn pr_btn(
     t: &Theme,
     on: impl Fn(&mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let (hov_border, hov_fg) = (t.border_strong, t.fg0);
-    div()
-        .id(id)
+    widgets::button(id, Tone::Neutral, t)
         .px(px(10.))
         .py(px(5.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
-        .child(SharedString::from(label.to_string()))
+        .child(widgets::label(label.to_string(), t.text_data_sm, true))
         .on_click(move |_ev, _win, cx| on(cx))
 }
 
 /// A [`pr_btn`]-shaped button in its disabled state: muted, inert, no hover.
 fn disabled_btn(label: &str, t: &Theme) -> impl IntoElement {
-    div()
-        .px(px(10.))
-        .py(px(5.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(SharedString::from(label.to_string()))
-}
-
-/// Title-case a lowercase merge-method name ("squash" → "Squash").
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
-    }
-}
-
-/// Like [`seg`] but takes a `&str` label.
-fn seg_str(icon: &str, label: &str, color: u32) -> impl IntoElement {
-    seg(icon, SharedString::from(label.to_string()), color)
-}
-
-/// Readme tab: the rendered README, or a placeholder while loading / when absent.
-fn readme_view(data: &DrawerData, t: &Theme) -> impl IntoElement {
-    match &data.readme {
-        ReadmeState::Ready(Some(src)) => {
-            // Already reflowed at load — gpui-component's renderer panics on a
-            // paragraph's embedded newlines (see data::unwrap_soft_breaks).
-            gpui_component::text::markdown(src.clone()).into_any_element()
-        }
-        ReadmeState::Ready(None) => placeholder("No README in this repo.", t).into_any_element(),
-        _ => placeholder("Loading…", t).into_any_element(),
-    }
-}
-
-/// Notes tab: a "resume where I left off" catch-up + an editable markdown note
-/// (gpui-component multiline input) with Save.
-fn notes_view(
-    row: &Row,
-    data: &DrawerData,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-    ai_ready: bool,
-) -> Div {
-    let mut col = div().flex().flex_col().gap(px(14.));
-    let Some(n) = &data.notes else {
-        return col.child(placeholder("Loading…", t));
-    };
-
-    // Catch-up row.
-    let mut catch = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(9.))
-        .p(px(11.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.surface))
-        .border_1()
-        .border_color(rgb(t.border))
-        .child(lucide("history", 15., t.accent_bright))
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(t.text_small))
-                .text_color(rgb(t.fg1))
-                .child(n.catchup.clone()),
-        );
-    // AI "what changed" catch-up (gated on aiReady; only when there are commits).
-    if ai_ready && n.count > 0 {
-        let app2 = app.clone();
-        catch = catch.child(pr_btn(
-            SharedString::from("gen-resume"),
-            "Catch me up",
-            t,
-            move |cx| {
-                app2.update(cx, |this, cx| this.drawer_generate_resume(cx));
-            },
-        ));
-    }
-    if n.count > 0 || n.first_visit {
-        let app = app.clone();
-        catch = catch.child(pr_btn(
-            SharedString::from("mark-seen"),
-            "Mark caught up",
-            t,
-            move |cx| {
-                app.update(cx, |this, cx| this.drawer_mark_seen(cx));
-            },
-        ));
-    }
-    col = col.child(catch);
-
-    // The AI narrative, once generated.
-    if let Some(resume) = &n.resume {
-        col = col.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .p(px(11.))
-                .rounded(px(t.r_sm))
-                .bg(rgb(t.surface))
-                .border_1()
-                .border_color(rgb(t.border))
-                .child(seg("sparkles", "What changed".into(), t.fg3))
-                .child(
-                    div()
-                        .text_size(px(t.text_small))
-                        .text_color(rgb(t.fg1))
-                        .child(
-                            // Render as markdown (reflowed when stored, like the Readme): the
-                            // prompt asks for plain sentences but models still emit
-                            // multi-line text, which plain text elements panic on.
-                            gpui_component::text::markdown(resume.clone()),
-                        ),
-                ),
-        );
-    }
-
-    // Editable note field + Save.
-    let mut note = section(t, "Note", None);
-    if let Some(input) = &data.note_input {
-        let (app, repo, input2) = (app.clone(), row.id.clone(), input.clone());
-        note = note
-            .child(
-                div()
-                    .min_h(px(160.))
-                    .child(gpui_component::input::Input::new(input).h_full()),
-            )
-            .child(div().flex().flex_row().justify_end().child(pr_btn(
-                SharedString::from("save-note"),
-                "Save note",
-                t,
-                move |cx| {
-                    let (repo, text) = (repo.clone(), input2.read(cx).value());
-                    app.update(cx, |this, cx| {
-                        this.drawer_save_note(repo, text.to_string(), cx)
-                    });
-                },
-            )));
-    }
-    col.child(note)
+    widgets::button(
+        SharedString::from(format!("off-{label}")),
+        Tone::Disabled,
+        t,
+    )
+    .px(px(10.))
+    .py(px(5.))
+    .child(widgets::label(label.to_string(), t.text_data_sm, true))
 }
 
 fn footer(row: &Row, t: &Theme, ide_cmd: &str, agent_cmd: &str) -> impl IntoElement {
@@ -1969,26 +594,16 @@ fn launch_btn(
     t: &Theme,
     on: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let (hov_border, hov_fg) = (t.border_strong, t.fg0);
-    let b = div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap(px(6.))
+    let b = widgets::button(id, Tone::Neutral, t)
         .py(px(9.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .font_family(MONO)
-        .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
+        .px(px(0.))
         .on_click(move |_ev, _win, _cx| on())
-        .child(content);
+        .child(
+            div()
+                .text_size(px(t.text_data_sm))
+                .font_family(MONO)
+                .child(content),
+        );
     if wide {
         b.flex_1().min_w(px(0.))
     } else {
@@ -1998,14 +613,7 @@ fn launch_btn(
 
 /// Inline icon+label segment (shared shape with the card's status segs).
 fn seg(icon: &str, label: SharedString, color: u32) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.))
-        .text_color(rgb(color))
-        .child(lucide(icon, 13., color))
-        .child(label)
+    widgets::seg(icon, label, 13., color)
 }
 
 #[cfg(test)]

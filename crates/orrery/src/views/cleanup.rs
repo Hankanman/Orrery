@@ -4,16 +4,14 @@
 //! UI thread when the nav item is selected. Never touches the current/default
 //! branch (the core `prunable` already excludes those).
 
-use gpui::{
-    Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px, rgb,
-};
+use gpui::{Entity, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 use orrery_core::git_ops;
 
 use crate::data::Row;
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
+use crate::widgets::{self, Tone};
 
 #[derive(Default)]
 pub enum CleanupState {
@@ -189,26 +187,11 @@ fn prune_button(
     } else {
         format!("Prune {n}")
     };
-    let btn = div()
-        .id(SharedString::from(format!("prune-{id}")))
+    let tone = if armed { Tone::Armed } else { Tone::Danger };
+    widgets::button(SharedString::from(format!("prune-{id}")), tone, t)
         .px(px(12.))
         .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .font_family("monospace")
-        .text_size(px(t.text_data_sm))
-        .cursor_pointer();
-    let btn = if armed {
-        btn.border_1()
-            .border_color(rgb(t.behind))
-            .text_color(rgb(t.behind))
-    } else {
-        btn.border_1()
-            .border_color(rgb(t.border))
-            .text_color(rgb(t.fg1))
-            .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
-    };
-    btn.child(SharedString::from(label))
+        .child(widgets::label(label, t.text_data_sm, true))
         .on_click(move |_ev, _win, cx| {
             let id = id.clone();
             app.update(cx, |this, cx| {

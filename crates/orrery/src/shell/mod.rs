@@ -121,6 +121,9 @@ pub struct OrreryApp {
     pub(crate) cleanup_ui: crate::views::cleanup::CleanupUi,
     /// Explore view UI state (clones in flight, clone errors).
     pub(crate) explore_ui: crate::views::explore::ExploreUi,
+    /// The virtualised Inbox / Feed / Explore lists' states — kept here so
+    /// their scroll positions survive re-renders.
+    pub(crate) lists: crate::views::ViewLists,
     /// Agents view state (lazy; detected agent sessions on the machine).
     pub agents: crate::views::agents::AgentsState,
     /// Agents view UI state (poll guard, armed confirm, review panel, PR
@@ -162,10 +165,10 @@ pub struct OrreryApp {
     /// Bumped each time a prune scan starts, so a stale scan result from a
     /// cancelled/superseded confirm can't resurrect the strip.
     pub fleet_prune_seq: u64,
-    /// Active toasts, oldest first (rendered bottom-right by
-    /// `toast::toast_layer`; see `toast.rs` for the lifecycle).
+    /// Toasts queued for the notification layer, oldest first; handed over on
+    /// the next render (see `toast.rs` for the lifecycle).
     pub toasts: Vec<crate::toast::Toast>,
-    /// Monotonic toast-id source — unique ids double as the stale-timer guard.
+    /// Monotonic toast-id source — keys the un-keyed toasts' notifications.
     pub toast_seq: u64,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
@@ -267,6 +270,7 @@ impl OrreryApp {
             cleanup: Default::default(),
             cleanup_ui: Default::default(),
             explore_ui: Default::default(),
+            lists: Default::default(),
             agents: Default::default(),
             agents_ui: Default::default(),
             active_agents: Default::default(),
@@ -315,30 +319,30 @@ impl OrreryApp {
             View::Inbox => crate::views::inbox::render(
                 &self.inbox,
                 self.view_filter.as_deref(),
-                t,
+                &self.lists.inbox,
+                &self.theme,
                 &cx.entity(),
             )
             .into_any_element(),
-            View::Feed => {
-                crate::views::feed::render(&self.feed, self.view_filter.as_deref(), t, &cx.entity())
-                    .into_any_element()
-            }
-            View::Explore => {
-                let cloned = self.cloned_slugs();
-                crate::views::explore::render(
-                    &self.explore,
-                    crate::views::explore::CloneStatus {
-                        cloned: &cloned,
-                        cloning: &self.explore_ui.cloning,
-                        errors: &self.explore_ui.errors,
-                    },
-                    self.view_filter.as_deref(),
-                    self.config.roots.first().map(|s| s.as_str()),
-                    t,
-                    &cx.entity(),
-                )
-                .into_any_element()
-            }
+            View::Feed => crate::views::feed::render(
+                &self.feed,
+                self.view_filter.as_deref(),
+                &self.lists.feed,
+                &self.theme,
+                &cx.entity(),
+            )
+            .into_any_element(),
+            View::Explore => crate::views::explore::render(
+                &self.explore,
+                self.cloned_slugs(),
+                &self.explore_ui.errors,
+                self.view_filter.as_deref(),
+                self.config.roots.first().map(|s| s.as_str()),
+                &self.lists.explore,
+                &self.theme,
+                &cx.entity(),
+            )
+            .into_any_element(),
             View::Janitor => crate::views::cleanup::render(
                 &self.cleanup,
                 self.view_filter.as_deref(),
@@ -450,9 +454,11 @@ impl Render for OrreryApp {
             .relative()
             .size_full()
             .child(shell);
-        // Toasts layer over the active view; the modal overlay (drawer/palette/
-        // dialog) is added after so it stays in front of them.
-        if let Some(toasts) = self.toast_layer(&t, cx) {
+        // Toasts (gpui-component's notification layer) over the active view;
+        // the modal overlay (drawer/palette/dialog) is added after so it stays
+        // in front of them.
+        self.flush_toasts(window, cx);
+        if let Some(toasts) = gpui_component::Root::render_notification_layer(window, cx) {
             root = root.child(toasts);
         }
         if let Some(overlay) = self.overlay_element(&t, cx) {

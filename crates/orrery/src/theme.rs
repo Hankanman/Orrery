@@ -238,14 +238,17 @@ pub fn lang_color(language: &str, fallback: u32) -> u32 {
 }
 
 /// Map our `--orr-*` tokens onto gpui-component's shadcn-style theme, so its
-/// components (markdown, inputs, dropdowns, …) match the rest of the UI. Call
-/// once after `gpui_component::init`, before opening the window.
+/// components (buttons, tabs, tags, notifications, markdown, inputs, …) match
+/// the rest of the UI without per-call-site restyling. Call once after
+/// `gpui_component::init`, before opening the window.
 pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
-    use gpui::{px, rgb};
+    use gpui::{Anchor, px, rgb};
     use gpui_component::ThemeMode;
 
     let c = gpui_component::Theme::global_mut(cx);
     c.mode = ThemeMode::Dark;
+    // Flat design: no drop shadows on buttons, inputs or checkboxes.
+    c.shadow = false;
 
     // Surfaces.
     c.background = rgb(t.page).into();
@@ -254,8 +257,28 @@ pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
     c.muted = rgb(t.surface).into();
     c.sidebar = rgb(t.page).into();
     c.title_bar = rgb(t.page).into();
-    c.input = rgb(t.button_bg).into();
+    // The input border, which is also the default button's border.
+    c.input = rgb(t.border).into();
     c.tab_active = rgb(t.surface).into();
+
+    // Buttons (see `widgets::button`): the default variant is the plain
+    // bordered button, whose hover lifts the fill and brightens the label;
+    // the danger variant hovers into the danger wash.
+    c.button = rgb(t.button_bg).into();
+    c.button_foreground = rgb(t.fg0).into();
+    c.button_hover = rgb(t.border_strong).into();
+    c.button_active = rgb(t.surface_hover).into();
+    c.button_danger = rgb(t.behind).into();
+    c.button_danger_foreground = rgb(t.behind).into();
+    c.button_danger_hover = rgb(t.danger_badge).into();
+    c.button_danger_active = rgb(t.danger_badge).into();
+
+    // Tabs (the drawer's tab bar).
+    c.tab_foreground = rgb(t.fg2).into();
+    c.tab_active_foreground = rgb(t.fg0).into();
+
+    // Notifications (toasts) stack bottom-right, as the hand-rolled ones did.
+    c.notification.placement = Anchor::BottomRight;
 
     // Text.
     c.foreground = rgb(t.fg1).into();
@@ -284,4 +307,8 @@ pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
     // Shape / fonts.
     c.radius = px(t.r_md);
     c.mono_font_family = "monospace".into();
+
+    // Components paint from the resolved tokens, so refresh them from the
+    // colours set above.
+    c.tokens = gpui_component::theme::ThemeTokens::from(&c.colors);
 }

@@ -2,12 +2,16 @@
 //! GitHub: releases (with tags), and starred/created/forked/open-sourced events.
 //! Loaded lazily over the network when the nav item is selected.
 
+use std::rc::Rc;
+
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px, rgb,
 };
 use orrery_core::{inbox, launch};
 
+use super::{ListBody, VList, list_key};
 use crate::data;
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
@@ -91,33 +95,55 @@ fn passes(row: &FeedRow, filter: Option<&str>) -> bool {
     }
 }
 
+/// Render the Feed view: the filtered rows in a virtualised list.
 pub fn render(
     state: &FeedState,
     filter: Option<&str>,
-    t: &Theme,
+    list: &VList,
+    theme: &Rc<Theme>,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
+    let t = theme.as_ref();
+    let note = |text: SharedString| ListBody::Note(super::note(text, t).into_any_element());
     let body = match state {
-        FeedState::Idle | FeedState::Loading => super::note("Loading…", t).into_any_element(),
-        FeedState::Error(e) => super::note(e.clone(), t).into_any_element(),
-        FeedState::Ready(rows) if rows.is_empty() => {
-            super::note("Nothing new in your feed.", t).into_any_element()
-        }
+        FeedState::Idle | FeedState::Loading => note("Loading…".into()),
+        FeedState::Error(e) => note(e.clone()),
+        FeedState::Ready(rows) if rows.is_empty() => note("Nothing new in your feed.".into()),
         FeedState::Ready(rows) => {
-            let shown: Vec<&FeedRow> = rows.iter().filter(|r| passes(r, filter)).collect();
+            // Indices of the rows passing the filter.
+            let shown: Rc<Vec<usize>> = Rc::new(
+                (0..rows.len())
+                    .filter(|&i| passes(&rows[i], filter))
+                    .collect(),
+            );
             if shown.is_empty() {
-                super::note("Nothing in this filter.", t).into_any_element()
+                note("Nothing in this filter.".into())
             } else {
-                let mut col = div().flex().flex_col().gap(px(4.));
-                for r in shown {
-                    col = col.child(feed_item(r, t));
-                }
-                col.into_any_element()
+                let urls: Vec<&SharedString> = shown.iter().map(|&i| &rows[i].url).collect();
+                list.sync(shown.len(), list_key((filter, urls)));
+                let (app, theme) = (app.clone(), theme.clone());
+                ListBody::List(
+                    gpui::list(list.state.clone(), move |ix, _window, cx| {
+                        let FeedState::Ready(rows) = &app.read(cx).feed else {
+                            return div().into_any_element();
+                        };
+                        let Some(row) = shown.get(ix).and_then(|&i| rows.get(i)) else {
+                            return div().into_any_element();
+                        };
+                        // The 4px gap that separated the rows.
+                        let item = div()
+                            .when(ix > 0, |d| d.pt(px(4.)))
+                            .child(feed_item(row, &theme));
+                        VList::pad(ix, shown.len(), item)
+                    })
+                    .size_full()
+                    .into_any_element(),
+                )
             }
         }
     };
 
-    super::frame("Feed", t, app, OrreryApp::load_feed, "feed-scroll", body)
+    super::list_frame("Feed", t, app, OrreryApp::load_feed, body)
 }
 
 fn feed_item(r: &FeedRow, t: &Theme) -> impl IntoElement {

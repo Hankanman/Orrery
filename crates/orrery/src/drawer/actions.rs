@@ -28,6 +28,72 @@ fn recent_summaries(id: &str, limit: usize) -> Vec<String> {
 }
 
 impl OrreryApp {
+    /// Switch the open drawer to `tab`, lazy-loading the tab's data the first
+    /// time it's shown. The tab bar's click handler; a no-op without a drawer.
+    pub fn drawer_select_tab(
+        &mut self,
+        tab: DrawerTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Overlay::Drawer { repo, tab: cur }) = &mut self.overlay else {
+            return;
+        };
+        *cur = tab;
+        let repo = repo.clone();
+        if tab == DrawerTab::Readme && self.drawer.readme == ReadmeState::Idle {
+            self.drawer.readme = ReadmeState::Loading;
+            self.drawer_load_readme(cx);
+        } else if tab == DrawerTab::Pr && matches!(self.drawer.pr, PrState::Idle) {
+            let pr_slug = self
+                .rows
+                .iter()
+                .find(|r| r.id == repo)
+                .and_then(super::github_slug);
+            match pr_slug {
+                Some(slug) => {
+                    self.drawer.pr = PrState::Loading;
+                    self.drawer_load_pr(slug, cx);
+                }
+                None => {
+                    self.drawer.pr = PrState::Error("PR triage is GitHub-only.".into());
+                }
+            }
+        } else if tab == DrawerTab::Changes && matches!(self.drawer.diff, DiffState::Idle) {
+            self.drawer.diff = DiffState::Loading;
+            if self.drawer.commit_input.is_none() {
+                self.drawer.commit_input = Some(cx.new(|cx| {
+                    gpui_component::input::InputState::new(window, cx)
+                        .placeholder("Commit subject…")
+                }));
+            }
+            if self.drawer.commit_body_input.is_none() {
+                self.drawer.commit_body_input = Some(cx.new(|cx| {
+                    gpui_component::input::InputState::new(window, cx)
+                        .auto_grow(2, 8)
+                        .placeholder("Body (optional)…")
+                }));
+            }
+            self.drawer_load_changes(cx);
+        } else if tab == DrawerTab::Notes {
+            if self.drawer.notes.is_none() {
+                self.drawer_load_notes(cx);
+            }
+            // The editable note field needs the Window, so it's created here;
+            // the saved note is read off the UI thread and seeded into it once
+            // loaded.
+            if self.drawer.note_input.is_none() {
+                self.drawer.note_input = Some(cx.new(|cx| {
+                    gpui_component::input::InputState::new(window, cx)
+                        .multi_line(true)
+                        .placeholder("Notes (markdown)…")
+                }));
+                self.drawer_seed_note_input(cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
     /// async git load.
     pub fn open_drawer(&mut self, repo: SharedString, window: &mut Window, cx: &mut Context<Self>) {

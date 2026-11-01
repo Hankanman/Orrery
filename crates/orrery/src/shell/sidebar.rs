@@ -3,7 +3,7 @@
 //! LANGUAGES filters, or a view's category list), plus the scan footer.
 
 use gpui::{
-    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use orrery_core::attention::{AttentionKind, Severity};
@@ -11,6 +11,7 @@ use orrery_core::attention::{AttentionKind, Severity};
 use super::{OrreryApp, View};
 use crate::icon::lucide;
 use crate::theme::Theme;
+use crate::widgets::{self, Header};
 
 /// (view, lucide-icon, label) — labels match the real sidebar (route ≠ label).
 const NAV: [(View, &str, &str); 8] = [
@@ -26,13 +27,9 @@ const NAV: [(View, &str, &str); 8] = [
 
 /// An uppercase sidebar section header (ROOTS / LANGUAGES).
 fn section_header(label: &'static str, t: &Theme) -> impl IntoElement {
-    div()
+    widgets::section_header(label, Header::Rail, t)
         .px(px(9.))
         .pb(px(2.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(label)
 }
 
 /// A section header with a trailing icon action (e.g. VIEWS + to save a view).
@@ -49,14 +46,7 @@ fn section_header_action(
         .items_center()
         .pl(px(9.))
         .pb(px(2.))
-        .child(
-            div()
-                .flex_1()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(t.text_data_sm))
-                .text_color(rgb(t.fg3))
-                .child(label),
-        )
+        .child(widgets::section_header(label, Header::Rail, t).flex_1())
         .child(
             div()
                 .id(SharedString::from(format!("hdr-{label}")))

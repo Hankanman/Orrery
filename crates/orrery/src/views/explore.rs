@@ -3,7 +3,9 @@
 //! next scan). Loaded lazily over the network when the nav item is selected.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px, rgb,
@@ -11,9 +13,11 @@ use gpui::{
 use orrery_core::model::Host;
 use orrery_core::{inbox, launch};
 
+use super::{ListBody, VList, list_key};
 use crate::icon::brand;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
+use crate::widgets::{self, Tone};
 
 #[derive(Default)]
 pub enum ExploreState {
@@ -66,68 +70,88 @@ pub fn star_row(r: inbox::RemoteRepo) -> StarRow {
     }
 }
 
-/// Per-slug clone status owned by the shell, threaded into each card.
-pub struct CloneStatus<'a> {
-    pub cloned: &'a HashSet<SharedString>,
-    pub cloning: &'a HashSet<SharedString>,
-    pub errors: &'a HashMap<SharedString, SharedString>,
-}
-
+/// Render the Explore view: the starred repos (filtered by language) as cards
+/// in a virtualised list, under a note naming where clones land. `cloned`
+/// holds the slugs already in the fleet; the in-flight clones and clone
+/// errors are read from [`ExploreUi`].
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     state: &ExploreState,
-    status: CloneStatus,
+    cloned: Rc<HashSet<SharedString>>,
+    errors: &HashMap<SharedString, SharedString>,
     filter: Option<&str>,
     root: Option<&str>,
-    t: &Theme,
+    list: &VList,
+    theme: &Rc<Theme>,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
+    let t = theme.as_ref();
+    let note = |text: SharedString| ListBody::Note(super::note(text, t).into_any_element());
     let body = match state {
-        ExploreState::Idle | ExploreState::Loading => super::note("Loading…", t).into_any_element(),
-        ExploreState::Error(e) => super::note(e.clone(), t).into_any_element(),
+        ExploreState::Idle | ExploreState::Loading => note("Loading…".into()),
+        ExploreState::Error(e) => note(e.clone()),
         ExploreState::Ready(rows) if rows.is_empty() => {
-            super::note("No starred repos — star some on GitHub.", t).into_any_element()
+            note("No starred repos — star some on GitHub.".into())
         }
         ExploreState::Ready(rows) => {
-            let shown: Vec<&StarRow> = rows
-                .iter()
-                .filter(|r| filter.is_none_or(|lang| r.language.as_ref() == lang))
-                .collect();
+            let shown: Rc<Vec<usize>> = Rc::new(
+                (0..rows.len())
+                    .filter(|&i| filter.is_none_or(|lang| rows[i].language.as_ref() == lang))
+                    .collect(),
+            );
             if shown.is_empty() {
-                super::note("Nothing in this filter.", t).into_any_element()
+                note("Nothing in this filter.".into())
             } else {
-                let mut col = div().flex().flex_col().gap(px(10.));
-                // Where a click-to-clone lands, so it's not a surprise.
-                if let Some(root) = root {
-                    col = col.child(
-                        div()
-                            .font_family("monospace")
-                            .text_size(px(t.text_data_sm))
-                            .text_color(rgb(t.fg3))
-                            .child(SharedString::from(format!("Clones land in {root}"))),
-                    );
-                }
-                for r in shown {
-                    col = col.child(star_card(
-                        r,
-                        status.cloned.contains(&r.slug),
-                        status.cloning.contains(&r.slug),
-                        status.errors.get(&r.slug),
-                        t,
-                        app,
-                    ));
-                }
-                col.into_any_element()
+                // Row 0 is the "Clones land in …" note when there's a root.
+                let root: Option<SharedString> = root.map(|r| format!("Clones land in {r}").into());
+                let lead = usize::from(root.is_some());
+                let count = lead + shown.len();
+                // A clone error adds a line to its card, so it's part of the key.
+                let mut failed: Vec<&SharedString> = errors.keys().collect();
+                failed.sort();
+                let slugs: Vec<&SharedString> = shown.iter().map(|&i| &rows[i].slug).collect();
+                list.sync(count, list_key((filter, &root, slugs, failed)));
+                let (app, theme) = (app.clone(), theme.clone());
+                ListBody::List(
+                    gpui::list(list.state.clone(), move |ix, _window, cx| {
+                        let this = app.read(cx);
+                        let ExploreState::Ready(rows) = &this.explore else {
+                            return div().into_any_element();
+                        };
+                        let t = theme.as_ref();
+                        let item = match (ix.checked_sub(lead), &root) {
+                            // Where a click-to-clone lands, so it's not a surprise.
+                            (None, Some(root)) => div()
+                                .font_family("monospace")
+                                .text_size(px(t.text_data_sm))
+                                .text_color(rgb(t.fg3))
+                                .child(root.clone())
+                                .into_any_element(),
+                            (Some(n), _) => match shown.get(n).and_then(|&i| rows.get(i)) {
+                                Some(r) => star_card(
+                                    r,
+                                    cloned.contains(&r.slug),
+                                    this.explore_ui.cloning.contains(&r.slug),
+                                    this.explore_ui.errors.get(&r.slug),
+                                    t,
+                                    &app,
+                                )
+                                .into_any_element(),
+                                None => div().into_any_element(),
+                            },
+                            (None, None) => div().into_any_element(),
+                        };
+                        // The 10px gap that separated the cards.
+                        let item = div().when(ix > 0, |d| d.pt(px(10.))).child(item);
+                        VList::pad(ix, count, item)
+                    })
+                    .size_full()
+                    .into_any_element(),
+                )
             }
         }
     };
-    super::frame(
-        "Explore",
-        t,
-        app,
-        OrreryApp::load_starred,
-        "explore-scroll",
-        body,
-    )
+    super::list_frame("Explore", t, app, OrreryApp::load_starred, body)
 }
 
 fn star_card(
@@ -221,33 +245,23 @@ fn clone_button(
     } else {
         ("Clone", true)
     };
-    let fg = if enabled { t.fg1 } else { t.fg3 };
-    let mut btn = div()
-        .id(SharedString::from(format!("clone-{}", r.slug)))
+    let tone = if enabled {
+        Tone::Neutral
+    } else {
+        Tone::Disabled
+    };
+    let (app, slug, url, name) = (
+        app.clone(),
+        r.slug.clone(),
+        r.clone_url.clone(),
+        r.name.clone(),
+    );
+    widgets::button(SharedString::from(format!("clone-{}", r.slug)), tone, t)
         .px(px(12.))
         .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family("monospace")
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(fg))
-        .child(SharedString::from(label));
-    if enabled {
-        let (app, slug, url, name) = (
-            app.clone(),
-            r.slug.clone(),
-            r.clone_url.clone(),
-            r.name.clone(),
-        );
-        btn = btn
-            .cursor_pointer()
-            .hover(|s| s.border_color(rgb(t.border_strong)).text_color(rgb(t.fg0)))
-            .on_click(move |_ev, _win, cx| {
-                let (slug, url, name) = (slug.clone(), url.clone(), name.clone());
-                app.update(cx, |this, cx| this.clone_starred(slug, url, name, cx));
-            });
-    }
-    btn
+        .child(widgets::label(label, t.text_data_sm, true))
+        .on_click(move |_ev, _win, cx| {
+            let (slug, url, name) = (slug.clone(), url.clone(), name.clone());
+            app.update(cx, |this, cx| this.clone_starred(slug, url, name, cx));
+        })
 }
