@@ -886,10 +886,8 @@ fn button(label: &str, t: &Theme, on: impl Fn(&mut gpui::App) + 'static) -> impl
     )
     .px(px(14.))
     .py(px(7.))
-    .child(crate::widgets::label(
-        label.to_string(),
-        t.text_data_sm,
-        false,
-    ))
+    // Full width, so a button stretched by its column (Sign out) keeps its
+    // label at the left edge rather than centred.
+    .child(crate::widgets::label(label.to_string(), t.text_data_sm, false).w_full())
     .on_click(move |_ev, _win, cx| on(cx))
 }
