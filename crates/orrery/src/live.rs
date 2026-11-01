@@ -12,6 +12,8 @@
 //!   PR/CI kinds);
 //! - **global shortcut** (Ctrl+Alt+O) → raise the window;
 //! - **system tray** → show / rescan / quit / open-a-repo;
+//! - **app requests** (`orrery_platform::request`) → raise the window on a
+//!   repo or a palette search;
 //! - **clock** → a once-a-minute repaint for relative times.
 //!
 //! GPUI is single-threaded: entity mutation needs `&mut App`, which only exists
@@ -43,6 +45,9 @@ enum Signal {
     Attention(Vec<String>, Option<Vec<orrery_core::inbox::InboxItem>>),
     /// Raise the main window (tray: left-click / "Show Orrery").
     ShowWindow,
+    /// A desktop integration's request (a second launch, `orrery open`, an
+    /// `orrery://` link — see `orrery_platform::instance`).
+    Request(orrery_platform::request::AppRequest),
     /// Quit the app (tray: "Quit").
     Quit,
 }
@@ -102,6 +107,15 @@ pub fn spawn(
     // KDE KRunner service. Self-contained — it reads the cached repo list and
     // opens a match in the IDE directly, so it needs no channel back to the app.
     orrery_platform::krunner::spawn();
+
+    // Requests that need the running app (the single-instance hand-off from
+    // `orrery open` / `orrery://` / a second launch): onto the channel.
+    {
+        let tx = tx.clone();
+        orrery_platform::request::set_handler(move |req| {
+            let _ = tx.try_send(Signal::Request(req));
+        });
+    }
 
     // System tray. Menu activations come back on the tray thread; forward the
     // app-level ones onto the channel (Open is handled inside the tray itself).
@@ -169,6 +183,7 @@ pub fn spawn(
                     if this
                         .update(cx, |app, cx| {
                             app.theme = Rc::new(Theme::dark().with_system_accent(accent));
+                            app.system_reduced_motion = appearance.reduced_motion;
                             cx.notify();
                         })
                         .is_err()
@@ -199,6 +214,15 @@ pub fn spawn(
                     }
                 }
                 Signal::ShowWindow => cx.update(|cx| cx.activate(true)),
+                Signal::Request(req) => {
+                    // Acting on a request opens overlays, which need the window.
+                    let window = cx.update(|cx| cx.windows().first().copied());
+                    if let Some(window) = window {
+                        let _ = window.update(cx, |_, window, cx| {
+                            let _ = this.update(cx, |app, cx| app.apply_request(req, window, cx));
+                        });
+                    }
+                }
                 Signal::Quit => cx.update(|cx| cx.quit()),
             }
         }

@@ -42,7 +42,62 @@ actions!(
     ]
 );
 
+/// Work out what this launch asks for (`orrery open <query>`, an
+/// `orrery://` link, or nothing), then become the running instance or hand
+/// the request to the one already running. Returns the request this process
+/// should act on once its window is up; exits when the request was handed
+/// over or can't be served.
+fn single_instance() -> Option<orrery_platform::request::AppRequest> {
+    use orrery_platform::instance::{self, Claim};
+    use orrery_platform::open_request;
+
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--new-instance`: skip the single-instance hand-off (side-by-side dev
+    // builds).
+    let unclaimed = args.first().is_some_and(|a| a == "--new-instance");
+    if unclaimed {
+        args.remove(0);
+    }
+    let target = match open_request::parse_args(&args) {
+        Ok(target) => target,
+        Err(e) => {
+            eprintln!("orrery: {e}");
+            std::process::exit(2);
+        }
+    };
+    // The launcher's activation token, so the raised window may take focus.
+    let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+    let request = match &target {
+        None => None,
+        Some(target) => {
+            match open_request::resolve(target, &orrery_core::cache::load_repos(), token) {
+                Ok(req) => Some(req),
+                Err(e) => {
+                    eprintln!("orrery: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    if unclaimed {
+        return request;
+    }
+    match instance::claim(request.clone()) {
+        Claim::Primary => request,
+        Claim::HandedOff => {
+            eprintln!("[orrery] handed over to the running instance");
+            std::process::exit(0);
+        }
+        Claim::Refused => {
+            eprintln!("orrery: the running instance refused the request");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
+    let request = single_instance();
+
     // Point the bundled llama.cpp backend at a runtime shipped next to the
     // binary, if any: packages install it to `<prefix>/lib/orrery/llama-runtime`
     // (the AppImage bundles one; deb/rpm stay lean). A no-op in source builds /
@@ -62,9 +117,9 @@ fn main() {
     );
     // Borrow the desktop's accent colour (KDE/portal) so the app harmonises
     // with the user's theme — the design system's runtime accent override.
-    let accent = orrery_platform::appearance::read_blocking()
-        .accent
-        .map(|c| (c.r, c.g, c.b));
+    let appearance = orrery_platform::appearance::read_blocking();
+    let reduced_motion = appearance.reduced_motion;
+    let accent = appearance.accent.map(|c| (c.r, c.g, c.b));
     if let Some((r, g, b)) = accent {
         eprintln!("[native] system accent #{r:02x}{g:02x}{b:02x}");
     }
@@ -122,10 +177,17 @@ fn main() {
                     // The first attention pass, the AI probe, and the same
                     // post-snapshot fan-out a rescan runs — see
                     // `OrreryApp::startup`.
-                    view.update(cx, |this, cx| this.startup(cx));
+                    view.update(cx, |this, cx| {
+                        this.system_reduced_motion = reduced_motion;
+                        this.startup(cx);
+                    });
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();
                     window.focus(&focus, cx);
+                    // This launch's own `orrery open` / `orrery://` request.
+                    if let Some(req) = request.clone() {
+                        view.update(cx, |this, cx| this.apply_request(req, window, cx));
+                    }
                     // gpui-component's Root provides the theme + popover/modal/
                     // notification layers its components need.
                     cx.new(|cx| Root::new(view, window, cx))

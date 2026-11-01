@@ -131,8 +131,10 @@ if fetch_repo_file packaging/orrery.desktop "$tmp/orrery.desktop"; then
   # Exec runs the wrapper, so menu launches bypass AppImageLauncher too. Keep
   # the name orrery.desktop: Orrery registers "orrery" as its app id with the
   # desktop portal (for the global shortcut), and the portal only accepts an
-  # id with a desktop file of the same name.
-  exec_line="Exec=$(desktop_quote "$BIN")"
+  # id with a desktop file of the same name. `%u` passes a clicked orrery://
+  # link (the entry's MimeType registers the scheme; update-desktop-database
+  # below picks it up).
+  exec_line="Exec=$(desktop_quote "$BIN") %u"
   awk -v line="${exec_line//\\/\\\\}" '/^Exec=/ { print line; next } { print }' \
     "$tmp/orrery.desktop" >"$DESKTOP"
 else
