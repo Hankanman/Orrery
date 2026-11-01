@@ -178,6 +178,11 @@ pub struct OrreryApp {
     /// The desktop's reduced-motion preference (portal / KDE), the default
     /// while `config.reduce_motion` is unset. `None` until read.
     pub system_reduced_motion: Option<bool>,
+    /// The desktop's colour scheme from the portal ("dark" / "light", `None`
+    /// for no preference) — what the "System" theme follows.
+    pub system_color_scheme: Option<String>,
+    /// The desktop's accent colour, applied over either palette.
+    pub system_accent: Option<(u8, u8, u8)>,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
     /// Single-flight guards for the background passes (see [`Passes`]).
@@ -300,6 +305,8 @@ impl OrreryApp {
             toast_seq: 0,
             still_toasts: Vec::new(),
             system_reduced_motion: None,
+            system_color_scheme: None,
+            system_accent: None,
             grid: Default::default(),
             passes: Default::default(),
             derived: Default::default(),
@@ -317,6 +324,22 @@ impl OrreryApp {
             .reduce_motion
             .or(self.system_reduced_motion)
             .unwrap_or(false)
+    }
+
+    /// Rebuild the theme from the Settings choice, the desktop's colour
+    /// scheme and its accent, and repaint everything with it: our tokens and
+    /// gpui-component's mapped colours (inputs, switches, toasts, markdown).
+    /// Called at startup, on every desktop appearance change and when the
+    /// Settings theme changes.
+    pub fn apply_theme(&mut self, cx: &mut Context<Self>) {
+        let mode =
+            crate::theme::Mode::resolve(self.config.theme, self.system_color_scheme.as_deref());
+        let theme = Theme::for_mode(mode).with_system_accent(self.system_accent);
+        crate::theme::apply_gpui_component_theme(&theme, cx);
+        self.theme = Rc::new(theme);
+        // Root and the notification/popover layers paint from the
+        // gpui-component theme, outside this entity: repaint the windows.
+        cx.refresh_windows();
     }
 
     /// Toggle a repo's favorite (card star): update the row now, persist the

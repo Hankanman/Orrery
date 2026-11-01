@@ -2,6 +2,7 @@
 //! save (then rescan).
 
 use gpui::{Context, Window};
+use orrery_core::model::ThemePreference;
 
 use crate::shell::OrreryApp;
 
@@ -16,6 +17,29 @@ impl OrreryApp {
         self.ai_refresh(cx);
         self.load_index_stats(cx);
         cx.notify();
+    }
+
+    /// Settings → Appearance → Theme. Unlike the other settings it applies
+    /// and saves at once (you judge a theme by seeing it), and saves only this
+    /// key: other unsaved edits in the draft stay drafts.
+    pub fn set_theme_preference(&mut self, pref: ThemePreference, cx: &mut Context<Self>) {
+        if let Some(s) = &mut self.settings {
+            s.draft.theme = pref;
+        }
+        if self.config.theme == pref {
+            return;
+        }
+        self.config.theme = pref;
+        self.apply_theme(cx);
+        cx.notify();
+        let to_save = self.config.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = orrery_core::config::save(&to_save) {
+                    eprintln!("[settings] could not save the theme: {e}");
+                }
+            })
+            .detach();
     }
 
     /// Append the typed root to the draft.

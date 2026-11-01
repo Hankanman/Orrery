@@ -12,11 +12,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use gpui_component::input::{Input, InputState};
-use orrery_core::model::AppConfig;
+use orrery_core::model::{AppConfig, ThemePreference};
 
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
-use crate::theme::Theme;
+use crate::theme::{Mode, Theme};
 
 /// A GitHub device-flow login in progress: the code the user types at the
 /// verification URL, plus a live status line.
@@ -406,10 +406,26 @@ fn launchers_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
         ))
 }
 
-/// Appearance: the reduce-motion switch. Unset, it follows the desktop's
+/// Appearance: the theme picker (applies and saves at once), then the
+/// reduce-motion switch. Unset, reduce motion follows the desktop's
 /// reduced-motion preference; flipping it records an explicit choice, and
-/// "Follow desktop" clears that again. Takes effect on Save.
+/// "Follow desktop" clears that again. That one takes effect on Save.
 fn appearance_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let theme_note: SharedString = match (s.draft.theme, t.mode) {
+        (ThemePreference::System, Mode::Light) => "Following your desktop, which is light.".into(),
+        (ThemePreference::System, Mode::Dark) => {
+            "Following your desktop: dark unless it asks for light.".into()
+        }
+        _ => "Set here, whatever your desktop uses.".into(),
+    };
+    let theme_row = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(field_label("Theme", t))
+        .child(theme_picker(s.draft.theme, t, app))
+        .child(note_line(theme_note, t.fg3, t));
+
     let explicit = s.draft.reduce_motion;
     let on = explicit.or(s.system_motion).unwrap_or(false);
     let desktop = match s.system_motion {
@@ -417,12 +433,18 @@ fn appearance_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> 
         Some(false) => "allows animation",
         None => "doesn't say",
     };
-    let mut sec = section(t, "Appearance").child(toggle("Reduce motion", on, t, app, move |a| {
-        if let Some(s) = &mut a.settings {
-            let current = s.draft.reduce_motion.or(s.system_motion).unwrap_or(false);
-            s.draft.reduce_motion = Some(!current);
-        }
-    }));
+    let mut sec = section(t, "Appearance").child(theme_row).child(toggle(
+        "Reduce motion",
+        on,
+        t,
+        app,
+        move |a| {
+            if let Some(s) = &mut a.settings {
+                let current = s.draft.reduce_motion.or(s.system_motion).unwrap_or(false);
+                s.draft.reduce_motion = Some(!current);
+            }
+        },
+    ));
     let note: SharedString = match explicit {
         None => format!("Following your desktop, which {desktop}.").into(),
         Some(_) => format!("Set here. Your desktop {desktop}.").into(),
@@ -452,6 +474,37 @@ fn appearance_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> 
         t,
     ));
     sec
+}
+
+/// Three-way System / Dark / Light theme picker, in the same segmented style
+/// as the AI backend picker. A click applies and saves the choice.
+fn theme_picker(current: ThemePreference, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let opt = |label: &'static str, pref: ThemePreference| {
+        let app = app.clone();
+        let on = pref == current;
+        div()
+            .id(SharedString::from(format!("theme-{label}")))
+            .px(px(12.))
+            .py(px(6.))
+            .rounded(px(t.r_sm))
+            .bg(rgb(if on { t.accent_wash } else { t.button_bg }))
+            .border_1()
+            .border_color(rgb(if on { t.primary } else { t.border }))
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(if on { t.fg0 } else { t.fg2 }))
+            .cursor_pointer()
+            .child(label)
+            .on_click(move |_ev, _win, cx| {
+                app.update(cx, |this, cx| this.set_theme_preference(pref, cx));
+            })
+    };
+    div()
+        .flex()
+        .flex_row()
+        .gap(px(6.))
+        .child(opt("System", ThemePreference::System))
+        .child(opt("Dark", ThemePreference::Dark))
+        .child(opt("Light", ThemePreference::Light))
 }
 
 /// True when the configured backend string selects the llama.cpp sidecar.

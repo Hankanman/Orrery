@@ -5,7 +5,8 @@
 //! - **filesystem watch** → rescan just the repos that changed (a burst of
 //!   events coalesces into one single-flight pass; something new under a root
 //!   triggers full repo discovery instead);
-//! - **appearance change** → recompute the theme with the new system accent;
+//! - **appearance change** → recompute the theme with the new colour scheme
+//!   (when Settings → Theme is "System") and system accent;
 //! - **attention poll** → feed the poll's inbox facts into the attention model
 //!   (badges, tray summary, urgent notifications — all downstream of
 //!   `recompute_attention`; the poller itself only notifies the non-model
@@ -24,8 +25,6 @@
 //! `cx.notify()`) on the foreground. Heavy work (the rescan) is handed to the
 //! background executor so it never blocks the UI.
 
-use std::rc::Rc;
-
 use gpui::Context;
 use orrery_platform::appearance::Appearance;
 use orrery_platform::request::AppRequest;
@@ -33,7 +32,6 @@ use orrery_platform::tray::TrayAction;
 use orrery_platform::watcher::ChangeSet;
 
 use crate::shell::OrreryApp;
-use crate::theme::Theme;
 
 /// A desktop signal to apply on the GPUI foreground.
 enum Signal {
@@ -240,15 +238,17 @@ pub fn spawn(
                 }
                 Signal::Appearance(appearance) => {
                     // Keep the tray glyph matching the panel (dark unless the
-                    // scheme is explicitly light).
+                    // scheme is explicitly light). It sits on the desktop's
+                    // panel, so it follows the desktop, not the app's theme.
                     if let Some(tray) = &tray {
                         tray.set_panel_dark(appearance.color_scheme.as_deref() != Some("light"));
                     }
-                    let accent = appearance.accent.map(|c| (c.r, c.g, c.b));
                     if this
                         .update(cx, |app, cx| {
-                            app.theme = Rc::new(Theme::dark().with_system_accent(accent));
+                            app.system_color_scheme = appearance.color_scheme;
+                            app.system_accent = appearance.accent.map(|c| (c.r, c.g, c.b));
                             app.system_reduced_motion = appearance.reduced_motion;
+                            app.apply_theme(cx);
                             cx.notify();
                         })
                         .is_err()
