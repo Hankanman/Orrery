@@ -162,10 +162,10 @@ pub struct OrreryApp {
     /// Bumped each time a prune scan starts, so a stale scan result from a
     /// cancelled/superseded confirm can't resurrect the strip.
     pub fleet_prune_seq: u64,
-    /// Active toasts, oldest first (rendered bottom-right by
-    /// `toast::toast_layer`; see `toast.rs` for the lifecycle).
+    /// Toasts queued for the notification layer, oldest first; handed over on
+    /// the next render (see `toast.rs` for the lifecycle).
     pub toasts: Vec<crate::toast::Toast>,
-    /// Monotonic toast-id source — unique ids double as the stale-timer guard.
+    /// Monotonic toast-id source — keys the un-keyed toasts' notifications.
     pub toast_seq: u64,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
@@ -450,9 +450,11 @@ impl Render for OrreryApp {
             .relative()
             .size_full()
             .child(shell);
-        // Toasts layer over the active view; the modal overlay (drawer/palette/
-        // dialog) is added after so it stays in front of them.
-        if let Some(toasts) = self.toast_layer(&t, cx) {
+        // Toasts (gpui-component's notification layer) over the active view;
+        // the modal overlay (drawer/palette/dialog) is added after so it stays
+        // in front of them.
+        self.flush_toasts(window, cx);
+        if let Some(toasts) = gpui_component::Root::render_notification_layer(window, cx) {
             root = root.child(toasts);
         }
         if let Some(overlay) = self.overlay_element(&t, cx) {
