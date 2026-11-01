@@ -540,6 +540,7 @@ impl OrreryApp {
                     None,
                 ),
                 (Some("launchers".into()), "rocket", "Launchers".into(), None),
+                (Some("appearance".into()), "eye", "Appearance".into(), None),
                 (Some("ai".into()), "sparkles", "AI".into(), None),
                 (
                     Some("notifications".into()),
@@ -809,8 +810,45 @@ impl OrreryApp {
             .flex_col()
             .gap(px(14.))
             .child(views_sec)
+            .child(self.tags_section(t, cx))
             .child(roots_sec)
             .child(langs_sec)
+    }
+
+    /// The TAGS filter list: each project tag with its repo count; clicking
+    /// one narrows the grid to it (again to clear).
+    fn tags_section(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let facets = self.tag_facets();
+        let mut sec = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(section_header("TAGS", t));
+        if facets.is_empty() {
+            return sec.child(
+                div()
+                    .px(px(9.))
+                    .py(px(4.))
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg3))
+                    .child("Tag repos from their drawer's Overview."),
+            );
+        }
+        for (tag, n) in facets.iter().cloned() {
+            let active = self.grid.tag.as_ref() == Some(&tag);
+            let icon_fg = if active { t.accent_bright } else { t.fg2 };
+            let pick = tag.clone();
+            sec = sec.child(sidebar_filter_item(
+                SharedString::from(format!("tag-{tag}")),
+                lucide("tag", 14., icon_fg).into_any_element(),
+                tag,
+                Some(n),
+                active,
+                t,
+                cx.listener(move |this, _e, _w, cx| this.toggle_tag_filter(pick.clone(), cx)),
+            ));
+        }
+        sec
     }
 }
 

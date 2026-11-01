@@ -50,8 +50,10 @@ pub fn has_handler() -> bool {
 }
 
 /// Hand `request` to the app. Returns `false` (and drops it) when no handler
-/// is registered.
-pub(crate) fn dispatch(request: AppRequest) -> bool {
+/// is registered. Public so the app can route its own launch request
+/// (`orrery open` / `orrery://` when no instance was running) down the same
+/// path as a handed-off one.
+pub fn dispatch(request: AppRequest) -> bool {
     // Clone the handler out so it runs without the lock held.
     let handler = HANDLER.lock().ok().and_then(|h| h.clone());
     match handler {

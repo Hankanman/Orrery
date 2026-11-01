@@ -12,7 +12,8 @@
 //!   PR/CI kinds);
 //! - **global shortcut** (Ctrl+Alt+O) → raise the window;
 //! - **app requests** (`orrery_platform::request`: notification buttons,
-//!   GNOME Shell search) → raise the window (with the desktop's activation
+//!   GNOME Shell search, and the single-instance hand-off from `orrery open`
+//!   / `orrery://` / a second launch) → raise the window (with the desktop's activation
 //!   token), then open a repo's drawer or the palette with a query;
 //! - **system tray** → show / rescan / quit / open-a-repo;
 //! - **clock** → a once-a-minute repaint for relative times.
@@ -45,14 +46,15 @@ enum Signal {
     /// fallback) + the raw inbox facts for the attention model (`None` when
     /// the fetch failed: keep the last-known facts).
     Attention(Vec<String>, Option<Vec<orrery_core::inbox::InboxItem>>),
-    /// Raise the main window (tray: left-click / "Show Orrery"), with the
-    /// desktop's activation token when the request carried one.
+    /// Raise the main window (tray: left-click / "Show Orrery", a second
+    /// launch), with the desktop's activation token when the request carried
+    /// one.
     ShowWindow(Option<String>),
     /// Raise the main window and open this repo's drawer (a notification's
-    /// "Show in Orrery").
+    /// "Show in Orrery", `orrery open`, an `orrery://` link).
     ShowRepo(String, Option<String>),
     /// Raise the main window with this query in the command palette (GNOME
-    /// Shell's LaunchSearch).
+    /// Shell's LaunchSearch, `orrery open` with no matching repo).
     Search(String, Option<String>),
     /// Quit the app (tray: "Quit").
     Quit,
@@ -166,7 +168,8 @@ pub fn spawn(
     }
 
     // Requests only the running app can serve (notification "Show in
-    // Orrery", GNOME Shell search). Registering the handler is also what
+    // Orrery", GNOME Shell search, the `orrery open` / `orrery://` hand-off
+    // from `orrery_platform::instance`). Registering the handler is also what
     // makes notifications offer the "Show in Orrery" button.
     {
         let tx = tx.clone();
@@ -245,6 +248,7 @@ pub fn spawn(
                     if this
                         .update(cx, |app, cx| {
                             app.theme = Rc::new(Theme::dark().with_system_accent(accent));
+                            app.system_reduced_motion = appearance.reduced_motion;
                             cx.notify();
                         })
                         .is_err()
@@ -283,9 +287,7 @@ pub fn spawn(
                     let opened =
                         with_raised_window(&this, token.as_deref(), cx, |app, window, cx| {
                             // Only a repo the app knows; anything else just raises.
-                            if app.rows.iter().any(|r| r.id.as_ref() == id) {
-                                app.open_drawer(id.into(), window, cx);
-                            }
+                            app.show_repo(&id, window, cx);
                         });
                     if !opened {
                         break;

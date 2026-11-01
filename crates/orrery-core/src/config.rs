@@ -90,6 +90,7 @@ impl Default for AppConfig {
             llama_model_path: String::new(),
             embed_model: crate::model::default_embed_model(),
             ollama_host: crate::model::default_ollama_host(),
+            reduce_motion: None,
             notify_enabled: true,
             notify_new_pr: true,
             notify_review_requested: true,
@@ -428,6 +429,23 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["config.toml".to_string()]);
+    }
+
+    #[test]
+    fn reduce_motion_follows_the_desktop_until_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Unset by default (follow the desktop), and left out of the file.
+        save_to(&path, &AppConfig::default()).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("reduceMotion"));
+        assert_eq!(load_from(&path).reduce_motion, None);
+        // An explicit choice round-trips.
+        let cfg = AppConfig {
+            reduce_motion: Some(true),
+            ..AppConfig::default()
+        };
+        save_to(&path, &cfg).unwrap();
+        assert_eq!(load_from(&path).reduce_motion, Some(true));
     }
 
     #[test]

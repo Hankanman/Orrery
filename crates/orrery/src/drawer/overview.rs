@@ -13,6 +13,7 @@ pub(super) fn overview(
     data: &DrawerData,
     app: &Entity<OrreryApp>,
     ai_ready: bool,
+    tags: &[SharedString],
 ) -> impl IntoElement {
     let mut col = div().flex().flex_col().gap(px(16.));
 
@@ -24,6 +25,9 @@ pub(super) fn overview(
             .text_color(rgb(t.fg1))
             .child(row.description.clone()),
     );
+
+    // Project tags: chips with ×, and a field to add one.
+    col = col.child(super::tags::tags_editor(row, tags, data, t, app));
 
     // AI summary, when present — hidden (even if cached) unless AI is ready.
     if ai_ready && !row.ai_summary.is_empty() {

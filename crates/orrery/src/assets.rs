@@ -24,13 +24,15 @@ pub struct Assets;
 
 /// gpui-component's own icons (`IconName`) load from `icons/<name>.svg`.
 /// Serve the ones the components we use need from our lucide set: the
-/// Checkbox tick and the notification close button (lucide's `x`). Others
-/// stay unresolved, as before — e.g. NumberInput's +/- would otherwise show
-/// a `+` with no matching `-`, which our icon set lacks.
+/// Checkbox tick, the notification close button (lucide's `x`), and the
+/// NumberInput stepper's −/+ (Settings → scan depth), which rendered as blank
+/// buttons while unmapped. Others stay unresolved.
 fn component_icon(path: &str) -> Option<&'static str> {
     match path {
         "icons/check.svg" => Some("lucide/check.svg"),
         "icons/close.svg" => Some("lucide/x.svg"),
+        "icons/minus.svg" => Some("lucide/minus.svg"),
+        "icons/plus.svg" => Some("lucide/plus.svg"),
         _ => None,
     }
 }
@@ -58,7 +60,9 @@ mod tests {
         let load = |p: &str| Assets.load(p).unwrap().is_some();
         assert!(load("icons/check.svg"), "the Checkbox tick");
         assert!(load("icons/close.svg"), "close maps to lucide's x");
+        assert!(load("icons/minus.svg"), "the NumberInput stepper's −");
+        assert!(load("icons/plus.svg"), "the NumberInput stepper's +");
         assert!(load("lucide/check.svg"), "our own paths are unchanged");
-        assert!(!load("icons/plus.svg"), "only the icons we use are mapped");
+        assert!(!load("icons/inbox.svg"), "only the icons we use are mapped");
     }
 }

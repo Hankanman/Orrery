@@ -35,6 +35,28 @@ kitty --working-directory {path} -e claude
 
 Any command that doesn't match a preset simply shows no highlighted chip and falls back to a generic glyph on the cards.
 
+## From a terminal or a link
+
+`orrery open <query>` brings Orrery to the front (starting it if it isn't running) with the best-matching repo's drawer open. It matches the way the desktop launchers below do (name first, then `owner/name` slug, then path). If nothing matches, Orrery opens the command palette with your query instead.
+
+```sh
+orrery open orrery
+orrery open hank orr
+```
+
+Links work too. The desktop entry registers Orrery for `orrery://` links, so a link in a browser, a README or a chat message opens the repo:
+
+| Link | Opens |
+|---|---|
+| `orrery://open/<owner>/<repo>` | The scanned repo with that slug (GitLab subgroups: `orrery://open/group/sub/repo`). |
+| `orrery://open?path=/home/you/dev/repo` | The scanned repo at exactly that path (percent-encode spaces and other special characters). |
+
+Orrery runs as a single instance. If it's already running (including hidden in the tray), a second launch, `orrery open`, or a clicked link hands the request to the running window over D-Bus and exits. Run `orrery --new-instance` to start a separate copy, for example a development build beside an installed one.
+
+::: warning Links only focus repos you already have
+Any web page can link to `orrery://`, so Orrery treats links as untrusted. It accepts only the two forms above, and only when they name a repo that's already in your scanned list. A link never runs a command, never opens an arbitrary path, and never clones anything. Anything else is refused.
+:::
+
 ## Search from the desktop launcher
 
 While Orrery is running (including hidden in the tray), your repos are searchable from the desktop's own launcher. Type at least two characters of a repo's name, its `owner/name` slug or its path; several words must all match, and name matches rank first.

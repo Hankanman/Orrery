@@ -9,11 +9,9 @@ impl OrreryApp {
     /// Start a settings editing session, seeding the field inputs from config,
     /// and kick off the live network checks (GitHub auth + AI reachability).
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings = Some(crate::views::settings::SettingsState::new(
-            &self.config,
-            window,
-            cx,
-        ));
+        let mut settings = crate::views::settings::SettingsState::new(&self.config, window, cx);
+        settings.system_motion = self.system_reduced_motion;
+        self.settings = Some(settings);
         self.refresh_github_authed(cx);
         self.ai_refresh(cx);
         self.load_index_stats(cx);

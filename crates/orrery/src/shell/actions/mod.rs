@@ -8,6 +8,7 @@ mod ai;
 mod cleanup;
 mod explore;
 mod github;
+mod open;
 mod palette;
 mod settings;
 mod views;

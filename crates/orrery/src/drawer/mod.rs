@@ -37,6 +37,7 @@ mod notes;
 mod overview;
 mod pr;
 mod readme;
+mod tags;
 
 const MONO: &str = "monospace";
 const PANEL_W: f32 = 560.;
@@ -221,6 +222,10 @@ pub struct DrawerData {
     pub dispatch_input: Option<Entity<gpui_component::input::InputState>>,
     /// Whether "Dispatch" runs the agent on a fresh worktree (#185).
     pub dispatch_fresh: bool,
+    /// The add-a-tag field (Overview), created when the drawer opens; Enter
+    /// adds the tag through `_tag_sub`.
+    pub tag_input: Option<Entity<gpui_component::input::InputState>>,
+    _tag_sub: Option<gpui::Subscription>,
     /// Identifies this drawer session (unique per open), so a load started for
     /// an earlier session of the same repo can't land in this one.
     epoch: u64,
@@ -322,6 +327,7 @@ pub fn drawer(
     agent_cmd: &str,
     ai_ready: bool,
     github_authed: bool,
+    look: DrawerLook<'_>,
 ) -> impl IntoElement {
     // Scrim: click anywhere outside the panel to dismiss.
     let backdrop = {
@@ -348,8 +354,12 @@ pub fn drawer(
         .border_l_1()
         .border_color(rgb(t.border))
         .child(header(row, t, app))
-        .child(tab_bar(tab, t, app))
-        .child(body(row, tab, t, data, app, ai_ready, github_authed))
+        .child(if look.reduce_motion {
+            still_tab_bar(tab, t, app).into_any_element()
+        } else {
+            tab_bar(tab, t, app).into_any_element()
+        })
+        .child(body(row, tab, t, data, app, ai_ready, github_authed, look))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
     div()
@@ -459,6 +469,50 @@ fn tab_bar(active: DrawerTab, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoEl
         })
 }
 
+/// The tab strip with reduce motion on: the same tabs with a fixed underline
+/// under the active one (the [`TabBar`]'s underline always slides).
+fn still_tab_bar(active: DrawerTab, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let mut strip = div()
+        .flex()
+        .flex_row()
+        .items_end()
+        .gap(px(16.))
+        .pl(px(19.))
+        .border_b_1()
+        .border_color(rgb(t.border));
+    for (tab, label) in TABS {
+        let on = tab == active;
+        let app = app.clone();
+        let mut item = div()
+            .id(SharedString::from(format!("drawer-tab-{label}")))
+            .px(px(4.))
+            .pt(px(10.))
+            .pb(px(8.))
+            .border_b_2()
+            .border_color(rgb(if on { t.primary } else { t.page }))
+            .text_size(px(t.text_small))
+            .text_color(rgb(if on { t.fg0 } else { t.fg2 }))
+            .cursor_pointer()
+            .child(SharedString::from(label))
+            .on_click(move |_ev, window, cx| {
+                app.update(cx, |this, cx| this.drawer_select_tab(tab, window, cx));
+            });
+        if !on {
+            item = item.hover(|s| s.text_color(rgb(t.fg1)));
+        }
+        strip = strip.child(item);
+    }
+    strip
+}
+
+/// Per-render drawer extras that come from the app rather than the drawer's
+/// own data: whether animation is off, and the repo's project tags.
+#[derive(Clone, Copy)]
+pub struct DrawerLook<'a> {
+    pub reduce_motion: bool,
+    pub tags: &'a [SharedString],
+}
+
 #[allow(clippy::too_many_arguments)]
 fn body(
     row: &Row,
@@ -468,9 +522,12 @@ fn body(
     app: &Entity<OrreryApp>,
     ai_ready: bool,
     github_authed: bool,
+    look: DrawerLook<'_>,
 ) -> impl IntoElement {
     let content = match tab {
-        DrawerTab::Overview => overview::overview(row, t, data, app, ai_ready).into_any_element(),
+        DrawerTab::Overview => {
+            overview::overview(row, t, data, app, ai_ready, look.tags).into_any_element()
+        }
         DrawerTab::Readme => readme::readme_view(data, t).into_any_element(),
         DrawerTab::Pr => pr::pr_view(row, data, t, app).into_any_element(),
         DrawerTab::Changes => {
