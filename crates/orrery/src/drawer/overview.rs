@@ -237,7 +237,10 @@ fn advisory_seg(report: &orrery_core::advisories::AdvisoryReport, t: &Theme) -> 
                 Tier::Moderate => t.dirty,
                 Tier::Mild => t.fg2,
             };
-            (format!("{label} advisories"), color)
+            // "3 high · 5 advisories": the loudest tier, then the total.
+            let n = c.total();
+            let noun = if n == 1 { "advisory" } else { "advisories" };
+            (format!("{label} · {n} {noun}"), color)
         }
         Some(AdvisoryBadge::Unavailable) => ("advisories unavailable".to_string(), t.fg3),
         None => ("no known advisories".to_string(), t.clean),
