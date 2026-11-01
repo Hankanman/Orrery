@@ -6,7 +6,7 @@ use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
-use orrery_core::attention::{AttentionKind, Severity};
+use orrery_core::attention::AttentionKind;
 
 use super::{OrreryApp, View};
 use crate::icon::lucide;
@@ -143,23 +143,11 @@ fn scanned_label(scanned_at: Option<i64>, now: i64, scanning: bool) -> String {
 }
 
 impl OrreryApp {
-    /// Mission Control's nav badge: (count, any-urgent) over the items that
-    /// need action — Urgent + Attention severities. Info items are ambient
-    /// state and don't badge.
+    /// Mission Control's nav badge: (count, any-urgent) of repos that need
+    /// action now (Urgent + Attention; Info is ambient and doesn't badge).
+    /// The same number as the toolbar's Attention button.
     fn grid_badge(&self) -> (usize, bool) {
-        let mut n = 0;
-        let mut urgent = false;
-        for item in &self.attention_items {
-            match item.severity {
-                Severity::Urgent => {
-                    n += 1;
-                    urgent = true;
-                }
-                Severity::Attention => n += 1,
-                Severity::Info => {}
-            }
-        }
-        (n, urgent)
+        self.needs_you()
     }
 
     /// The Inbox nav badge: (count, any-urgent) over the inbox-derived
