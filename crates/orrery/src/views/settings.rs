@@ -144,6 +144,9 @@ pub fn render(
     if show("notifications") {
         sections.push(notifications_section(s, t, app).into_any_element());
     }
+    if show("security") {
+        sections.push(security_section(s, t, app).into_any_element());
+    }
 
     div()
         .flex()
@@ -697,6 +700,37 @@ fn notifications_section(
                     s.draft.notify_agent_finished = !s.draft.notify_agent_finished;
                 }
             },
+        ))
+}
+
+/// Security advisories: the opt-in local audits, and where Dependabot counts
+/// come from. The fleet-hygiene docs page explains the trade-off in full.
+fn security_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    section(t, "Security advisories")
+        .child(toggle(
+            "Local dependency audits",
+            s.draft.local_audits,
+            t,
+            app,
+            |a| {
+                if let Some(s) = &mut a.settings {
+                    s.draft.local_audits = !s.draft.local_audits;
+                }
+            },
+        ))
+        .child(note_line(
+            "Audits lockfiles of repos without a GitHub remote with cargo audit / npm audit: \
+             sandboxed and installs nothing, but runs a tool over files from repos you cloned."
+                .into(),
+            t.fg3,
+            t,
+        ))
+        .child(note_line(
+            "GitHub repos use Dependabot alerts, which need the security_events scope: \
+             if advisories show as unavailable, sign out and re-connect GitHub."
+                .into(),
+            t.fg3,
+            t,
         ))
 }
 

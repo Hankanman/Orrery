@@ -63,7 +63,68 @@ fn tray_summary(items: &[AttentionItem]) -> orrery_platform::tray::TrayAttention
     summary
 }
 
+/// App-side severity tuning for the fleet-hygiene kinds. Core ranks unpushed
+/// branches, detached commits and vulnerable dependencies as Attention, but
+/// they're long-lived states rather than "needs you now", and across a fleet
+/// they would swamp the nav badge and the tray. So at-risk work drops to Info
+/// (it stays on the card dots and lives in Cleanup), and advisories stay at
+/// Attention only for a repo with a *critical* one. Core already raises at
+/// most one item per kind per repo. Re-sorts with core's key afterwards.
+fn tune_hygiene(items: &mut [AttentionItem], critical: &std::collections::HashSet<&str>) {
+    for item in items.iter_mut() {
+        let demote = match item.kind {
+            AttentionKind::OrphanCommits | AttentionKind::UnpushedBranches => true,
+            AttentionKind::VulnerableDependencies => !item
+                .repo
+                .id
+                .as_deref()
+                .is_some_and(|id| critical.contains(id)),
+            _ => false,
+        };
+        if demote {
+            item.severity = Severity::Info;
+        }
+    }
+    items.sort_by_cached_key(|i| {
+        (
+            i.severity,
+            i.kind,
+            i.repo.name.to_lowercase(),
+            i.summary.clone(),
+        )
+    });
+}
+
+/// The "needs you" count shared by the Mission Control nav badge and the
+/// toolbar's Attention button: distinct repos with an Urgent or Attention
+/// item (a linked worktree counts as its main checkout), plus each such item
+/// for a repo that isn't cloned locally (a review request elsewhere). Returns
+/// (count, any urgent).
+fn needs_you(items: &[AttentionItem], parent_of: impl Fn(&str) -> Option<String>) -> (usize, bool) {
+    let mut keys = std::collections::HashSet::new();
+    let mut urgent = false;
+    for item in items.iter().filter(|i| i.severity != Severity::Info) {
+        urgent |= item.severity == Severity::Urgent;
+        let key = match &item.repo.id {
+            Some(id) => parent_of(id).unwrap_or_else(|| id.clone()),
+            None => attention_key(item),
+        };
+        keys.insert(key);
+    }
+    (keys.len(), urgent)
+}
+
 impl OrreryApp {
+    /// The shared "needs you" count (see [`needs_you`]).
+    pub(super) fn needs_you(&self) -> (usize, bool) {
+        needs_you(&self.attention_items, |id| {
+            self.repos
+                .iter()
+                .find(|r| r.id == id)
+                .and_then(|r| r.worktree_of.clone())
+        })
+    }
+
     /// Recompute the ranked attention list (and the per-repo severity lookup)
     /// from what the app already holds, then route it downstream: push the
     /// summary to the tray (if it changed) and desktop-notify urgent items
@@ -109,18 +170,40 @@ impl OrreryApp {
             _ => Vec::new(),
         };
         let ci = orrery_core::ci::facts(&self.ci_states, &self.repos);
-        self.attention_items = attention::compute(&self.repos, inbox, &ci, &prunable, &agents);
+        // Fleet hygiene: at-risk work and open security advisories.
+        let advisories = orrery_core::advisories::facts(&self.hygiene.advisories, &self.repos);
+        let hygiene = attention::Hygiene {
+            at_risk: &self.hygiene.at_risk,
+            advisories: &advisories,
+        };
+        let mut items =
+            attention::compute_with(&self.repos, inbox, &ci, &prunable, &agents, hygiene);
+        let critical: std::collections::HashSet<&str> = advisories
+            .iter()
+            .filter(|a| a.counts.critical > 0)
+            .map(|a| a.repo_id.as_str())
+            .collect();
+        tune_hygiene(&mut items, &critical);
+        self.attention_items = items;
         self.derived.attention_gen += 1; // the Attention filter reads it
         // Items are severity-sorted (Urgent first), so a repo's first
-        // occurrence is its highest severity.
+        // occurrence is its highest severity. A linked worktree has no card
+        // of its own, so its items count against its main checkout's card.
+        let parents: std::collections::HashMap<&str, &str> = self
+            .repos
+            .iter()
+            .filter_map(|r| Some((r.id.as_str(), r.worktree_of.as_deref()?)))
+            .collect();
         self.attention_by_repo.clear();
         for item in &self.attention_items {
             if let Some(id) = &item.repo.id {
+                let card = parents.get(id.as_str()).copied().unwrap_or(id.as_str());
                 self.attention_by_repo
-                    .entry(SharedString::from(id.clone()))
+                    .entry(SharedString::from(card.to_string()))
                     .or_insert(item.severity);
             }
         }
+        self.rebuild_advisory_badges();
         self.push_tray_attention();
         self.notify_fresh_urgent();
     }
@@ -283,6 +366,50 @@ mod tests {
         );
         let unlinked = item(AttentionKind::ReviewRequested, "a", None);
         assert!(attention_key(&unlinked).contains("github.com/o/a"));
+    }
+
+    #[test]
+    fn hygiene_drops_to_info_unless_a_critical_advisory() {
+        let mut items = vec![
+            item(AttentionKind::UnpushedBranches, "a", Some("/a")),
+            item(AttentionKind::OrphanCommits, "b", Some("/b")),
+            item(AttentionKind::VulnerableDependencies, "c", Some("/c")),
+            item(AttentionKind::VulnerableDependencies, "d", Some("/d")),
+            item(AttentionKind::DirtyWorktree, "e", Some("/e")),
+        ];
+        let critical = std::collections::HashSet::from(["/d"]);
+        tune_hygiene(&mut items, &critical);
+        let got: Vec<(&str, Severity)> = items
+            .iter()
+            .map(|i| (i.repo.name.as_str(), i.severity))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // Re-sorted: the two Attention items lead.
+                ("e", Severity::Attention),
+                ("d", Severity::Attention),
+                ("b", Severity::Info),
+                ("a", Severity::Info),
+                ("c", Severity::Info),
+            ]
+        );
+    }
+
+    #[test]
+    fn needs_you_counts_repos_not_items() {
+        let items = vec![
+            item(AttentionKind::CiFailing, "a", Some("/a")),
+            item(AttentionKind::DirtyWorktree, "a", Some("/a")),
+            item(AttentionKind::Ahead, "a", Some("/a")),
+            // A worktree of /a: same card.
+            item(AttentionKind::DirtyWorktree, "a-wt", Some("/a-wt")),
+            item(AttentionKind::ReviewRequested, "elsewhere", None),
+            item(AttentionKind::Behind, "b", Some("/b")),
+        ];
+        let parent = |id: &str| (id == "/a-wt").then(|| "/a".to_string());
+        assert_eq!(needs_you(&items, parent), (2, true));
+        assert_eq!(needs_you(&items[5..], parent), (0, false));
     }
 
     #[test]
