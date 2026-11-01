@@ -22,9 +22,21 @@ pub fn has_icon(path: &str) -> bool {
 /// `assets/icons/`, e.g. `"lucide/git-branch.svg"`, `"brand/github.svg"`.
 pub struct Assets;
 
+/// gpui-component's own icons (`IconName`, e.g. the Checkbox tick or the
+/// notification close button) load from `icons/<name>.svg`. Those are lucide
+/// icons too, so serve them from our lucide set; `close` is lucide's `x`.
+fn component_icon(path: &str) -> Option<String> {
+    let name = path.strip_prefix("icons/")?;
+    Some(match name {
+        "close.svg" => "lucide/x.svg".to_string(),
+        _ => format!("lucide/{name}"),
+    })
+}
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(Icons::get(path).map(|f| f.data))
+        let file = Icons::get(path).or_else(|| component_icon(path).and_then(|p| Icons::get(&p)));
+        Ok(file.map(|f| f.data))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
@@ -32,5 +44,19 @@ impl AssetSource for Assets {
             .filter(|p| p.starts_with(path))
             .map(|p| SharedString::from(p.to_string()))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_icons_resolve_to_lucide() {
+        let load = |p: &str| Assets.load(p).unwrap().is_some();
+        assert!(load("icons/check.svg"), "the Checkbox tick");
+        assert!(load("icons/close.svg"), "close maps to lucide's x");
+        assert!(load("lucide/check.svg"), "our own paths are unchanged");
+        assert!(!load("icons/no-such-icon.svg"));
     }
 }
