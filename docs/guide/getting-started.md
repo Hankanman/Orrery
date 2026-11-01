@@ -21,7 +21,7 @@ This installs the latest release AppImage for your user, with no root needed:
 
 **Options:**
 
-- `ORRERY_VERSION=v2026.10.1` installs a specific tag.
+- `ORRERY_VERSION=v1.0.0` installs a specific tag.
 - `ORRERY_PREFIX=…` changes the install location from `~/.local`.
 
 **Uninstalling:** append `-s -- --uninstall` to the command. Your config and cache are left in place.

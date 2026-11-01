@@ -12,7 +12,7 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: "Release tag (e.g. v2026.7.1) that must match the crate version; empty to only check the crates agree."
+        description: "Release tag (e.g. v1.0.0) that must match the crate version; empty to only check the crates agree."
         type: string
         default: ""
       retention-days:

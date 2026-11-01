@@ -14,7 +14,7 @@
 # "integrate" a second copy into ~/Applications.
 #
 # Environment overrides:
-#   ORRERY_VERSION=v2026.10.1  install a specific tag instead of the latest
+#   ORRERY_VERSION=v1.0.0      install a specific tag instead of the latest
 #   ORRERY_PREFIX=~/.local     where to install (bin/, opt/, share/ go under it)
 #
 #   bash install.sh --uninstall   remove everything this script installed
