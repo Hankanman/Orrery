@@ -4,7 +4,9 @@
 //! directly as `orrery_core::*`.
 
 pub mod activity;
+pub mod advisories;
 pub mod ai;
+pub mod at_risk;
 pub mod attention;
 pub mod cache;
 pub mod ci;
@@ -16,6 +18,7 @@ pub mod forge;
 pub mod git_ops;
 pub mod http;
 pub mod inbox;
+pub mod janitor;
 pub mod launch;
 pub mod llama;
 pub mod model;

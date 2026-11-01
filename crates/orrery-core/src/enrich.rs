@@ -161,6 +161,8 @@ pub(crate) mod test_support {
             private: false,
             favorite: false,
             ai_summary: None,
+            worktree_of: None,
+            worktree_branch: None,
         }
     }
 }

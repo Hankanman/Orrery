@@ -4851,6 +4851,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "x11rb",
  "zbus",
 ]
 

@@ -72,6 +72,23 @@ const CI_CACHE_DDL: &str = "CREATE TABLE IF NOT EXISTS ci_cache (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (host, slug));";
 
+/// `disk_usage` DDL: the janitor's per-repo artefact measurement
+/// (`janitor::DiskUsage` as JSON), TTL-paced by `measured_at`.
+const DISK_USAGE_DDL: &str = "CREATE TABLE IF NOT EXISTS disk_usage (
+    id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    measured_at INTEGER NOT NULL);";
+
+/// `advisory_cache` DDL: security-advisory counts per source
+/// (`advisories::AdvisoryReport` as JSON), keyed (host, key) like `ci_cache`.
+/// Dependabot rows use (domain, slug); local audits use ("local", repo id).
+const ADVISORY_CACHE_DDL: &str = "CREATE TABLE IF NOT EXISTS advisory_cache (
+    host TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    data TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (host, slug));";
+
 /// Create/upgrade the schema. Runs in one `BEGIN IMMEDIATE` transaction so two
 /// first-launch connections (two processes, or two threads before the
 /// per-process [`open`] guard) can't interleave the `PRAGMA table_info` probe
@@ -122,6 +139,12 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(HOST_CACHE_DDL)?;
     conn.execute_batch(EMBEDDINGS_DDL)?;
     conn.execute_batch(CI_CACHE_DDL)?;
+    conn.execute_batch(DISK_USAGE_DDL)?;
+    conn.execute_batch(ADVISORY_CACHE_DDL)?;
+    // Durable (not a cache): when each repo was first seen dirty.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dirty_since (id TEXT PRIMARY KEY, since INTEGER NOT NULL);",
+    )?;
     migrate(conn)
 }
 
@@ -165,9 +188,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("DROP TABLE IF EXISTS host_cache", [])?;
         conn.execute("DROP TABLE IF EXISTS embeddings", [])?;
         conn.execute("DROP TABLE IF EXISTS ci_cache", [])?;
+        conn.execute("DROP TABLE IF EXISTS disk_usage", [])?;
+        conn.execute("DROP TABLE IF EXISTS advisory_cache", [])?;
         conn.execute_batch(HOST_CACHE_DDL)?;
         conn.execute_batch(EMBEDDINGS_DDL)?;
         conn.execute_batch(CI_CACHE_DDL)?;
+        conn.execute_batch(DISK_USAGE_DDL)?;
+        conn.execute_batch(ADVISORY_CACHE_DDL)?;
         // The dropped vectors must re-embed; stale signatures would skip them.
         conn.execute("DELETE FROM meta WHERE key LIKE 'embed_sig:%'", [])?;
         conn.execute(
@@ -304,10 +331,16 @@ pub fn set_favorite(id: &str, favorite: bool) -> Result<bool, String> {
     Ok(favorite)
 }
 
-/// Replace the cached repo snapshot.
+/// Replace the cached repo snapshot, and update the first-seen-dirty
+/// timestamps the at-risk report reads (see [`dirty_since_all`]).
 pub fn store_repos(repos: &[Repo]) -> Result<(), String> {
     let mut conn = open()?;
-    store_repos_on(&mut conn, repos).map_err(|e| e.to_string())
+    store_repos_on(&mut conn, repos).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    record_dirty_on(&mut conn, repos, now).map_err(|e| e.to_string())
 }
 
 /// Load the cached repo snapshot (for instant paint before a fresh scan).
@@ -839,6 +872,194 @@ pub fn clear_ai() -> Result<(usize, usize), String> {
     try_with_conn(clear_ai_on)
 }
 
+// ── Dirty-since tracking (at-risk work) ─────────────────────────────────────
+// The first time each repo was seen with a dirty working tree, so "dirty for
+// N days" can be judged. Updated on every snapshot write (`store_repos`): a
+// newly dirty repo gets `now`, an already-dirty one keeps its timestamp, and a
+// clean (or vanished) repo is cleared. Durable state, not a cache: never
+// dropped on a CACHE_SCHEMA bump.
+
+pub(crate) fn record_dirty_on(
+    conn: &mut Connection,
+    repos: &[Repo],
+    now: i64,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    {
+        let mut mark =
+            tx.prepare("INSERT OR IGNORE INTO dirty_since (id, since) VALUES (?1, ?2)")?;
+        let mut clear = tx.prepare("DELETE FROM dirty_since WHERE id = ?1")?;
+        for repo in repos {
+            if repo.git.dirty > 0 {
+                mark.execute(rusqlite::params![repo.id, now])?;
+            } else {
+                clear.execute([&repo.id])?;
+            }
+        }
+    }
+    // Repos no longer in the snapshot.
+    let ids: HashSet<&str> = repos.iter().map(|r| r.id.as_str()).collect();
+    let stale: Vec<String> = dirty_since_all_on(&tx)
+        .into_keys()
+        .filter(|id| !ids.contains(id.as_str()))
+        .collect();
+    for id in stale {
+        tx.execute("DELETE FROM dirty_since WHERE id = ?1", [id])?;
+    }
+    tx.commit()
+}
+
+pub(crate) fn dirty_since_all_on(conn: &Connection) -> HashMap<String, i64> {
+    let Ok(mut stmt) = conn.prepare("SELECT id, since FROM dirty_since") else {
+        return HashMap::new();
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)));
+    match rows {
+        Ok(iter) => iter.flatten().collect(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+/// When each currently dirty repo was first seen dirty (unix seconds), keyed
+/// by `Repo::id`. Clean repos are absent.
+pub fn dirty_since_all() -> HashMap<String, i64> {
+    with_conn(HashMap::new(), dirty_since_all_on)
+}
+
+// ── Disk usage (janitor) ────────────────────────────────────────────────────
+
+pub(crate) fn store_disk_usage_on(
+    conn: &Connection,
+    usage: &crate::janitor::DiskUsage,
+) -> rusqlite::Result<()> {
+    let json = serde_json::to_string(usage)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO disk_usage (id, data, measured_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![usage.repo_id, json, usage.measured_at],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn all_disk_usage_on(conn: &Connection) -> HashMap<String, crate::janitor::DiskUsage> {
+    let Ok(mut stmt) = conn.prepare("SELECT id, data FROM disk_usage") else {
+        return HashMap::new();
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+    match rows {
+        Ok(iter) => iter
+            .flatten()
+            .filter_map(|(id, json)| Some((id, serde_json::from_str(&json).ok()?)))
+            .collect(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+pub(crate) fn fresh_disk_usage_ids_on(
+    conn: &Connection,
+    max_age_secs: i64,
+    now: i64,
+) -> HashSet<String> {
+    let Ok(mut stmt) = conn.prepare("SELECT id, measured_at FROM disk_usage") else {
+        return HashSet::new();
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)));
+    match rows {
+        Ok(iter) => iter
+            .flatten()
+            .filter(|(_, at)| now.saturating_sub(*at) <= max_age_secs)
+            .map(|(id, _)| id)
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+pub(crate) fn clear_disk_usage_on(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM disk_usage WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Persist a repo's artefact measurement (replacing any earlier one).
+pub fn store_disk_usage(usage: &crate::janitor::DiskUsage) -> Result<(), String> {
+    try_with_conn(|c| store_disk_usage_on(c, usage))
+}
+
+/// Every cached measurement, keyed by repo id. Stale entries are included
+/// (last known beats nothing); check `measured_at` or use
+/// [`fresh_disk_usage_ids`] to decide what to re-measure.
+pub fn all_disk_usage() -> HashMap<String, crate::janitor::DiskUsage> {
+    with_conn(HashMap::new(), all_disk_usage_on)
+}
+
+/// Repo ids measured within `max_age_secs` (see `janitor::TTL_SECS`).
+pub fn fresh_disk_usage_ids(max_age_secs: i64, now: i64) -> HashSet<String> {
+    with_conn(HashSet::new(), |c| {
+        fresh_disk_usage_ids_on(c, max_age_secs, now)
+    })
+}
+
+/// Forget a repo's measurement (after a purge, so it's re-measured).
+pub fn clear_disk_usage(id: &str) {
+    with_conn((), |c| {
+        let _ = clear_disk_usage_on(c, id);
+    });
+}
+
+// ── Security advisories ─────────────────────────────────────────────────────
+// Keyed (source host, key) like ci_cache: ("github.com", "owner/repo") for
+// Dependabot, ("local", repo id) for a local `cargo audit` / `npm audit`.
+
+pub(crate) fn store_advisories_on(
+    conn: &Connection,
+    host: &str,
+    key: &str,
+    report: &crate::advisories::AdvisoryReport,
+) -> rusqlite::Result<()> {
+    let json = serde_json::to_string(report)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO advisory_cache (host, slug, data, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![host, key, json, report.checked_at],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn all_advisories_on(
+    conn: &Connection,
+) -> HashMap<(String, String), crate::advisories::AdvisoryReport> {
+    keyed_rows_on(conn, "SELECT host, slug, data FROM advisory_cache", |row| {
+        row.get::<_, String>(2)
+    })
+    .into_iter()
+    .filter_map(|(key, json)| Some((key, serde_json::from_str(&json).ok()?)))
+    .collect()
+}
+
+pub(crate) fn fresh_advisory_keys_on(
+    conn: &Connection,
+    max_age_secs: i64,
+    now: i64,
+) -> HashSet<(String, String)> {
+    fresh_keys_on(
+        conn,
+        "SELECT host, slug, updated_at FROM advisory_cache",
+        max_age_secs,
+        now,
+    )
+}
+
+/// Every cached advisory report, keyed (source host, key).
+pub fn all_advisories() -> HashMap<(String, String), crate::advisories::AdvisoryReport> {
+    with_conn(HashMap::new(), all_advisories_on)
+}
+
+/// Keys whose cached advisory report is within `max_age_secs`.
+pub fn fresh_advisory_keys(max_age_secs: i64, now: i64) -> HashSet<(String, String)> {
+    with_conn(HashSet::new(), |c| {
+        fresh_advisory_keys_on(c, max_age_secs, now)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,6 +1092,8 @@ mod tests {
             private: false,
             favorite: false,
             ai_summary: None,
+            worktree_of: None,
+            worktree_branch: None,
         }
     }
 
@@ -1475,5 +1698,56 @@ mod tests {
         let fav_a = loaded.iter().find(|r| r.id == "/a").unwrap();
         assert!(fav_b.favorite);
         assert!(!fav_a.favorite);
+    }
+
+    #[test]
+    fn dirty_since_keeps_first_seen_and_clears_on_clean_or_gone() {
+        let mut conn = mem();
+        let mut a = sample("/a");
+        a.git.dirty = 2;
+        let mut b = sample("/b");
+        b.git.dirty = 1;
+        record_dirty_on(&mut conn, &[a.clone(), b.clone()], 100).unwrap();
+        // Still dirty later: the first-seen time sticks.
+        record_dirty_on(&mut conn, &[a.clone(), b.clone()], 500).unwrap();
+        let since = dirty_since_all_on(&conn);
+        assert_eq!(since.get("/a"), Some(&100));
+        assert_eq!(since.get("/b"), Some(&100));
+
+        // /a is committed (clean); /b vanishes from the snapshot.
+        a.git.dirty = 0;
+        record_dirty_on(&mut conn, &[a.clone()], 600).unwrap();
+        assert!(dirty_since_all_on(&conn).is_empty());
+
+        // Dirty again: a fresh first-seen time.
+        a.git.dirty = 1;
+        record_dirty_on(&mut conn, &[a], 700).unwrap();
+        assert_eq!(dirty_since_all_on(&conn).get("/a"), Some(&700));
+    }
+
+    #[test]
+    fn disk_usage_round_trips_with_ttl_and_clear() {
+        use crate::janitor::{ArtifactDir, ArtifactKind, DiskUsage};
+        let conn = mem();
+        let usage = DiskUsage {
+            repo_id: "/a".into(),
+            dirs: vec![ArtifactDir {
+                kind: ArtifactKind::NodeModules,
+                path: "/a/node_modules".into(),
+                rel: "node_modules".into(),
+                bytes: 1234,
+                files: 3,
+                truncated: false,
+            }],
+            total_bytes: 1234,
+            truncated: false,
+            measured_at: 1_000,
+        };
+        store_disk_usage_on(&conn, &usage).unwrap();
+        assert_eq!(all_disk_usage_on(&conn).get("/a"), Some(&usage));
+        assert!(fresh_disk_usage_ids_on(&conn, 100, 1_050).contains("/a"));
+        assert!(fresh_disk_usage_ids_on(&conn, 100, 1_200).is_empty());
+        clear_disk_usage_on(&conn, "/a").unwrap();
+        assert!(all_disk_usage_on(&conn).is_empty());
     }
 }
