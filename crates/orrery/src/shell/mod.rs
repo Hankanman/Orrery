@@ -121,6 +121,9 @@ pub struct OrreryApp {
     pub(crate) cleanup_ui: crate::views::cleanup::CleanupUi,
     /// Explore view UI state (clones in flight, clone errors).
     pub(crate) explore_ui: crate::views::explore::ExploreUi,
+    /// The virtualised Inbox / Feed / Explore lists' states — kept here so
+    /// their scroll positions survive re-renders.
+    pub(crate) lists: crate::views::ViewLists,
     /// Agents view state (lazy; detected agent sessions on the machine).
     pub agents: crate::views::agents::AgentsState,
     /// Agents view UI state (poll guard, armed confirm, review panel, PR
@@ -267,6 +270,7 @@ impl OrreryApp {
             cleanup: Default::default(),
             cleanup_ui: Default::default(),
             explore_ui: Default::default(),
+            lists: Default::default(),
             agents: Default::default(),
             agents_ui: Default::default(),
             active_agents: Default::default(),
@@ -315,30 +319,30 @@ impl OrreryApp {
             View::Inbox => crate::views::inbox::render(
                 &self.inbox,
                 self.view_filter.as_deref(),
-                t,
+                &self.lists.inbox,
+                &self.theme,
                 &cx.entity(),
             )
             .into_any_element(),
-            View::Feed => {
-                crate::views::feed::render(&self.feed, self.view_filter.as_deref(), t, &cx.entity())
-                    .into_any_element()
-            }
-            View::Explore => {
-                let cloned = self.cloned_slugs();
-                crate::views::explore::render(
-                    &self.explore,
-                    crate::views::explore::CloneStatus {
-                        cloned: &cloned,
-                        cloning: &self.explore_ui.cloning,
-                        errors: &self.explore_ui.errors,
-                    },
-                    self.view_filter.as_deref(),
-                    self.config.roots.first().map(|s| s.as_str()),
-                    t,
-                    &cx.entity(),
-                )
-                .into_any_element()
-            }
+            View::Feed => crate::views::feed::render(
+                &self.feed,
+                self.view_filter.as_deref(),
+                &self.lists.feed,
+                &self.theme,
+                &cx.entity(),
+            )
+            .into_any_element(),
+            View::Explore => crate::views::explore::render(
+                &self.explore,
+                self.cloned_slugs(),
+                &self.explore_ui.errors,
+                self.view_filter.as_deref(),
+                self.config.roots.first().map(|s| s.as_str()),
+                &self.lists.explore,
+                &self.theme,
+                &cx.entity(),
+            )
+            .into_any_element(),
             View::Janitor => crate::views::cleanup::render(
                 &self.cleanup,
                 self.view_filter.as_deref(),

@@ -2,15 +2,18 @@
 //! review requests, assigned issues, and notifications, grouped and counted.
 //! Loaded lazily (network, via the `task` bridge) when the nav item is selected.
 
+use std::rc::Rc;
+
 use gpui::{
-    Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnyElement, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px, rgb,
 };
 use orrery_core::{inbox, launch};
 
-use super::{note, section_header, tag};
+use super::{ListBody, VList, list_key, note, tag};
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
+use crate::widgets::{self, Header};
 
 /// Lazy-loaded inbox state.
 #[derive(Default)]
@@ -69,57 +72,127 @@ pub fn notice_row(n: inbox::Notification) -> NoticeRow {
     }
 }
 
-/// Render the Inbox view.
+/// One row of the virtualised Inbox list: a group header, or an item by its
+/// index into [`InboxData::items`] / [`InboxData::notifications`].
+#[derive(Clone, Copy)]
+enum Entry {
+    Header {
+        icon: &'static str,
+        title: &'static str,
+        count: usize,
+        /// Not the first group — leads with the gap between groups.
+        spaced: bool,
+    },
+    Item(usize),
+    Notice(usize),
+}
+
+/// The Inbox groups, in display order: (kind, icon, title).
+const GROUPS: [(&str, &str, &str); 3] = [
+    ("pr", "git-pull-request", "My pull requests"),
+    ("review", "eye", "Awaiting your review"),
+    ("issue", "circle-dot", "Assigned issues"),
+];
+
+/// Flatten the grouped inbox into list rows. The sidebar category filter
+/// gates which groups show (None = all); notifications appear in the
+/// unfiltered (All) view and under their own filter.
+fn entries(d: &InboxData, filter: Option<&str>) -> Vec<Entry> {
+    let show = |kind: &str| filter.is_none() || filter == Some(kind);
+    let mut out = Vec::new();
+    for (kind, icon, title) in GROUPS {
+        let ixs: Vec<usize> = (0..d.items.len())
+            .filter(|&i| d.items[i].kind.as_ref() == kind)
+            .collect();
+        if show(kind) && !ixs.is_empty() {
+            out.push(Entry::Header {
+                icon,
+                title,
+                count: ixs.len(),
+                spaced: !out.is_empty(),
+            });
+            out.extend(ixs.into_iter().map(Entry::Item));
+        }
+    }
+    if show("notification") && !d.notifications.is_empty() {
+        out.push(Entry::Header {
+            icon: "inbox",
+            title: "Notifications",
+            count: d.notifications.len(),
+            spaced: !out.is_empty(),
+        });
+        out.extend((0..d.notifications.len()).map(Entry::Notice));
+    }
+    out
+}
+
+/// Render the Inbox view: its rows in a virtualised list (a busy inbox runs
+/// to hundreds of notifications).
 pub fn render(
     state: &InboxState,
     filter: Option<&str>,
-    t: &Theme,
+    list: &VList,
+    theme: &Rc<Theme>,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
+    let t = theme.as_ref();
     let body = match state {
-        InboxState::Idle | InboxState::Loading => note("Loading…", t).into_any_element(),
-        InboxState::Error(e) => note(e.clone(), t).into_any_element(),
-        InboxState::Ready(d) if d.items.is_empty() && d.notifications.is_empty() => {
-            note("Inbox zero — nothing awaiting you.", t).into_any_element()
+        InboxState::Idle | InboxState::Loading => {
+            ListBody::Note(note("Loading…", t).into_any_element())
         }
-        InboxState::Ready(d) => ready(d, filter, t).into_any_element(),
+        InboxState::Error(e) => ListBody::Note(note(e.clone(), t).into_any_element()),
+        InboxState::Ready(d) if d.items.is_empty() && d.notifications.is_empty() => {
+            ListBody::Note(note("Inbox zero — nothing awaiting you.", t).into_any_element())
+        }
+        InboxState::Ready(d) => {
+            let rows = Rc::new(entries(d, filter));
+            let urls: Vec<&SharedString> = d.items.iter().map(|i| &i.url).collect();
+            list.sync(rows.len(), list_key((filter, urls, d.notifications.len())));
+            let (app, theme) = (app.clone(), theme.clone());
+            ListBody::List(
+                gpui::list(list.state.clone(), move |ix, _window, cx| {
+                    let InboxState::Ready(d) = &app.read(cx).inbox else {
+                        return div().into_any_element();
+                    };
+                    let row = match rows.get(ix) {
+                        Some(entry) => entry_row(*entry, d, &theme),
+                        None => div().into_any_element(),
+                    };
+                    VList::pad(ix, rows.len(), row)
+                })
+                .size_full()
+                .into_any_element(),
+            )
+        }
     };
-    super::frame("Inbox", t, app, OrreryApp::load_inbox, "inbox-scroll", body)
+    super::list_frame("Inbox", t, app, OrreryApp::load_inbox, body)
 }
 
-fn ready(d: &InboxData, filter: Option<&str>, t: &Theme) -> impl IntoElement {
-    // The sidebar category filter gates which groups show (None = all).
-    let show = |kind: &str| filter.is_none() || filter == Some(kind);
-    let of_kind = |kind: &str| -> Vec<&InboxRow> {
-        d.items.iter().filter(|i| i.kind.as_ref() == kind).collect()
-    };
-    let prs = of_kind("pr");
-    let reviews = of_kind("review");
-    let issues = of_kind("issue");
-
-    let mut col = div().flex().flex_col().gap(px(22.));
-    if show("pr") && !prs.is_empty() {
-        col = col.child(group("git-pull-request", "My pull requests", &prs, t));
+fn entry_row(entry: Entry, d: &InboxData, t: &Theme) -> AnyElement {
+    match entry {
+        Entry::Header {
+            icon,
+            title,
+            count,
+            spaced,
+        } => {
+            let head = widgets::section_header(title, Header::Group { icon, count }, t);
+            if spaced {
+                head.mt(px(22.)).into_any_element()
+            } else {
+                head.into_any_element()
+            }
+        }
+        // The 2px gap that separated a group's rows.
+        Entry::Item(i) => div()
+            .pt(px(2.))
+            .child(item_row(&d.items[i], t))
+            .into_any_element(),
+        Entry::Notice(i) => div()
+            .pt(px(2.))
+            .child(notice_item(&d.notifications[i], t))
+            .into_any_element(),
     }
-    if show("review") && !reviews.is_empty() {
-        col = col.child(group("eye", "Awaiting your review", &reviews, t));
-    }
-    if show("issue") && !issues.is_empty() {
-        col = col.child(group("circle-dot", "Assigned issues", &issues, t));
-    }
-    // Notifications appear in the unfiltered (All) view and under their own filter.
-    if show("notification") && !d.notifications.is_empty() {
-        col = col.child(notifications(&d.notifications, t));
-    }
-    col
-}
-
-fn group(icon: &str, title: &str, items: &[&InboxRow], t: &Theme) -> impl IntoElement {
-    let mut col = section_header(icon, title, items.len(), t);
-    for it in items {
-        col = col.child(item_row(it, t));
-    }
-    col
 }
 
 fn item_row(it: &InboxRow, t: &Theme) -> impl IntoElement {
@@ -159,34 +232,28 @@ fn item_row(it: &InboxRow, t: &Theme) -> impl IntoElement {
     )
 }
 
-fn notifications(notes: &[NoticeRow], t: &Theme) -> impl IntoElement {
-    let mut col = section_header("inbox", "Notifications", notes.len(), t);
-    for n in notes {
-        col = col.child(
+fn notice_item(n: &NoticeRow, t: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.))
+        .px(px(10.))
+        .py(px(9.))
+        .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.))
-                .px(px(10.))
-                .py(px(9.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_size(px(t.text_small))
-                        .text_color(rgb(t.fg1))
-                        .child(n.title.clone()),
-                )
-                .child(
-                    div()
-                        .font_family("monospace")
-                        .text_size(px(t.text_data_sm))
-                        .text_color(rgb(t.fg3))
-                        .child(SharedString::from(format!("{} · {}", n.repo, n.reason))),
-                ),
-        );
-    }
-    col
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_size(px(t.text_small))
+                .text_color(rgb(t.fg1))
+                .child(n.title.clone()),
+        )
+        .child(
+            div()
+                .font_family("monospace")
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg3))
+                .child(SharedString::from(format!("{} · {}", n.repo, n.reason))),
+        )
 }
