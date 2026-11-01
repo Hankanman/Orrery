@@ -74,6 +74,7 @@ pub fn star_row(r: inbox::RemoteRepo) -> StarRow {
 /// in a virtualised list, under a note naming where clones land. `cloned`
 /// holds the slugs already in the fleet; the in-flight clones and clone
 /// errors are read from [`ExploreUi`].
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     state: &ExploreState,
     cloned: Rc<HashSet<SharedString>>,
