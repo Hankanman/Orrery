@@ -11,6 +11,15 @@ Orrery keeps watch in the background so you don't have to keep checking. It poll
 
 In **Settings → Notifications** there's a master switch, an **Urgent attention items** switch (review requests and CI failures), and a toggle per event (new PR, review requested, CI failure, agent finished).
 
+### Notification buttons
+
+New-PR notifications (from GitHub, GitLab or Gitea-family hosts) carry buttons on desktops whose notification server supports actions (KDE Plasma, GNOME and most others):
+
+- **Open** opens the pull or merge request in your browser. Clicking the notification itself does the same.
+- **Show in Orrery** brings the window forward on that repo, when it's cloned locally.
+
+On a server without action support you get the same notification without buttons.
+
 Notifications are de-duplicated, so you're told about each thing once, and the seen set is persisted, so a restart doesn't re-notify what's still pending. Each host instance keeps its own seen set: on first run, and the first time a newly connected host answers, Orrery seeds what's already there silently, so you don't get a burst of notifications for history the moment you connect it. If one host is unreachable for a poll, its last known items stay in place.
 
 ::: info Host coverage
@@ -28,5 +37,5 @@ Closing the window **hides Orrery to the system tray** rather than quitting, so 
 Prefer Orrery fully closed? Quit from the tray menu.
 
 ::: tip Summon it back
-A global shortcut — <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd> — brings the window back to the front from anywhere. It's registered through the XDG **GlobalShortcuts portal** (KDE Plasma 6, GNOME), where you can rebind it in your desktop's shortcut settings. There's no X11 key-grab fallback, so it's best-effort: on X11 sessions and on desktops without that portal there's no global shortcut. The portal needs Orrery's `orrery.desktop` entry to be installed; every package provides it, and source builds can add it by hand (see [Getting started](./getting-started#the-desktop-entry-and-the-global-shortcut)).
+A global shortcut — <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd> — brings the window back to the front from anywhere. It's registered through the XDG **GlobalShortcuts portal** (KDE Plasma 6, GNOME), where you can rebind it in your desktop's shortcut settings. Where there's no such portal and an X display is available (an X11 session), Orrery grabs <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd> directly from the X server instead; it works with Caps Lock or Num Lock on, but can't be rebound, and it fails if another app already holds that combination. Under XWayland that grab only sees keys while an X11 window has focus, so on Wayland the portal is what counts. The portal needs Orrery's `orrery.desktop` entry to be installed; every package provides it, and source builds can add it by hand (see [Getting started](./getting-started#the-desktop-entry-and-the-global-shortcut)).
 :::

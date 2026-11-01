@@ -22,6 +22,10 @@ mkdir -p \
 
 install -Dm755 "$BIN" "$APPDIR/usr/bin/orrery"
 install -Dm644 packaging/orrery.desktop "$APPDIR/usr/share/applications/orrery.desktop"
+# GNOME Shell only reads search providers from system data dirs, so this copy
+# is for tools that integrate an AppImage's share/ (install.sh installs its own).
+install -Dm644 packaging/orrery-search-provider.ini \
+  "$APPDIR/usr/share/gnome-shell/search-providers/orrery-search-provider.ini"
 install -Dm644 packaging/icons/icon.png "$APPDIR/usr/share/icons/hicolor/512x512/apps/orrery.png"
 install -Dm644 packaging/icons/128x128.png "$APPDIR/usr/share/icons/hicolor/128x128/apps/orrery.png"
 

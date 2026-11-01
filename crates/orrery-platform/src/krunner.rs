@@ -1,48 +1,49 @@
 //! KDE KRunner integration (#49 / #138): exposes repos over the `org.kde.krunner1`
 //! D-Bus interface so they're searchable straight from KRunner / the Plasma
-//! launcher. Matches read the cached repo list (populated by the app's scans),
-//! so there's no filesystem walk per keystroke — and that list is itself held
-//! in memory for a few seconds, so a burst of keystrokes doesn't re-query
-//! SQLite each time. Also writes a dbusplugin
-//! `.desktop` so KRunner discovers the service. Best-effort — no-ops without a
-//! session bus, like the rest of platform.
+//! launcher. Matching is shared with the GNOME Shell search provider (see
+//! [`crate::repo_search`]). A match opens in the IDE by default; its action
+//! buttons open the terminal agent or the folder, or copy the path. Also
+//! writes a dbusplugin `.desktop` so KRunner discovers the service.
+//! Best-effort — no-ops without a session bus, like the rest of platform.
 //!
 //! The service runs on its own thread + runtime, mirroring `appearance::watch`
-//! / `notifier::watch`.
+//! / `notifier::watch`. The same connection also serves
+//! [`crate::gnome_search`], so one `spawn` covers both launchers.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-use orrery_core::model::Repo;
-use orrery_core::{cache, config, launch};
 use zbus::zvariant::OwnedValue;
 
-/// How long a loaded repo list serves matches before re-reading the cache.
-/// KRunner fires `Match` per keystroke; a few seconds covers a typed query
-/// while still picking up a fresh scan promptly.
-const REPOS_TTL: Duration = Duration::from_secs(5);
-
-/// The repo list as last loaded, and when.
-static REPOS: Mutex<Option<(Instant, Arc<Vec<Repo>>)>> = Mutex::new(None);
-
-/// The cached repo list, reloaded from SQLite once it's older than [`REPOS_TTL`].
-fn repos() -> Arc<Vec<Repo>> {
-    let Ok(mut slot) = REPOS.lock() else {
-        return Arc::new(cache::load_repos());
-    };
-    if let Some((at, repos)) = slot.as_ref() {
-        if at.elapsed() < REPOS_TTL {
-            return repos.clone();
-        }
-    }
-    let repos = Arc::new(cache::load_repos());
-    *slot = Some((Instant::now(), repos.clone()));
-    repos
-}
+use crate::gnome_search;
+use crate::repo_search::{self, RepoAction};
 
 const BUS_NAME: &str = "com.orrery.krunner";
 const OBJECT_PATH: &str = "/krunner";
+
+/// Most matches returned per query.
+const MAX_MATCHES: usize = 10;
+
+/// `QueryMatch::Type` for our matches (between Possible and Exact).
+const MATCH_TYPE: i32 = 60;
+
+/// The secondary actions, as `(id, text, icon)`. The empty id is the default
+/// (clicking or Enter on the match): open in the IDE.
+const ACTIONS: [(&str, &str, &str); 3] = [
+    ("agent", "Open terminal agent", "utilities-terminal"),
+    ("folder", "Open folder", "folder-open"),
+    ("copy", "Copy path", "edit-copy"),
+];
+
+/// The repo action an action id names; the empty id (and any id we don't
+/// know) is the default, open in the IDE.
+fn action_for(id: &str) -> RepoAction {
+    match id {
+        "agent" => RepoAction::Agent,
+        "folder" => RepoAction::Folder,
+        "copy" => RepoAction::CopyPath,
+        _ => RepoAction::Ide,
+    }
+}
 
 struct Runner;
 
@@ -63,46 +64,38 @@ impl Runner {
         f64,
         HashMap<String, OwnedValue>,
     )> {
-        let q = query.trim().to_lowercase();
-        if q.len() < 2 {
-            return Vec::new();
-        }
-        repos()
-            .iter()
-            .filter(|r| {
-                r.display_name.to_lowercase().contains(&q)
-                    || r.slug.as_deref().unwrap_or("").to_lowercase().contains(&q)
-                    || r.path.to_lowercase().contains(&q)
-            })
-            .take(10)
-            .map(|r| {
-                let subtitle = r.slug.clone().unwrap_or_else(|| r.path.clone());
+        let terms = repo_search::query_terms(query);
+        repo_search::search(&repo_search::repos(), &terms, MAX_MATCHES)
+            .into_iter()
+            .map(|(r, score)| {
                 (
                     r.id.clone(),
-                    format!("{}  —  {}", r.display_name, subtitle),
+                    format!("{}  —  {}", r.display_name, repo_search::subtitle(r)),
                     "folder-development".to_string(),
-                    60,
-                    0.8,
+                    MATCH_TYPE,
+                    score,
                     HashMap::new(),
                 )
             })
             .collect()
     }
 
+    /// The actions offered on every match (no per-match `actions` property,
+    /// so KRunner shows them all).
     #[zbus(name = "Actions")]
     async fn actions(&self) -> Vec<(String, String, String)> {
-        Vec::new()
+        ACTIONS
+            .iter()
+            .map(|(id, text, icon)| (id.to_string(), text.to_string(), icon.to_string()))
+            .collect()
     }
 
     #[zbus(name = "Run")]
-    async fn run(&self, match_id: &str, _action_id: &str) {
-        // The session bus is unauthenticated — only act on a match_id we
-        // actually produced (a known repo), never an arbitrary path.
-        if !cache::load_repos().iter().any(|r| r.id == match_id) {
-            return;
-        }
-        if let Err(e) = launch::launch(&config::load().ide_command, match_id) {
-            eprintln!("[orrery krunner] failed to open {match_id}: {e}");
+    async fn run(&self, match_id: &str, action_id: &str) {
+        // `repo_search::run` only acts on a known repo: the session bus is
+        // unauthenticated, so never on an arbitrary path.
+        if let Err(e) = repo_search::run(action_for(action_id), match_id).await {
+            eprintln!("[orrery krunner] '{action_id}' failed for {match_id}: {e}");
         }
     }
 }
@@ -129,21 +122,26 @@ fn ensure_plugin_file() {
 }
 
 async fn serve() -> zbus::Result<()> {
-    // Holding the connection in scope keeps the bus name owned and the service
-    // registered; zbus drives method dispatch on its own internal executor.
+    // Holding the connection in scope keeps the bus names owned and the
+    // services registered; zbus drives method dispatch on its own internal
+    // executor.
     let _conn = zbus::connection::Builder::session()?
         .name(BUS_NAME)?
         .serve_at(OBJECT_PATH, Runner)?
+        .name(gnome_search::BUS_NAME)?
+        .serve_at(gnome_search::OBJECT_PATH, gnome_search::SearchProvider)?
         .build()
         .await?;
     std::future::pending::<()>().await;
     Ok(())
 }
 
-/// Start the KRunner service on its own thread + runtime. Degrades silently
-/// (the thread exits) when there's no session bus or the service can't be
-/// registered — KRunner search is then simply unavailable, like every other
-/// platform integration.
+/// Start the launcher search services (KRunner and the GNOME Shell search
+/// provider) on their own thread + runtime. Degrades silently (the thread
+/// exits) when there's no session bus or the services can't be registered —
+/// launcher search is then simply unavailable, like every other platform
+/// integration. Each desktop only queries its own interface, so serving both
+/// everywhere costs nothing.
 pub fn spawn() {
     ensure_plugin_file();
     std::thread::spawn(|| {
@@ -154,4 +152,21 @@ pub fn spawn() {
             eprintln!("[orrery krunner] disabled: {e}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_ids_map_to_repo_actions() {
+        assert_eq!(action_for(""), RepoAction::Ide);
+        assert_eq!(action_for("agent"), RepoAction::Agent);
+        assert_eq!(action_for("folder"), RepoAction::Folder);
+        assert_eq!(action_for("copy"), RepoAction::CopyPath);
+        assert_eq!(action_for("bogus"), RepoAction::Ide);
+        for (id, _, _) in ACTIONS {
+            assert_ne!(action_for(id), RepoAction::Ide, "{id} must not fall back");
+        }
+    }
 }
