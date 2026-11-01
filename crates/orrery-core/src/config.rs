@@ -91,6 +91,7 @@ impl Default for AppConfig {
             embed_model: crate::model::default_embed_model(),
             ollama_host: crate::model::default_ollama_host(),
             reduce_motion: None,
+            theme: crate::model::ThemePreference::System,
             notify_enabled: true,
             notify_new_pr: true,
             notify_review_requested: true,
@@ -446,6 +447,31 @@ mod tests {
         };
         save_to(&path, &cfg).unwrap();
         assert_eq!(load_from(&path).reduce_motion, Some(true));
+    }
+
+    #[test]
+    fn theme_defaults_to_system_and_round_trips() {
+        use crate::model::ThemePreference;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // "system" is the default and stays out of the file.
+        save_to(&path, &AppConfig::default()).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("theme"));
+        assert_eq!(load_from(&path).theme, ThemePreference::System);
+        let cfg = AppConfig {
+            theme: ThemePreference::Light,
+            ..AppConfig::default()
+        };
+        save_to(&path, &cfg).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("theme = \"light\""));
+        assert_eq!(load_from(&path).theme, ThemePreference::Light);
+        // A hand-edited value is read leniently and never resets the file.
+        let cfg: AppConfig = toml::from_str("theme = \"Dark\"\nscanDepth = 5").unwrap();
+        assert_eq!(cfg.theme, ThemePreference::Dark);
+        let cfg: AppConfig = toml::from_str("theme = \"sepia\"\nscanDepth = 5").unwrap();
+        assert_eq!((cfg.theme, cfg.scan_depth), (ThemePreference::System, 5));
     }
 
     #[test]
