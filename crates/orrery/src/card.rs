@@ -8,12 +8,14 @@ use gpui::{
     App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
+use gpui_component::checkbox::Checkbox;
 use orrery_core::launch;
 
 use crate::data::Row;
 use crate::icon::{brand, langicon, lucide};
 use crate::shell::OrreryApp;
 use crate::theme::{Theme, devicon_stem, lang_color};
+use crate::widgets::{self, Tone};
 
 const MONO: &str = "monospace";
 
@@ -35,51 +37,34 @@ pub struct CardState {
     pub show_ai: bool,
 }
 
-/// The fleet multi-select checkbox: filled with a check when selected;
-/// otherwise invisible (keeping its layout slot, so nothing shifts) until the
-/// card's hover group is hovered or any selection exists. Clicking toggles the
-/// repo in the selection without opening the drawer.
+/// The fleet multi-select checkbox (gpui-component [`Checkbox`]): checked
+/// when selected; otherwise invisible (keeping its layout slot, so nothing
+/// shifts) until the card's hover group is hovered or any selection exists.
+/// Clicking toggles the repo in the selection without opening the drawer.
 fn select_box(
     id: SharedString,
     group: SharedString,
     row_id: SharedString,
     state: CardState,
-    t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
     let app = app.clone();
-    let (border_c, bg_c) = if state.selected {
-        (t.primary, t.primary)
-    } else {
-        (t.border_strong, t.button_bg)
-    };
-    let hov = t.primary;
-    let mut b = div()
-        .id(id)
-        .flex()
+    let b = Checkbox::new(id)
+        .checked(state.selected)
+        .tab_stop(false)
         .flex_none()
-        .items_center()
-        .justify_center()
-        .w(px(16.))
-        .h(px(16.))
-        .rounded(px(t.r_xs))
-        .border_1()
-        .border_color(rgb(border_c))
-        .bg(rgb(bg_c))
         .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hov)))
-        .on_click(move |_ev, _win, cx| {
+        .on_click(move |_checked, _win, cx| {
             // Selection toggles in place — don't also open the drawer.
             cx.stop_propagation();
             let row_id = row_id.clone();
             app.update(cx, |this, cx| this.toggle_selected(row_id, cx));
         });
-    if state.selected {
-        b = b.child(lucide("check", 12., t.page));
-    } else if !state.selecting {
-        b = b.invisible().group_hover(group, |s| s.visible());
+    if !state.selected && !state.selecting {
+        b.invisible().group_hover(group, |s| s.visible())
+    } else {
+        b
     }
-    b
 }
 
 /// Click handler for a card's open-drawer region: Ctrl/Cmd+click toggles the
@@ -125,14 +110,7 @@ fn urgent_dot(t: &Theme) -> impl IntoElement {
 
 /// One status segment: a lucide icon + label, both in `color`.
 fn seg(icon_name: &str, label: SharedString, color: u32) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.))
-        .text_color(rgb(color))
-        .child(lucide(icon_name, 14., color))
-        .child(label)
+    widgets::seg(icon_name, label, 14., color)
 }
 
 /// A clickable launcher button. `wide` ones flex to fill (IDE/Agent); narrow
@@ -144,26 +122,16 @@ fn button(
     t: &Theme,
     on: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
-    let (hov_border, hov_fg) = (t.border_strong, t.fg0);
-    let b = div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap(px(6.))
+    let b = widgets::button(id, Tone::Neutral, t)
         .py(px(8.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .font_family(MONO)
-        .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
+        .px(px(0.))
         .on_click(move |_ev, _win, cx| on(cx))
-        .child(content);
+        .child(
+            div()
+                .text_size(px(t.text_data_sm))
+                .font_family(MONO)
+                .child(content),
+        );
     if wide {
         b.flex_1().min_w(px(0.))
     } else {
@@ -221,7 +189,6 @@ pub fn card(
                     group.clone(),
                     row.id.clone(),
                     state,
-                    t,
                     app,
                 ))
                 .child(lang_mark(&row.language, t))
@@ -460,7 +427,6 @@ pub(crate) fn list_item(
         group.clone(),
         row.id.clone(),
         state,
-        t,
         app,
     );
     let fav_star = {

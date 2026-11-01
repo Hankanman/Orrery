@@ -30,8 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
-    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, px, rgb,
 };
 
 use orrery_core::fleet::{self, FleetReport, Outcome};
@@ -40,6 +39,7 @@ use crate::icon::lucide;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
 use crate::toast::ToastKind;
+use crate::widgets::{self, Tone};
 
 /// Failed repos shown in the resolution toast's detail before "+N more".
 const MAX_FAILURES_SHOWN: usize = 4;
@@ -714,35 +714,29 @@ fn bar_btn(
     t: &Theme,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::AnyElement {
-    let fg = match (enabled, danger) {
-        (false, _) => t.fg3,
-        (true, true) => t.behind,
-        (true, false) => t.fg1,
+    let (tone, fg) = match (enabled, danger) {
+        (false, _) => (Tone::Disabled, t.fg3),
+        (true, true) => (Tone::Neutral, t.behind),
+        (true, false) => (Tone::Neutral, t.fg1),
     };
-    let mut b = div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
+    widgets::button(id, tone, t)
         .px(px(10.))
         .py(px(5.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_small))
+        // The danger tint is the resting label colour, not a destructive
+        // hover: Confirm is the deliberate second step already.
         .text_color(rgb(fg))
-        .child(lucide(icon, 14., fg))
-        .child(SharedString::from(label.to_string()));
-    if enabled {
-        let hov = t.border_strong;
-        b = b
-            .cursor_pointer()
-            .hover(move |s| s.border_color(rgb(hov)))
-            .on_click(on);
-    }
-    b.into_any_element()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(t.text_small))
+                .child(lucide(icon, 14., fg))
+                .child(SharedString::from(label.to_string())),
+        )
+        .on_click(on)
+        .into_any_element()
 }
 
 /// Aggregate summary for the resolution toast, e.g. "Pull: 38 ok, 2 failed".

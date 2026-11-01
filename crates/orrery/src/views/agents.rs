@@ -13,15 +13,13 @@
 //! Loaded off the UI thread when the nav item is selected; the refresh button
 //! re-scans.
 
-use gpui::{
-    Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px, rgb,
-};
+use gpui::{Entity, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 
 use crate::data::Row;
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
+use crate::widgets::{self, Tone};
 
 /// Known terminal coding-agent CLIs to detect by program name.
 const KNOWN: &[&str] = &[
@@ -788,6 +786,14 @@ fn review_diff_block(diff: &str, t: &Theme) -> impl IntoElement {
     block
 }
 
+/// The Agents view's card button: 12px text, 12×6 padding, in `tone`.
+fn small_button(id: String, label: &str, tone: Tone, t: &Theme) -> gpui_component::button::Button {
+    widgets::button(SharedString::from(id), tone, t)
+        .px(px(12.))
+        .py(px(6.))
+        .child(widgets::label(label.to_string(), t.text_data_sm, false))
+}
+
 /// A closure-driven card button, styled like [`action`]; `danger` uses the
 /// destructive hover/armed palette.
 fn wt_button(
@@ -797,28 +803,14 @@ fn wt_button(
     t: &Theme,
     on: impl Fn(&mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let btn = div()
-        .id(SharedString::from(id))
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .text_size(px(t.text_data_sm))
-        .cursor_pointer();
-    let btn = if danger && label.starts_with("Confirm") {
-        btn.border_color(rgb(t.behind)).text_color(rgb(t.behind))
+    let tone = if danger && label.starts_with("Confirm") {
+        Tone::Armed
     } else if danger {
-        btn.border_color(rgb(t.border))
-            .text_color(rgb(t.fg1))
-            .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
+        Tone::Danger
     } else {
-        btn.border_color(rgb(t.border))
-            .text_color(rgb(t.fg1))
-            .hover(|s| s.border_color(rgb(t.border_strong)).text_color(rgb(t.fg0)))
+        Tone::Neutral
     };
-    btn.child(SharedString::from(label.to_string()))
-        .on_click(move |_ev, _win, cx| on(cx))
+    small_button(id, label, tone, t).on_click(move |_ev, _win, cx| on(cx))
 }
 
 #[derive(Clone, Copy)]
@@ -837,20 +829,8 @@ fn action(
     act: Act,
 ) -> impl IntoElement {
     let app = app.clone();
-    div()
-        .id(SharedString::from(format!("agent-{key}-{repo}")))
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(|s| s.border_color(rgb(t.border_strong)).text_color(rgb(t.fg0)))
-        .child(SharedString::from(label.to_string()))
-        .on_click(move |_ev, _win, cx| {
+    small_button(format!("agent-{key}-{repo}"), label, Tone::Neutral, t).on_click(
+        move |_ev, _win, cx| {
             let repo = repo.clone();
             app.update(cx, |this, _cx| match act {
                 Act::Agent => {
@@ -863,27 +843,17 @@ fn action(
                     let _ = orrery_core::launch::open(&repo);
                 }
             });
-        })
+        },
+    )
 }
 
 fn terminate_button(pid: u32, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
     let app = app.clone();
-    div()
-        .id(SharedString::from(format!("agent-kill-{pid}")))
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
-        .child(SharedString::from("Terminate"))
-        .on_click(move |_ev, _win, cx| {
+    small_button(format!("agent-kill-{pid}"), "Terminate", Tone::Danger, t).on_click(
+        move |_ev, _win, cx| {
             app.update(cx, |this, cx| this.terminate_agent(pid, cx));
-        })
+        },
+    )
 }
 
 /// The per-worktree remove button. Two-stage like Cleanup's prune: the first
@@ -906,35 +876,17 @@ fn remove_worktree_button(
     } else {
         "Remove worktree"
     };
-    let btn = div()
-        .id(SharedString::from(format!("wt-remove-{path}")))
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .text_size(px(t.text_data_sm))
-        .cursor_pointer();
-    let btn = if armed {
-        btn.border_1()
-            .border_color(rgb(t.behind))
-            .text_color(rgb(t.behind))
-    } else {
-        btn.border_1()
-            .border_color(rgb(t.border))
-            .text_color(rgb(t.fg1))
-            .hover(|s| s.border_color(rgb(t.behind)).text_color(rgb(t.behind)))
-    };
-    btn.child(SharedString::from(label))
-        .on_click(move |_ev, _win, cx| {
-            let (path, origin, name) = (path.clone(), origin.clone(), name.clone());
-            app.update(cx, |this, cx| {
-                if armed {
-                    this.remove_dispatch_worktree(path, origin, name, cx);
-                } else {
-                    this.arm_worktree_remove(path, cx);
-                }
-            });
-        })
+    let tone = if armed { Tone::Armed } else { Tone::Danger };
+    small_button(format!("wt-remove-{path}"), label, tone, t).on_click(move |_ev, _win, cx| {
+        let (path, origin, name) = (path.clone(), origin.clone(), name.clone());
+        app.update(cx, |this, cx| {
+            if armed {
+                this.remove_dispatch_worktree(path, origin, name, cx);
+            } else {
+                this.arm_worktree_remove(path, cx);
+            }
+        });
+    })
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ use orrery_core::{inbox, launch};
 use crate::icon::brand;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
+use crate::widgets::{self, Tone};
 
 #[derive(Default)]
 pub enum ExploreState {
@@ -221,33 +222,23 @@ fn clone_button(
     } else {
         ("Clone", true)
     };
-    let fg = if enabled { t.fg1 } else { t.fg3 };
-    let mut btn = div()
-        .id(SharedString::from(format!("clone-{}", r.slug)))
+    let tone = if enabled {
+        Tone::Neutral
+    } else {
+        Tone::Disabled
+    };
+    let (app, slug, url, name) = (
+        app.clone(),
+        r.slug.clone(),
+        r.clone_url.clone(),
+        r.name.clone(),
+    );
+    widgets::button(SharedString::from(format!("clone-{}", r.slug)), tone, t)
         .px(px(12.))
         .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family("monospace")
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(fg))
-        .child(SharedString::from(label));
-    if enabled {
-        let (app, slug, url, name) = (
-            app.clone(),
-            r.slug.clone(),
-            r.clone_url.clone(),
-            r.name.clone(),
-        );
-        btn = btn
-            .cursor_pointer()
-            .hover(|s| s.border_color(rgb(t.border_strong)).text_color(rgb(t.fg0)))
-            .on_click(move |_ev, _win, cx| {
-                let (slug, url, name) = (slug.clone(), url.clone(), name.clone());
-                app.update(cx, |this, cx| this.clone_starred(slug, url, name, cx));
-            });
-    }
-    btn
+        .child(widgets::label(label, t.text_data_sm, true))
+        .on_click(move |_ev, _win, cx| {
+            let (slug, url, name) = (slug.clone(), url.clone(), name.clone());
+            app.update(cx, |this, cx| this.clone_starred(slug, url, name, cx));
+        })
 }

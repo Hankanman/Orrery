@@ -16,15 +16,18 @@
 //! and the helpers the tabs share; each tab renders from its own submodule.
 
 use gpui::{
-    AppContext, Div, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, div, px, rgb, rgba,
+    Div, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, rgb, rgba,
 };
 use orrery_core::{git_ops, launch};
 
+use gpui_component::tab::{Tab, TabBar};
+
 use crate::data::{self, Row};
 use crate::icon::{brand, lucide};
-use crate::shell::{DrawerTab, OrreryApp, Overlay};
+use crate::shell::{DrawerTab, OrreryApp};
 use crate::theme::Theme;
+use crate::widgets::{self, Header, Tone, tag};
 
 mod actions;
 mod branches;
@@ -339,7 +342,7 @@ pub fn drawer(
         .border_l_1()
         .border_color(rgb(t.border))
         .child(header(row, t, app))
-        .child(tab_bar(tab, t, app, github_slug(row)))
+        .child(tab_bar(tab, t, app))
         .child(body(row, tab, t, data, app, ai_ready, github_authed))
         .child(footer(row, t, ide_cmd, agent_cmd));
 
@@ -426,99 +429,28 @@ pub(crate) fn github_slug(row: &Row) -> Option<SharedString> {
     (row.host.as_ref() == "github" && row.slug.as_ref() != "no remote").then(|| row.slug.clone())
 }
 
-fn tab_bar(
-    active: DrawerTab,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-    pr_slug: Option<SharedString>,
-) -> impl IntoElement {
-    let mut bar = div()
-        .flex()
-        .flex_row()
-        .gap(px(2.))
-        .px(px(12.))
-        .border_b_1()
-        .border_color(rgb(t.border));
-
-    for (tab, label) in TABS {
-        let is_active = tab == active;
-        let fg = if is_active { t.fg0 } else { t.fg2 };
-        let app = app.clone();
-        let pr_slug = pr_slug.clone();
-        // 1px underline on the active tab; page-coloured (invisible) otherwise so
-        // the row height stays constant.
-        let underline = if is_active { t.accent_bright } else { t.page };
-        let item = div()
-            .id(label)
-            .px(px(11.))
-            .py(px(10.))
-            .text_size(px(t.text_small))
-            .text_color(rgb(fg))
-            .cursor_pointer()
-            .border_b_1()
-            .border_color(rgb(underline))
-            .hover(|s| s.text_color(rgb(t.fg0)))
-            .child(SharedString::from(label))
-            .on_click(move |_ev, window, cx| {
-                let pr_slug = pr_slug.clone();
-                app.update(cx, |this, cx| {
-                    if let Some(Overlay::Drawer { tab: cur, .. }) = &mut this.overlay {
-                        *cur = tab;
-                    }
-                    // Lazy-load the tab's data on first view.
-                    if tab == DrawerTab::Readme && this.drawer.readme == ReadmeState::Idle {
-                        this.drawer.readme = ReadmeState::Loading;
-                        this.drawer_load_readme(cx);
-                    } else if tab == DrawerTab::Pr && matches!(this.drawer.pr, PrState::Idle) {
-                        match pr_slug {
-                            Some(slug) => {
-                                this.drawer.pr = PrState::Loading;
-                                this.drawer_load_pr(slug, cx);
-                            }
-                            None => {
-                                this.drawer.pr = PrState::Error("PR triage is GitHub-only.".into());
-                            }
-                        }
-                    } else if tab == DrawerTab::Changes
-                        && matches!(this.drawer.diff, DiffState::Idle)
-                    {
-                        this.drawer.diff = DiffState::Loading;
-                        if this.drawer.commit_input.is_none() {
-                            this.drawer.commit_input = Some(cx.new(|cx| {
-                                gpui_component::input::InputState::new(window, cx)
-                                    .placeholder("Commit subject…")
-                            }));
-                        }
-                        if this.drawer.commit_body_input.is_none() {
-                            this.drawer.commit_body_input = Some(cx.new(|cx| {
-                                gpui_component::input::InputState::new(window, cx)
-                                    .auto_grow(2, 8)
-                                    .placeholder("Body (optional)…")
-                            }));
-                        }
-                        this.drawer_load_changes(cx);
-                    } else if tab == DrawerTab::Notes {
-                        if this.drawer.notes.is_none() {
-                            this.drawer_load_notes(cx);
-                        }
-                        // The editable note field needs the Window, so it's
-                        // created here; the saved note is read off the UI
-                        // thread and seeded into it once loaded.
-                        if this.drawer.note_input.is_none() {
-                            this.drawer.note_input = Some(cx.new(|cx| {
-                                gpui_component::input::InputState::new(window, cx)
-                                    .multi_line(true)
-                                    .placeholder("Notes (markdown)…")
-                            }));
-                            this.drawer_seed_note_input(cx);
-                        }
-                    }
-                    cx.notify();
-                });
-            });
-        bar = bar.child(item);
-    }
-    bar
+/// The tab strip: gpui-component's underline [`TabBar`]. Selecting a tab
+/// lazy-loads its data (see [`OrreryApp::drawer_select_tab`]).
+fn tab_bar(active: DrawerTab, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let app = app.clone();
+    let selected = TABS.iter().position(|(tab, _)| *tab == active).unwrap_or(0);
+    TabBar::new("drawer-tabs")
+        .underline()
+        // Tab labels sit where the hand-rolled ones did: 23px in, 24px apart
+        // (the underline variant's 16px gap + 4px each side).
+        .pl(px(19.))
+        .selected_index(selected)
+        .children(TABS.iter().map(|(_, label)| {
+            Tab::new().px(px(4.)).cursor_pointer().child(
+                div()
+                    .text_size(px(t.text_small))
+                    .child(SharedString::from(*label)),
+            )
+        }))
+        .on_click(move |ix, window, cx| {
+            let tab = TABS[*ix].0;
+            app.update(cx, |this, cx| this.drawer_select_tab(tab, window, cx));
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -554,42 +486,18 @@ fn body(
 
 /// Section wrapper: an uppercase label (+ optional count) over a list.
 fn section(t: &Theme, title: &str, count: Option<usize>) -> Div {
-    let mut head = div()
+    div()
         .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(SharedString::from(title.to_uppercase()));
-    if let Some(n) = count {
-        head = head.child(SharedString::from(format!("· {n}")));
-    }
-    div().flex().flex_col().gap(px(3.)).child(head.mb(px(3.)))
+        .flex_col()
+        .gap(px(3.))
+        .child(widgets::section_header(title, Header::Caps { count }, t).mb(px(3.)))
 }
 
 /// A muted "Loading…" / empty / error placeholder line.
 fn placeholder(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement {
-    div()
+    widgets::note(text, t)
         .py(px(3.))
         .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(text.into())
-}
-
-/// A small bordered pill tag (merged / gone).
-fn tag(text: &str, color: u32, t: &Theme) -> impl IntoElement {
-    div()
-        .px(px(5.))
-        .py(px(1.))
-        .rounded(px(t.r_xs))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(color))
-        .child(SharedString::from(text.to_string()))
 }
 
 /// A small PR action button.
@@ -599,37 +507,23 @@ fn pr_btn(
     t: &Theme,
     on: impl Fn(&mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let (hov_border, hov_fg) = (t.border_strong, t.fg0);
-    div()
-        .id(id)
+    widgets::button(id, Tone::Neutral, t)
         .px(px(10.))
         .py(px(5.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
-        .child(SharedString::from(label.to_string()))
+        .child(widgets::label(label.to_string(), t.text_data_sm, true))
         .on_click(move |_ev, _win, cx| on(cx))
 }
 
 /// A [`pr_btn`]-shaped button in its disabled state: muted, inert, no hover.
 fn disabled_btn(label: &str, t: &Theme) -> impl IntoElement {
-    div()
-        .px(px(10.))
-        .py(px(5.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family(MONO)
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg3))
-        .child(SharedString::from(label.to_string()))
+    widgets::button(
+        SharedString::from(format!("off-{label}")),
+        Tone::Disabled,
+        t,
+    )
+    .px(px(10.))
+    .py(px(5.))
+    .child(widgets::label(label.to_string(), t.text_data_sm, true))
 }
 
 fn footer(row: &Row, t: &Theme, ide_cmd: &str, agent_cmd: &str) -> impl IntoElement {
@@ -700,26 +594,16 @@ fn launch_btn(
     t: &Theme,
     on: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let (hov_border, hov_fg) = (t.border_strong, t.fg0);
-    let b = div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap(px(6.))
+    let b = widgets::button(id, Tone::Neutral, t)
         .py(px(9.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .font_family(MONO)
-        .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
+        .px(px(0.))
         .on_click(move |_ev, _win, _cx| on())
-        .child(content);
+        .child(
+            div()
+                .text_size(px(t.text_data_sm))
+                .font_family(MONO)
+                .child(content),
+        );
     if wide {
         b.flex_1().min_w(px(0.))
     } else {
@@ -729,14 +613,7 @@ fn launch_btn(
 
 /// Inline icon+label segment (shared shape with the card's status segs).
 fn seg(icon: &str, label: SharedString, color: u32) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.))
-        .text_color(rgb(color))
-        .child(lucide(icon, 13., color))
-        .child(label)
+    widgets::seg(icon, label, 13., color)
 }
 
 #[cfg(test)]

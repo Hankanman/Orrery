@@ -15,6 +15,7 @@ use crate::card::card;
 use crate::data::Row;
 use crate::icon::lucide;
 use crate::theme::Theme;
+use crate::widgets::{self, Tone};
 
 /// Grid row height without / with AI summary lines (the launcher row is the
 /// bottom of the card, so the row must be tall enough not to clip it).
@@ -259,34 +260,26 @@ fn tool_btn(
     t: &Theme,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let (bg, border, fg) = if active {
-        (t.accent_wash, t.border_accent, t.accent_bright)
+    let (tone, fg) = if active {
+        (Tone::Active, t.accent_bright)
     } else {
-        (t.button_bg, t.border, t.fg1)
+        (Tone::Neutral, t.fg1)
     };
-    let hov = t.border_strong;
-    let mut b = div()
-        .id(id)
+    let mut content = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(6.))
-        .px(px(10.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(bg))
-        .border_1()
-        .border_color(rgb(border))
         .text_size(px(t.text_small))
-        .text_color(rgb(fg))
-        .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hov)))
-        .on_click(on)
         .child(lucide(icon, 15., fg));
     if let Some(label) = label {
-        b = b.child(SharedString::from(label.to_string()));
+        content = content.child(SharedString::from(label.to_string()));
     }
-    b
+    widgets::button(id, tone, t)
+        .px(px(10.))
+        .py(px(6.))
+        .on_click(on)
+        .child(content)
 }
 
 /// Responsive column count from the window width: aim for ~340px-wide cards

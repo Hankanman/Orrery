@@ -10,6 +10,7 @@ use gpui::{
 use crate::icon::lucide;
 use crate::shell::OrreryApp;
 use crate::theme::Theme;
+use crate::widgets::{self, Header, Tone};
 
 pub mod agents;
 pub mod cleanup;
@@ -20,23 +21,19 @@ pub mod inbox;
 pub mod newproject;
 pub mod settings;
 
+pub use crate::widgets::{note, tag};
+
 /// A small bordered text button that runs `on` (no app-state capture needed).
 pub fn button(label: &str, t: &Theme, on: impl Fn(&mut gpui::App) + 'static) -> impl IntoElement {
-    let (hb, hf) = (t.border_strong, t.fg0);
-    div()
-        .id(SharedString::from(format!("vbtn-{label}")))
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(t.button_bg))
-        .border_1()
-        .border_color(rgb(t.border))
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(t.fg1))
-        .cursor_pointer()
-        .hover(move |s| s.border_color(rgb(hb)).text_color(rgb(hf)))
-        .child(SharedString::from(label.to_string()))
-        .on_click(move |_ev, _win, cx| on(cx))
+    widgets::button(
+        SharedString::from(format!("vbtn-{label}")),
+        Tone::Neutral,
+        t,
+    )
+    .px(px(12.))
+    .py(px(6.))
+    .child(widgets::label(label.to_string(), t.text_data_sm, false))
+    .on_click(move |_ev, _win, cx| on(cx))
 }
 
 /// A view's chrome: a 52px header (title + refresh) over a scrolling body.
@@ -102,28 +99,6 @@ pub fn frame(
         )
 }
 
-/// A muted "Loading…" / empty / error note.
-pub fn note(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement {
-    div()
-        .text_size(px(t.text_small))
-        .text_color(rgb(t.fg3))
-        .child(text.into())
-}
-
-/// A small bordered pill tag.
-pub fn tag(text: &str, color: u32, t: &Theme) -> impl IntoElement {
-    div()
-        .px(px(5.))
-        .py(px(1.))
-        .rounded(px(t.r_xs))
-        .border_1()
-        .border_color(rgb(t.border))
-        .font_family("monospace")
-        .text_size(px(t.text_data_sm))
-        .text_color(rgb(color))
-        .child(SharedString::from(text.to_string()))
-}
-
 /// Muted monospace text (ages, counts, paths).
 pub fn muted_mono(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement {
     div()
@@ -133,23 +108,15 @@ pub fn muted_mono(text: impl Into<SharedString>, t: &Theme) -> impl IntoElement 
         .child(text.into())
 }
 
-/// A section header: icon + title + count.
+/// A section: icon + title + count header over a column of rows.
 pub fn section_header(icon: &str, title: &str, count: usize, t: &Theme) -> gpui::Div {
-    div().flex().flex_col().gap(px(2.)).child(
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.))
-            .mb(px(6.))
-            .text_color(rgb(t.fg2))
-            .child(lucide(icon, 15., t.fg2))
-            .child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(t.text_small))
-                    .child(SharedString::from(title.to_string())),
-            )
-            .child(muted_mono(format!("{count}"), t)),
-    )
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .child(widgets::section_header(
+            title,
+            Header::Group { icon, count },
+            t,
+        ))
 }
