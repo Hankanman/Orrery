@@ -25,7 +25,7 @@ Results stream back **per repo** as each finishes — done, skipped (e.g. nothin
 The **Agents** view is a dashboard of the terminal coding-agent sessions running on your machine. Orrery finds them by scanning `/proc`, so it sees any session — not just ones launched from a card: a process counts if its program is a known agent CLI and its working directory sits inside one of your repos (or a dispatched agent worktree).
 
 - See each session's repo, its command line, pid, and how long it's been running.
-- **Terminate** a session, or jump to the repo in your **IDE** or **file manager**. *(Planned: **Reopen** a session in the same repo.)*
+- **Re-open** starts a fresh session of your configured agent command in the same repo (on a dispatched worktree whose session has ended, the button reads **Resume**). You can also **Terminate** a session, or jump to the repo in your **IDE** or **file manager**. If a launch fails, for example because the command isn't installed, a toast says why.
 - Dispatched worktrees (the drawer's **Dispatch** with a fresh worktree) get their own cards. When a dispatched session ends with commits on its branch, the card flips to *finished* and offers **Review**, **Open PR**, or **Discard**.
 - The list drops dead sessions automatically and refreshes on a short poll while the view is open.
 

@@ -832,15 +832,24 @@ fn action(
     small_button(format!("agent-{key}-{repo}"), label, Tone::Neutral, t).on_click(
         move |_ev, _win, cx| {
             let repo = repo.clone();
-            app.update(cx, |this, _cx| match act {
-                Act::Agent => {
-                    let _ = orrery_core::launch::spawn(&this.config.agent_command, &repo);
-                }
-                Act::Ide => {
-                    let _ = orrery_core::launch::launch(&this.config.ide_command, &repo);
-                }
-                Act::Folder => {
-                    let _ = orrery_core::launch::open(&repo);
+            app.update(cx, |this, cx| {
+                let result = match act {
+                    // Re-open / Resume: a fresh agent session in the same repo
+                    // (or worktree), from the configured agent command.
+                    Act::Agent => {
+                        orrery_core::launch::spawn(&this.config.agent_command, &repo).map(|_| ())
+                    }
+                    Act::Ide => orrery_core::launch::launch(&this.config.ide_command, &repo),
+                    Act::Folder => orrery_core::launch::open(&repo),
+                };
+                // A bad launcher command used to fail without a word.
+                if let Err(e) = result {
+                    this.push_toast(
+                        crate::toast::ToastKind::Error,
+                        "Couldn't launch",
+                        Some(e.into()),
+                        cx,
+                    );
                 }
             });
         },
