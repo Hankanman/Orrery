@@ -117,14 +117,17 @@ fn main() {
     );
     // Borrow the desktop's accent colour (KDE/portal) so the app harmonises
     // with the user's theme — the design system's runtime accent override.
+    // The colour scheme picks the palette when Settings → Theme is "System".
     let appearance = orrery_platform::appearance::read_blocking();
     let reduced_motion = appearance.reduced_motion;
     let accent = appearance.accent.map(|c| (c.r, c.g, c.b));
     if let Some((r, g, b)) = accent {
         eprintln!("[native] system accent #{r:02x}{g:02x}{b:02x}");
     }
-    let theme = Rc::new(Theme::dark().with_system_accent(accent));
+    let color_scheme = appearance.color_scheme;
     let config = orrery_core::config::load();
+    let mode = theme::Mode::resolve(config.theme, color_scheme.as_deref());
+    let theme = Rc::new(Theme::for_mode(mode).with_system_accent(accent));
 
     let platform = gpui_platform::current_platform(false);
     Application::with_platform(platform)
@@ -179,6 +182,8 @@ fn main() {
                     // `OrreryApp::startup`.
                     view.update(cx, |this, cx| {
                         this.system_reduced_motion = reduced_motion;
+                        this.system_color_scheme = color_scheme.clone();
+                        this.system_accent = accent;
                         this.startup(cx);
                     });
                     // Focus the app root so key bindings (Esc) dispatch to it.

@@ -180,6 +180,10 @@ pub struct AppConfig {
     /// user's explicit choice from Settings → Appearance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reduce_motion: Option<bool>,
+    /// Colour theme: "system" (follow the desktop's light/dark preference,
+    /// live), "dark" or "light". Left out of the file while it's "system".
+    #[serde(default, skip_serializing_if = "ThemePreference::is_system")]
+    pub theme: ThemePreference,
     /// Master switch for background attention notifications (#70).
     #[serde(default = "default_true")]
     pub notify_enabled: bool,
@@ -216,6 +220,36 @@ pub struct AppConfig {
     /// 0 = never stale.
     #[serde(default = "default_stale_review_days")]
     pub stale_review_days: u32,
+}
+
+/// The Settings → Appearance theme choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThemePreference {
+    /// Follow the desktop's colour scheme (XDG portal `color-scheme`).
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemePreference {
+    pub fn is_system(&self) -> bool {
+        *self == ThemePreference::System
+    }
+}
+
+/// Lenient: any case is accepted, and an unknown value falls back to
+/// "system" rather than invalidating the whole config file.
+impl<'de> Deserialize<'de> for ThemePreference {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(match s.trim().to_ascii_lowercase().as_str() {
+            "dark" => ThemePreference::Dark,
+            "light" => ThemePreference::Light,
+            _ => ThemePreference::System,
+        })
+    }
 }
 
 pub(crate) fn default_stale_pr_days() -> u32 {

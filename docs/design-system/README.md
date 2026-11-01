@@ -30,8 +30,9 @@ git/host/AI state.
 
 Four principles, in priority order:
 
-1. **Native first.** The app borrows the desktop's **accent colour** (KDE/portal)
-   at runtime, so it harmonises with the rest of the session. It shouldn't look
+1. **Native first.** The app follows the desktop's **light/dark preference**
+   and borrows its **accent colour** (KDE/portal) at runtime, so it harmonises
+   with the rest of the session. It shouldn't look
    out of place next to Dolphin or Discover.
 2. **Flat by design.** No blur, no gradient washes, no glows. Surfaces are solid
    and separated by borders + a subtle elevation shadow. The native app
@@ -48,116 +49,165 @@ Four principles, in priority order:
 
 ## 2. Theming architecture (OS integration)
 
-The app ships a single **dark** "mission control" theme and overrides its accent
-with the desktop's at runtime.
+The app ships two palettes with the same token set: the **dark** "mission
+control" theme (its native look) and a **light** one. Settings → Appearance →
+Theme picks *System* (the default: follow the desktop's colour scheme, live),
+*Dark* or *Light*. Either way the accent is overridden with the desktop's at
+runtime.
 
 ```
   Token defaults                Platform reads the desktop          App applies
- (theme.rs Theme::dark)         (orrery-platform::appearance)       (live.rs / main.rs)
+ (theme.rs)                     (orrery-platform::appearance)       (main.rs / live.rs)
  ────────────────────           ───────────────────────────        ──────────────────
- the dark --orr-* palette       XDG portal + kdeglobals (zbus):     Theme::dark()
- as u32 0xRRGGBB        ──▶        • accent-color / AccentColor ──▶   .with_system_accent(a)
-                                  SettingChanged → live re-emit      → recompute primary +
-                                                                       derived accent tokens;
-                                                                     rebuilt live on the
-                                                                     appearance signal
+ Theme::dark() / ::light()      XDG portal + kdeglobals (zbus):     Mode::resolve(config.theme,
+ as u32 0xRRGGBB        ──▶        • color-scheme               ──▶        color-scheme)
+                                   • accent-color / AccentColor     Theme::for_mode(mode)
+                                  SettingChanged → live re-emit       .with_system_accent(a)
+                                                                    → apply_gpui_component_theme
+                                                                    rebuilt live on the appearance
+                                                                    signal and on a Settings change
 ```
 
 ### Layer 1 — token defaults (`theme.rs`)
-`Theme::dark()` defines the deep blue-black palette as `u32` `0xRRGGBB` values,
-one per `--orr-*`/accent token the UI touches. The handful of CSS surfaces that
-were `color-mix`/translucent are **pre-blended to opaque sRGB** here (the
-flat-design contract means nothing layers translucency anyway). Call sites read
-them as `rgb(theme.fg0)` etc.
+`Theme::dark()` and `Theme::light()` define the two palettes as `u32`
+`0xRRGGBB` values, one per `--orr-*`/accent token the UI touches, plus a `mode`
+field. The handful of CSS surfaces that were `color-mix`/translucent are
+**pre-blended to opaque sRGB** here (the flat-design contract means nothing
+layers translucency anyway). Call sites read them as `rgb(theme.fg0)` etc. and
+never branch on the mode: a view that reads tokens is right in both themes.
 
 ### Layer 2 — platform reads the desktop (`orrery-platform/src/appearance.rs`)
 - The **XDG Desktop Portal** `org.freedesktop.appearance` over D-Bus (`zbus`)
-  provides `accent-color`; KDE's `~/.config/kdeglobals` `AccentColor` is preferred
-  when present (it's what Qt apps paint, so borrowing it matches KDE).
-- A background task subscribes to `SettingChanged` and re-emits, so accent flips
-  apply **live**. Everything degrades gracefully — no bus/portal → the built-in
-  orbit-cyan accent stays.
+  provides `color-scheme` and `accent-color`; KDE's `~/.config/kdeglobals`
+  `AccentColor` is preferred when present (it's what Qt apps paint, so borrowing
+  it matches KDE).
+- A background task subscribes to `SettingChanged` and re-emits, so scheme and
+  accent flips apply **live**. Everything degrades gracefully: no bus/portal →
+  dark with the built-in orbit-cyan accent.
 
-### Layer 3 — the app applies it (`main.rs` at startup, `live.rs` live)
-`Theme::with_system_accent(Some((r,g,b)))` overrides `primary` and recomputes the
-derived accent tokens (`accent_bright` = +22% white, `accent_wash` = 12% over
-page, `accent_badge` = 20%, `border_accent` = 40%). At startup `main.rs` reads the
-accent once; `live.rs` then rebuilds the `Theme` on every appearance signal so a
-system accent change repaints immediately.
+### Layer 3 — the app applies it (`main.rs` at startup, `OrreryApp::apply_theme` live)
+`Mode::resolve` turns the Settings choice plus the portal's `color-scheme` into
+a palette (*System* with no desktop preference stays dark).
+`Theme::with_system_accent(Some((r,g,b)))` then overrides `primary` and
+recomputes the derived accent tokens and the heatmap ramp:
 
-`theme::apply_gpui_component_theme(&theme, cx)` maps these tokens onto
-[gpui-component](https://github.com/longbridge/gpui-component)'s shadcn-style
-`Theme` (its `Hsla` fields) so its widgets (inputs, switch, markdown, popovers)
-match the rest of the UI.
+| Derived token | Dark | Light |
+|---|---|---|
+| `primary` | the system accent as is | the accent deepened (toward black, same hue) until it holds **4.5:1** on the page |
+| `accent_bright` | accent + 22% white | accent + 22% black (the "emphasised" accent is darker on a light page) |
+| `accent_wash` | accent 12% over page | accent 10% over page |
+| `accent_badge` | accent 20% over page | accent 18% over page |
+| `border_accent` | accent 40% over page | accent 40% over page |
+
+Desktop accents are usually tuned for dark panels (KDE's default `#3daee9` is
+2.6:1 on white), which is why light mode adapts rather than copies it.
+
+`OrreryApp::apply_theme` rebuilds the `Theme` on every appearance signal and
+whenever the Settings theme changes, then calls
+`theme::apply_gpui_component_theme(&theme, cx)`, which loads
+[gpui-component](https://github.com/longbridge/gpui-component)'s own palette
+for the mode (so anything we don't map matches), maps our tokens onto its
+shadcn-style `Theme` (its `Hsla` fields) so its widgets (inputs, switch,
+markdown, popovers, toasts) match the rest of the UI, and picks the matching
+code-highlight theme. The windows are then refreshed.
 
 > **The seam to respect:** `primary` and the derived accent tokens are
 > runtime-owned. Never hard-code a brand cyan — read `theme.primary` /
 > `theme.accent_*` so the system accent flows through. The orbit-cyan `#38dbf0`
-> is only the *default* for when the OS exposes no accent.
+> (deepened to `#087a8c` in light mode) is only the *default* for when the OS
+> exposes no accent.
 >
-> Not implemented yet (planned): light mode, and borrowing KDE's
-> window/view *surface* colours. The native theme is dark-only with accent-only
-> adaptation.
+> **What the app doesn't control.** The window frame is drawn by the
+> compositor (KWin server-side decorations), so it follows the desktop's colour
+> scheme, not the app's theme. The tray glyph sits on the desktop's panel, so it
+> follows the desktop's `color-scheme` too (a light glyph on dark panels, a dark
+> one on light panels), whatever theme the app shows.
+>
+> Not implemented yet: borrowing KDE's window/view *surface* colours.
 
 ---
 
 ## 3. Color
 
-The token set lives on the `Theme` struct. Values below are the dark defaults
-(`Theme::dark()`); `primary` + the four derived accent tokens are replaced by the
-system accent at runtime.
+The token set lives on the `Theme` struct. Both palettes fill every token;
+`primary` + the derived accent tokens are replaced by the system accent at
+runtime (see the table above).
 
 ### 3.1 Surfaces & neutrals
 
-| Token | Value | Role |
-|---|---|---|
-| `page` | `#0a0e16` | the void (window background) |
-| `surface` | `#13161e` | card / panel background |
-| `surface_hover` | `#191c24` | hovered surface |
-| `button_bg` | `#1f222a` | button / input fill |
-| `border` | `#1c2028` | hairline border |
-| `border_strong` | `#2c3037` | emphasised border |
-| `border_accent` | `#1b4b56` | accent-tinted edge (accent @40% over page) |
+| Token | Dark | Light | Role |
+|---|---|---|---|
+| `page` | `#0a0e16` | `#f4f7fa` | window background |
+| `surface` | `#13161e` | `#ffffff` | card / panel background |
+| `surface_hover` | `#191c24` | `#eff3f7` | hovered surface |
+| `button_bg` | `#1f222a` | `#ebf0f5` | button / input fill |
+| `border` | `#1c2028` | `#d8dfe7` | hairline border |
+| `border_strong` | `#2c3037` | `#bac5d1` | emphasised border |
+| `border_accent` | `#1b4b56` | `#96c5ce` | accent-tinted edge (accent @40% over page) |
+| `scrim` | black @40% | slate `#0e1726` @30% | modal backdrop |
+
+**The light palette is designed, not inverted.** The page is a near-white with a
+slight cool (blue-grey) bias, so the orbit-cyan identity still reads; cards are
+pure white lifted off it by hairline borders that stay visible on white (still
+no shadows: flat design). Where dark mode lifts on hover, light mode sinks a
+step: hover and fills are a touch darker than the card.
 
 ### 3.2 Foreground tiers (`fg0…3`)
-A four-step text ramp.
+A four-step text ramp. In light mode it's a cool slate ink, and every tier,
+including the faint `fg3` that labels and notes use, passes WCAG AA for body
+text (4.5:1) on every surface.
 
-| Token | Value | Use |
-|---|---|---|
-| `fg0` | `#eef2f8` | primary text, repo names |
-| `fg1` | `#afb9cb` | secondary text, descriptions |
-| `fg2` | `#6c778c` | captions, metadata |
-| `fg3` | `#434e63` | disabled, faint icons |
+| Token | Dark | Light | Light on page | Use |
+|---|---|---|---|---|
+| `fg0` | `#eef2f8` | `#0e1726` | 16.7:1 | primary text, repo names |
+| `fg1` | `#afb9cb` | `#334155` | 9.6:1 | secondary text, descriptions |
+| `fg2` | `#6c778c` | `#4b596c` | 6.6:1 | captions, metadata |
+| `fg3` | `#434e63` | `#5d6a7e` | 5.1:1 | labels, notes, faint icons |
 
 ### 3.3 Identity & accent (runtime-overridden)
 
-| Token | Default | Notes |
-|---|---|---|
-| `primary` | `#38dbf0` orbit cyan | replaced by the system accent |
-| `accent_bright` | `#64e3f3` | accent + 22% white |
-| `accent_wash` | `#102730` | accent 12% over page — active nav bg |
-| `accent_badge` | `#133742` | accent 20% over page — nav count badge |
+| Token | Dark default | Light default | Notes |
+|---|---|---|---|
+| `primary` | `#38dbf0` orbit cyan | `#087a8c` deep orbit teal (4.7:1) | replaced by the system accent |
+| `accent_bright` | `#64e3f3` | `#065f6d` | emphasised accent: links, active labels |
+| `accent_wash` | `#102730` | `#dceaef` | active nav bg |
+| `accent_badge` | `#133742` | `#cae0e6` | nav count badge |
+| `danger_badge` | `#3b2127` | `#eddfe3` | urgent badge / danger hover |
 
 ### 3.4 Semantic hues — **fixed, meaning-bearing**
-These do **not** follow the OS; their meaning is the point.
+These do **not** follow the OS; their meaning is the point. Light mode keeps
+each hue family but deepens it from the dark theme's neon until it passes as
+text on the page (they all colour small labels).
 
-| Token | Meaning | Value |
-|---|---|---|
-| `clean` | clean / synced | `#3dd68c` |
-| `dirty` | uncommitted / ahead | `#ff9e45` |
-| `behind` | behind / conflict | `#ff6b6b` |
-| `star` | host stars / favourites | `#ffc24b` |
-| `ai` | AI features | `#a78bfa` |
+| Token | Meaning | Dark | Light | Light on page |
+|---|---|---|---|---|
+| `clean` | clean / synced | `#3dd68c` | `#157a47` | 5.0:1 |
+| `dirty` | uncommitted / ahead | `#ff9e45` | `#b0520a` | 4.8:1 |
+| `behind` | behind / conflict | `#ff6b6b` | `#b92f38` | 5.5:1 |
+| `star` | host stars / favourites | `#ffc24b` | `#9a6408` | 4.7:1 |
+| `ai` | AI features | `#a78bfa` | `#7444d6` | 5.5:1 |
+
+The contrast unit test in `theme.rs` (`light_palette_meets_wcag_aa`) computes
+these ratios for every text tier, the accent and the semantic hues against the
+page, cards, hover and button fills, plus labels on the accent and danger
+washes; run it with `--nocapture` to print them.
 
 ### 3.5 Launch-action colours (`act_*`)
 Each repo card action has its own identity colour (icon + hover tint).
 
-| Token | Action | Value |
-|---|---|---|
-| `act_ide` | Open in IDE | `#5b9dff` |
-| `act_agent` | Terminal agent | `#a78bfa` |
-| `act_folder` | Reveal folder | `#f5b94b` |
-| `act_host` | Open on GitHub/GitLab | `#46c8a0` |
+| Token | Action | Dark | Light |
+|---|---|---|---|
+| `act_ide` | Open in IDE | `#5b9dff` | `#2560d8` |
+| `act_agent` | Terminal agent | `#a78bfa` | `#7444d6` |
+| `act_folder` | Reveal folder | `#f5b94b` | `#9a6408` |
+| `act_host` | Open on GitHub/GitLab | `#46c8a0` | `#0f766e` |
+
+### 3.6 Heatmap ramp (`heat`)
+The contribution graph's five steps: an empty cell (white @5% over the dark
+page; slate ink @7% over the light page, so the no-commit grid still shows on
+near-white), then the accent at 22% / 42% / 68% over the page, then the full
+accent. It's rebuilt with the accent, so it follows the system accent and the
+theme switch.
 
 ### 3.6 Language colours
 Devicon brand SVGs (multicolour) render the language mark per card via
@@ -237,7 +287,8 @@ adaptive tokens through `apply_gpui_component_theme`.
 |---|---|
 | All design tokens (`Theme`) | `crates/orrery/src/theme.rs` |
 | gpui-component theme bridge | `crates/orrery/src/theme.rs` (`apply_gpui_component_theme`) |
-| OS accent read (portal + kdeglobals) | `crates/orrery-platform/src/appearance.rs` |
-| Live re-theming on accent change | `crates/orrery/src/live.rs` |
+| OS colour scheme + accent read (portal + kdeglobals) | `crates/orrery-platform/src/appearance.rs` |
+| Live re-theming on scheme/accent change | `crates/orrery/src/live.rs` → `OrreryApp::apply_theme` (`shell/mod.rs`) |
+| Theme choice (System / Dark / Light) | `config.theme`, Settings → Appearance (`views/settings.rs`) |
 | Icons (lucide + brand + devicon) | `crates/orrery/assets/icons/`, `src/icon.rs` |
 | Brand mark | `docs/design-system/assets/orbit-mark.svg` |
