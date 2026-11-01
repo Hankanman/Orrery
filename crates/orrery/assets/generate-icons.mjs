@@ -29,8 +29,8 @@ const LUCIDE_ICONS = [
   "git-pull-request", "git-merge", "circle-check", "eye",
   // command palette
   "box", "file-search",
-  // settings (status rows)
-  "circle-alert",
+  // settings (status rows; "minus" + "plus" back the NumberInput stepper)
+  "circle-alert", "minus",
   // mission control toolbar + filter chips
   "activity", "cloud-download", "arrow-up-down", "globe",
   // saved views
