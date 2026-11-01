@@ -275,13 +275,11 @@ pub fn to_rows(repos: Vec<model::Repo>) -> Vec<Row> {
             behind: r.git.behind,
             dirty: r.git.dirty,
             stars: fmt_stars(r.stars).into(),
-            host: match r.host {
-                Some(model::Host::Github) => "github",
-                Some(model::Host::Gitlab) => "gitlab",
-                // No Gitea brand icon yet; rendered like a remote-less repo.
-                Some(model::Host::Gitea) | None => "",
-            }
-            .into(),
+            host: r
+                .host
+                .map(|h| crate::icon::host_brand(h, r.remote_host.as_deref()))
+                .unwrap_or("")
+                .into(),
             private: r.private,
             favorite: r.favorite,
             activity: r.activity,
@@ -362,12 +360,12 @@ pub fn rescan(changes: &ChangeSet) -> Snapshot {
     let now = now_unix();
     let cfg = config::load();
     let favorites = cache::favorites();
-    let mut repos = scan::scan(
+    let mut repos = scan::scan_with_hosts(
         &cfg.roots,
         cfg.scan_depth,
         &cfg.ignore,
         &favorites,
-        &cfg.gitlab_hosts,
+        &orrery_core::forge::TrustedHosts::from_config(&cfg),
         now,
     );
     // Carry over persisted host enrichment (stars/visibility) + AI summaries
@@ -390,13 +388,14 @@ pub fn rescan_repos(mut repos: Vec<model::Repo>, changes: &ChangeSet) -> Snapsho
     let now = now_unix();
     let cfg = config::load();
     let favorites = cache::favorites();
+    let hosts = orrery_core::forge::TrustedHosts::from_config(&cfg);
     let (mut rebuilt_at, mut rebuilt, mut gone) = (Vec::new(), Vec::new(), HashSet::new());
     for (i, r) in repos.iter().enumerate() {
         if !changes.repos.contains_key(Path::new(&r.id)) {
             continue;
         }
         let fav = favorites.contains(&r.id);
-        match scan::scan_repo(Path::new(&r.id), &r.root, fav, &cfg.gitlab_hosts, now) {
+        match scan::scan_repo_with_hosts(Path::new(&r.id), &r.root, fav, &hosts, now) {
             Some(fresh) => {
                 rebuilt_at.push(i);
                 rebuilt.push(fresh);

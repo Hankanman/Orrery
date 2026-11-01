@@ -1,5 +1,7 @@
 //! Feed view — a release/activity radar for repos and people you follow on
-//! GitHub: releases (with tags), and starred/created/forked/open-sourced events.
+//! GitHub, plus releases from your starred GitLab projects: releases (with
+//! tags), and starred/created/forked/open-sourced events, each marked with
+//! its host.
 //! Loaded lazily over the network when the nav item is selected.
 
 use std::rc::Rc;
@@ -41,6 +43,8 @@ pub struct FeedRow {
     pub url: SharedString,
     /// Newer than the last time the Feed was viewed (drives the "New" filter).
     pub is_new: bool,
+    /// Brand-mark name of the host it came from (see `icon::host_brand`).
+    pub host: &'static str,
 }
 
 fn action(kind: &str) -> &'static str {
@@ -71,6 +75,7 @@ pub fn feed_row(f: inbox::FeedItem, now: i64, since: i64) -> FeedRow {
         format!("{actor} {}", action(&f.kind))
     };
     FeedRow {
+        host: crate::icon::host_brand(f.host, None),
         icon,
         kind: f.kind.into(),
         repo: f.repo.into(),
@@ -170,9 +175,11 @@ fn feed_item(r: &FeedRow, t: &Theme) -> impl IntoElement {
     if r.is_new {
         top = top.child(super::tag("new", t.accent_bright, t));
     }
-    top = top
-        .child(div().flex_1())
-        .child(super::muted_mono(r.age.clone(), t));
+    top = top.child(div().flex_1());
+    if !r.host.is_empty() {
+        top = top.child(crate::icon::brand(r.host, 12., t.fg3));
+    }
+    top = top.child(super::muted_mono(r.age.clone(), t));
 
     let mut col = div()
         .id(r.url.clone())
