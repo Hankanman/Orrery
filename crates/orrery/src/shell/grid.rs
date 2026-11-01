@@ -110,6 +110,8 @@ pub enum SortMode {
     Activity,
     /// Alphabetical by name.
     Name,
+    /// Most host stars first; ties (including every unstarred repo) by name.
+    Stars,
 }
 
 impl SortMode {
@@ -117,13 +119,31 @@ impl SortMode {
         match self {
             SortMode::Activity => "Activity",
             SortMode::Name => "Name",
+            SortMode::Stars => "Stars",
         }
     }
 
     fn next(self) -> SortMode {
         match self {
             SortMode::Activity => SortMode::Name,
-            SortMode::Name => SortMode::Activity,
+            SortMode::Name => SortMode::Stars,
+            SortMode::Stars => SortMode::Activity,
+        }
+    }
+}
+
+/// Order the visible row indices `v` by `mode`. `stars(i)` is row `i`'s host
+/// star count (the flat [`Row`] only carries it pre-formatted). Stable, so
+/// equal keys keep their incoming order.
+fn sort_visible(v: &mut [usize], rows: &[Row], stars: impl Fn(usize) -> u32, mode: SortMode) {
+    match mode {
+        SortMode::Activity => {
+            v.sort_by(|&a, &b| rows[b].last_commit_unix.cmp(&rows[a].last_commit_unix))
+        }
+        // Lowercase each name once (not twice per comparison).
+        SortMode::Name => v.sort_by_cached_key(|&i| rows[i].name.to_lowercase()),
+        SortMode::Stars => {
+            v.sort_by_cached_key(|&i| (std::cmp::Reverse(stars(i)), rows[i].name.to_lowercase()))
         }
     }
 }
@@ -149,6 +169,9 @@ pub struct SavedView {
     pub language: Option<String>,
     #[serde(default)]
     pub sort: SortMode,
+    /// The sidebar TAGS filter, if the view narrows to one tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// SQLite meta key holding the saved-views JSON array.
@@ -178,6 +201,10 @@ pub struct GridState {
     pub root: Option<SharedString>,
     /// Active language filter (sidebar LANGUAGES); `None` = all languages.
     pub language: Option<SharedString>,
+    /// Active tag filter (sidebar TAGS); `None` = any tags.
+    pub tag: Option<SharedString>,
+    /// Every repo's project tags (see `tags.rs`), loaded at launch.
+    pub tags: super::tags::Tags,
     /// Card ordering.
     pub sort: SortMode,
     /// Card layout (grid vs. compact list).
@@ -197,6 +224,8 @@ impl Default for GridState {
             filter: RepoFilter::default(),
             root: None,
             language: None,
+            tag: None,
+            tags: super::tags::Tags::load(),
             sort: SortMode::default(),
             layout: Layout::default(),
             saved_views: load_saved_views(),
@@ -214,6 +243,8 @@ pub(super) struct VisibleKey {
     filter: RepoFilter,
     root: Option<SharedString>,
     language: Option<SharedString>,
+    tag: Option<SharedString>,
+    tags_gen: u64,
     sort: SortMode,
 }
 
@@ -365,11 +396,15 @@ impl OrreryApp {
     fn current_view(&self) -> SavedView {
         let root = self.grid.root.as_ref().map(|r| r.to_string());
         let language = self.grid.language.as_ref().map(|l| l.to_string());
-        // Name from the active facets, e.g. "Dirty · Rust · Orrery"; "All repos"
-        // when nothing is narrowed.
+        let tag = self.grid.tag.as_ref().map(|t| t.to_string());
+        // Name from the active facets, e.g. "Dirty · #work · Rust · Orrery";
+        // "All repos" when nothing is narrowed.
         let mut parts: Vec<String> = Vec::new();
         if self.grid.filter != RepoFilter::All {
             parts.push(self.grid.filter.label().to_string());
+        }
+        if let Some(t) = &tag {
+            parts.push(format!("#{t}"));
         }
         if let Some(l) = &language {
             parts.push(l.clone());
@@ -388,6 +423,7 @@ impl OrreryApp {
             root,
             language,
             sort: self.grid.sort,
+            tag,
         }
     }
 
@@ -397,6 +433,7 @@ impl OrreryApp {
             && v.sort == self.grid.sort
             && v.root.as_deref() == self.grid.root.as_deref()
             && v.language.as_deref() == self.grid.language.as_deref()
+            && v.tag.as_deref() == self.grid.tag.as_deref()
     }
 
     /// Save the current filter combo as a quick view (deduped by combo), persist,
@@ -417,6 +454,7 @@ impl OrreryApp {
             self.grid.sort = v.sort;
             self.grid.root = v.root.clone().map(SharedString::from);
             self.grid.language = v.language.clone().map(SharedString::from);
+            self.grid.tag = v.tag.clone().map(SharedString::from);
             cx.notify();
         }
     }
@@ -441,6 +479,8 @@ impl OrreryApp {
             filter: self.grid.filter,
             root: self.grid.root.clone(),
             language: self.grid.language.clone(),
+            tag: self.grid.tag.clone(),
+            tags_gen: self.grid.tags.generation(),
             sort: self.grid.sort,
         };
         if let Some((k, v)) = &*self.derived.visible.borrow()
@@ -466,18 +506,18 @@ impl OrreryApp {
                     .as_ref()
                     .is_none_or(|lang| &r.language == lang)
             })
+            .filter(|(_, r)| {
+                self.grid
+                    .tag
+                    .as_ref()
+                    .is_none_or(|tag| self.grid.tags.of(&r.id).contains(tag))
+            })
             .map(|(i, _)| i)
             .collect();
-        match self.grid.sort {
-            SortMode::Activity => v.sort_by(|&a, &b| {
-                self.rows[b]
-                    .last_commit_unix
-                    .cmp(&self.rows[a].last_commit_unix)
-            }),
-            // Lowercase each name once (not twice per comparison). Stable,
-            // like `sort_by`.
-            SortMode::Name => v.sort_by_cached_key(|&i| self.rows[i].name.to_lowercase()),
-        }
+        // Stars come from the raw snapshot, which `apply_snapshot` keeps in
+        // lockstep with `rows` (same order, same length).
+        let stars = |i: usize| self.repos.get(i).map_or(0, |r| r.stars);
+        sort_visible(&mut v, &self.rows, stars, self.grid.sort);
         // The Attention filter ranks the most urgent repos first; the sort is
         // stable, so the active sort still orders repos within each severity
         // tier.
@@ -727,6 +767,7 @@ impl OrreryApp {
                                 &ide,
                                 &agent,
                                 app.card_state(abs, selecting),
+                                app.grid.tags.of(&app.rows[abs].id),
                             )
                             .into_any_element()
                         })
@@ -744,7 +785,16 @@ impl OrreryApp {
                 // bottom.
                 let has_ai = self.services.ai_ready
                     && visible.iter().any(|&i| !self.rows[i].ai_summary.is_empty());
-                let row_h = if has_ai { ROW_H_AI } else { ROW_H };
+                // Likewise the tag-chip line, only while a visible card has tags.
+                let has_tags = visible
+                    .iter()
+                    .any(|&i| !self.grid.tags.of(&self.rows[i].id).is_empty());
+                let row_h = if has_ai { ROW_H_AI } else { ROW_H }
+                    + if has_tags {
+                        crate::card::TAGS_LINE_H
+                    } else {
+                        0.
+                    };
                 gpui::uniform_list("repo-grid", grid_rows, move |range, _win, cx| {
                     let app = entity.read(cx);
                     let selecting = !app.selected.is_empty();
@@ -758,8 +808,18 @@ impl OrreryApp {
                                 .iter()
                                 .map(|&i| {
                                     let state = app.card_state(i, selecting);
-                                    card(&app.rows[i], i, &theme, &entity, &ide, &agent, state)
-                                        .into_any_element()
+                                    let tags = app.grid.tags.of(&app.rows[i].id);
+                                    card(
+                                        &app.rows[i],
+                                        i,
+                                        &theme,
+                                        &entity,
+                                        &ide,
+                                        &agent,
+                                        state,
+                                        tags,
+                                    )
+                                    .into_any_element()
                                 })
                                 .collect();
                             while cells.len() < cols {
@@ -793,16 +853,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn facets_count_and_order_by_size_then_name() {
-        let row = |root: &str, lang: &str| Row {
-            id: "".into(),
+    fn stars_sort_most_first_then_by_name() {
+        let rows: Vec<Row> = ["beta", "Alpha", "gamma", "delta"]
+            .iter()
+            .map(|n| {
+                let mut r = row_named(n);
+                r.last_commit_unix = n.len() as i64;
+                r
+            })
+            .collect();
+        let stars = [5u32, 0, 5, 12];
+        let mut v: Vec<usize> = (0..rows.len()).collect();
+        sort_visible(&mut v, &rows, |i| stars[i], SortMode::Stars);
+        // 12 first, then the two 5s by name (beta < gamma), then the 0.
+        assert_eq!(v, vec![3, 0, 2, 1]);
+        sort_visible(&mut v, &rows, |i| stars[i], SortMode::Name);
+        assert_eq!(v, vec![1, 0, 3, 2], "Alpha, beta, delta, gamma");
+        // The toolbar cycles through all three.
+        assert!(SortMode::Activity.next() == SortMode::Name);
+        assert!(SortMode::Name.next() == SortMode::Stars);
+        assert!(SortMode::Stars.next() == SortMode::Activity);
+    }
+
+    #[test]
+    fn saved_views_without_a_tag_still_load() {
+        let old =
+            r#"[{"name":"Dirty","filter":"Dirty","root":null,"language":null,"sort":"Name"}]"#;
+        let views: Vec<SavedView> = serde_json::from_str(old).unwrap();
+        assert_eq!(views[0].tag, None);
+        let json = serde_json::to_string(&SavedView {
+            tag: Some("work".into()),
+            ..views[0].clone()
+        })
+        .unwrap();
+        let back: Vec<SavedView> = serde_json::from_str(&format!("[{json}]")).unwrap();
+        assert_eq!(back[0].tag.as_deref(), Some("work"));
+    }
+
+    fn row_named(name: &str) -> Row {
+        Row {
+            id: name.to_string().into(),
             url: "".into(),
-            name: "".into(),
+            name: name.to_string().into(),
             slug: "".into(),
-            root: root.to_string().into(),
+            root: "".into(),
             path: "".into(),
             description: "".into(),
-            language: lang.to_string().into(),
+            language: "".into(),
             branch: "".into(),
             release: "".into(),
             ai_summary: "".into(),
@@ -815,6 +912,15 @@ mod tests {
             favorite: false,
             activity: orrery_core::model::Activity::Active,
             last_commit_unix: 0,
+        }
+    }
+
+    #[test]
+    fn facets_count_and_order_by_size_then_name() {
+        let row = |root: &str, lang: &str| Row {
+            root: root.to_string().into(),
+            language: lang.to_string().into(),
+            ..row_named("")
         };
         let rows = [
             row("/b", "Rust"),

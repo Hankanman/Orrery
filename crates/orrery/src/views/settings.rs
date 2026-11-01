@@ -68,6 +68,9 @@ pub struct SettingsState {
     pub ai_note: SharedString,
     /// Semantic-index size (chunks/repos/bytes); `None` until loaded.
     pub index_stats: Option<orrery_core::semantic::IndexStats>,
+    /// The desktop's reduced-motion preference when Settings opened — what
+    /// the Appearance toggle follows until the user sets it.
+    pub system_motion: Option<bool>,
 }
 
 impl SettingsState {
@@ -111,6 +114,7 @@ impl SettingsState {
             saved: false,
             ai_note: SharedString::default(),
             index_stats: None,
+            system_motion: None,
         }
     }
 }
@@ -137,6 +141,9 @@ pub fn render(
     }
     if show("launchers") {
         sections.push(launchers_section(s, t).into_any_element());
+    }
+    if show("appearance") {
+        sections.push(appearance_section(s, t, app).into_any_element());
     }
     if show("ai") {
         sections.push(ai_section(s, ai, ai_ready, t, app).into_any_element());
@@ -320,6 +327,54 @@ fn launchers_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
             s.agent_dispatch.clone(),
             t,
         ))
+}
+
+/// Appearance: the reduce-motion switch. Unset, it follows the desktop's
+/// reduced-motion preference; flipping it records an explicit choice, and
+/// "Follow desktop" clears that again. Takes effect on Save.
+fn appearance_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
+    let explicit = s.draft.reduce_motion;
+    let on = explicit.or(s.system_motion).unwrap_or(false);
+    let desktop = match s.system_motion {
+        Some(true) => "asks for reduced motion",
+        Some(false) => "allows animation",
+        None => "doesn't say",
+    };
+    let mut sec = section(t, "Appearance").child(toggle("Reduce motion", on, t, app, move |a| {
+        if let Some(s) = &mut a.settings {
+            let current = s.draft.reduce_motion.or(s.system_motion).unwrap_or(false);
+            s.draft.reduce_motion = Some(!current);
+        }
+    }));
+    let note: SharedString = match explicit {
+        None => format!("Following your desktop, which {desktop}.").into(),
+        Some(_) => format!("Set here. Your desktop {desktop}.").into(),
+    };
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.))
+        .child(div().flex_1().child(note_line(note, t.fg3, t)));
+    if explicit.is_some() {
+        row = row.child(button("Follow desktop", t, {
+            let app = app.clone();
+            move |cx| {
+                app.update(cx, |this, cx| {
+                    if let Some(s) = &mut this.settings {
+                        s.draft.reduce_motion = None;
+                    }
+                    cx.notify();
+                });
+            }
+        }));
+    }
+    sec = sec.child(row).child(note_line(
+        "Turns off the drawer tab slide and the toast slide-in.".into(),
+        t.fg3,
+        t,
+    ));
+    sec
 }
 
 /// True when the configured backend string selects the llama.cpp sidecar.

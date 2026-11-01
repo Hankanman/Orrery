@@ -13,12 +13,16 @@
 //! persist until clicked. Progress toasts persist until the owning operation
 //! replaces them through its stable caller-supplied key
 //! ([`OrreryApp::upsert_toast`]), flipping "Cloning…" to done/failed.
+//!
+//! With reduce motion on, the same toasts go to a still stack the app draws
+//! itself ([`OrreryApp::still_toast_layer`]), since gpui-component's
+//! notifications always animate in and out.
 
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div,
-    px, rgb,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::notification::Notification;
@@ -155,6 +159,14 @@ impl OrreryApp {
             return;
         }
         let queued = std::mem::take(&mut self.toasts);
+        // gpui-component's notifications always slide in and fade out, so
+        // with reduce motion on the app draws its own still toasts instead.
+        if self.reduce_motion() {
+            for toast in queued {
+                self.show_still_toast(toast, cx);
+            }
+            return;
+        }
         let theme = self.theme.clone();
         window.defer(cx, move |window, cx| {
             for toast in queued {
@@ -162,7 +174,93 @@ impl OrreryApp {
             }
         });
     }
+
+    /// Put `toast` on the still (unanimated) stack, replacing the toast with
+    /// the same key in place, and schedule its auto-hide like the animated
+    /// path's.
+    fn show_still_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
+        let id = toast.id;
+        let autohide = toast.kind.auto_dismisses();
+        let same_key = toast.key.as_ref().and_then(|k| {
+            self.still_toasts
+                .iter()
+                .position(|x| x.key.as_ref() == Some(k))
+        });
+        match same_key {
+            Some(i) => self.still_toasts[i] = toast,
+            None => {
+                self.still_toasts.push(toast);
+                // Bounded like the notification layer: oldest drop first.
+                if self.still_toasts.len() > MAX_STILL_TOASTS {
+                    self.still_toasts.remove(0);
+                }
+            }
+        }
+        if autohide {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(AUTOHIDE).await;
+                let _ = this.update(cx, |this, cx| this.dismiss_still_toast(id, cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn dismiss_still_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        let before = self.still_toasts.len();
+        self.still_toasts.retain(|t| t.id != id);
+        if self.still_toasts.len() != before {
+            cx.notify();
+        }
+    }
+
+    /// The still toasts, stacked bottom-right; `None` when there are none.
+    /// Clicking one dismisses it, after opening its link if it has one.
+    pub(crate) fn still_toast_layer(
+        &self,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.still_toasts.is_empty() {
+            return None;
+        }
+        let mut col = div()
+            .absolute()
+            .bottom(px(16.))
+            .right(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(8.));
+        for toast in &self.still_toasts {
+            let (id, url) = (toast.id, toast.url.clone());
+            col = col.child(
+                div()
+                    .id(SharedString::from(format!("still-toast-{id}")))
+                    .w(px(TOAST_W))
+                    .p(px(12.))
+                    .rounded(px(t.r_md))
+                    .bg(rgb(t.surface))
+                    .border_1()
+                    .border_color(rgb(t.border_strong))
+                    .cursor_pointer()
+                    .child(toast_body(toast, t))
+                    .on_click(cx.listener(move |this, _ev, _win, cx| {
+                        if let Some(url) = &url {
+                            let _ = orrery_core::launch::open(url);
+                        }
+                        this.dismiss_still_toast(id, cx);
+                    })),
+            );
+        }
+        Some(col.into_any_element())
+    }
 }
+
+/// How long a Success/Info toast stays up (gpui-component's autohide delay).
+const AUTOHIDE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Most still toasts on screen at once.
+const MAX_STILL_TOASTS: usize = 6;
 
 /// One flat toast card: leading semantic icon, title + optional detail, on the
 /// surface token with an elevation border (gpui-component's drop shadow off).

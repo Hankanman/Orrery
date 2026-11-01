@@ -11,7 +11,7 @@ The Settings screen switches sections from the sidebar:
 - **GitHub** — connect for higher rate limits and private-repo enrichment.
 - **AI & search** — inference backend (Ollama or the bundled llama.cpp engine), models, and the cache control (see [Local AI](./local-ai)).
 - **Notifications** — which background events raise a desktop notification (see [Notifications & tray](./notifications)).
-- **Motion** *(planned, not yet implemented)* — a reduce-motion toggle that disables all UI animation.
+- **Appearance** — **Reduce motion** turns off the drawer's sliding tab underline and the toasts' slide-in and fade-out. Until you set it, it follows your desktop: the XDG portal's reduced-motion preference, or KDE's animation speed set to *Instant*. Once you've flipped it, **Follow desktop** hands the choice back. It's saved as `reduceMotion` (absent means follow the desktop) and applies when you press **Save**. The small check and switch transitions inside gpui-component's checkbox and switch can't be turned off yet.
 
 ## Workspace roots
 

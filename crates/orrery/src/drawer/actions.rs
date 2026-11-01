@@ -125,8 +125,43 @@ impl OrreryApp {
         self.drawer.dispatch_input = Some(cx.new(|cx| {
             gpui_component::input::InputState::new(window, cx).placeholder("Task for the agent…")
         }));
+        self.drawer_tag_input(window, cx);
         self.drawer_load_overview(cx);
         cx.notify();
+    }
+
+    /// Create the Overview's add-a-tag field: Enter adds the typed tag to the
+    /// open repo and clears the field.
+    fn drawer_tag_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::{InputEvent, InputState};
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a tag…"));
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.drawer_submit_tag(input.clone(), window, cx);
+                }
+            },
+        );
+        self.drawer.tag_input = Some(input);
+        self.drawer._tag_sub = Some(sub);
+    }
+
+    /// Add the tag typed in `input` to the open drawer's repo, then clear it.
+    pub(crate) fn drawer_submit_tag(
+        &mut self,
+        input: gpui::Entity<gpui_component::input::InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let raw = input.read(cx).value().to_string();
+        if raw.trim().is_empty() {
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        self.add_tag(repo, &raw, cx);
+        input.update(cx, |s, cx| s.set_value("", window, cx));
     }
 
     /// Drawer Changes tab: generate a commit message for the staged diff (gated

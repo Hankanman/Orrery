@@ -27,6 +27,7 @@ mod header;
 mod overlay;
 mod passes;
 mod sidebar;
+mod tags;
 
 use grid::{Facets, GridState, VisibleKey, columns};
 use passes::{Passes, SnapKind};
@@ -170,6 +171,12 @@ pub struct OrreryApp {
     pub toasts: Vec<crate::toast::Toast>,
     /// Monotonic toast-id source — keys the un-keyed toasts' notifications.
     pub toast_seq: u64,
+    /// Toasts on screen while reduce motion is on: drawn by the app without
+    /// gpui-component's slide-in (see `toast.rs`).
+    pub still_toasts: Vec<crate::toast::Toast>,
+    /// The desktop's reduced-motion preference (portal / KDE), the default
+    /// while `config.reduce_motion` is unset. `None` until read.
+    pub system_reduced_motion: Option<bool>,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
     /// Single-flight guards for the background passes (see [`Passes`]).
@@ -287,6 +294,8 @@ impl OrreryApp {
             fleet_prune_seq: 0,
             toasts: Vec::new(),
             toast_seq: 0,
+            still_toasts: Vec::new(),
+            system_reduced_motion: None,
             grid: Default::default(),
             passes: Default::default(),
             derived: Default::default(),
@@ -294,6 +303,15 @@ impl OrreryApp {
             view_filter: None,
             focus: cx.focus_handle(),
         }
+    }
+
+    /// Whether UI animation is off: the Settings choice, else the desktop's
+    /// reduced-motion preference.
+    pub fn reduce_motion(&self) -> bool {
+        self.config
+            .reduce_motion
+            .or(self.system_reduced_motion)
+            .unwrap_or(false)
     }
 
     /// Toggle a repo's favorite (card star): update the row now, persist the
@@ -459,6 +477,9 @@ impl Render for OrreryApp {
         // in front of them.
         self.flush_toasts(window, cx);
         if let Some(toasts) = gpui_component::Root::render_notification_layer(window, cx) {
+            root = root.child(toasts);
+        }
+        if let Some(toasts) = self.still_toast_layer(&t, cx) {
             root = root.child(toasts);
         }
         if let Some(overlay) = self.overlay_element(&t, cx) {

@@ -19,6 +19,38 @@ use crate::widgets::{self, Tone};
 
 const MONO: &str = "monospace";
 
+/// Extra card height for the tag-chip line (the grid adds it to its row
+/// height while any visible card has tags).
+pub const TAGS_LINE_H: f32 = 26.;
+
+/// Most tag chips on a card or list row; the rest show as "+n".
+const MAX_CHIPS: usize = 4;
+
+/// A repo's project tags as a single line of chips (clipped, never wrapped,
+/// so the card height stays fixed).
+fn tag_chips(tags: &[SharedString], t: &Theme) -> gpui::Div {
+    let mut line = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.))
+        .overflow_hidden();
+    for tag in tags.iter().take(MAX_CHIPS) {
+        line = line.child(widgets::tag(tag, t.accent_bright, t).flex_none());
+    }
+    if tags.len() > MAX_CHIPS {
+        line = line.child(
+            div()
+                .flex_none()
+                .font_family(MONO)
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg3))
+                .child(SharedString::from(format!("+{}", tags.len() - MAX_CHIPS))),
+        );
+    }
+    line
+}
+
 /// Per-card interactive state, resolved by the caller inside the
 /// `uniform_list` render closure (cheap per-row lookups by id — no allocation).
 #[derive(Clone, Copy)]
@@ -139,6 +171,7 @@ fn button(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn card(
     row: &Row,
     idx: usize,
@@ -147,6 +180,7 @@ pub fn card(
     ide_cmd: &str,
     agent_cmd: &str,
     state: CardState,
+    tags: &[SharedString],
 ) -> impl IntoElement {
     // Hover group: reveals the (otherwise invisible) select checkbox.
     let group = SharedString::from(format!("cardg-{idx}"));
@@ -383,6 +417,10 @@ pub fn card(
         );
     }
     body = body.child(status).child(host);
+    // Project tags, when the repo has any (the grid grows its rows to fit).
+    if !tags.is_empty() {
+        body = body.child(tag_chips(tags, t).mt(px(9.)).h(px(TAGS_LINE_H - 9.)));
+    }
 
     // ── card shell (hover lift via border/bg; accent border when selected) ─
     let (hov_border, hov_bg) = (t.border_accent, t.surface_hover);
@@ -411,6 +449,7 @@ pub fn card(
 
 /// A compact single-row repo entry for the list layout — the same data and
 /// launchers as the grid card, laid out horizontally in one fixed-height row.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn list_item(
     row: &Row,
     idx: usize,
@@ -419,6 +458,7 @@ pub(crate) fn list_item(
     ide_cmd: &str,
     agent_cmd: &str,
     state: CardState,
+    tags: &[SharedString],
 ) -> impl IntoElement {
     // Hover group: reveals the (otherwise invisible) select checkbox.
     let group = SharedString::from(format!("listg-{idx}"));
@@ -604,6 +644,7 @@ pub(crate) fn list_item(
         .child(select)
         .child(fav_star)
         .child(open)
+        .children((!tags.is_empty()).then(|| tag_chips(tags, t).flex_shrink(1.).max_w(px(260.))))
         .child(status)
         .child(acts);
     if state.selected {

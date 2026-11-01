@@ -201,6 +201,10 @@ impl OrreryApp {
                         &cmds.1,
                         self.services.ai_ready,
                         self.services.github_authed,
+                        crate::drawer::DrawerLook {
+                            reduce_motion: self.reduce_motion(),
+                            tags: self.grid.tags.of(repo),
+                        },
                     )
                     .into_any_element(),
                 )
