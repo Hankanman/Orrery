@@ -11,7 +11,9 @@ The Settings screen switches sections from the sidebar:
 - **GitHub** — connect for higher rate limits and private-repo enrichment.
 - **AI & search** — inference backend (Ollama or the bundled llama.cpp engine), models, and the cache control (see [Local AI](./local-ai)).
 - **Notifications** — which background events raise a desktop notification (see [Notifications & tray](./notifications)).
-- **Appearance** — **Reduce motion** turns off the drawer's sliding tab underline and the toasts' slide-in and fade-out. Until you set it, it follows your desktop: the XDG portal's reduced-motion preference, or KDE's animation speed set to *Instant*. Once you've flipped it, **Follow desktop** hands the choice back. It's saved as `reduceMotion` (absent means follow the desktop) and applies when you press **Save**. The small check and switch transitions inside gpui-component's checkbox and switch can't be turned off yet.
+- **Appearance** — **Theme** picks *System*, *Dark* or *Light*. *System* (the default) follows your desktop's light/dark preference from the XDG portal and switches live when you change it; with no desktop preference it stays dark. The choice applies and saves the moment you click it (no **Save** needed), as `theme = "dark"` or `theme = "light"` (absent means *System*). Either theme borrows your desktop's accent colour; in light mode a pale accent is deepened until it's readable on the light background. The window frame and the tray icon belong to your desktop, so they follow its colour scheme rather than Orrery's theme.
+
+  **Reduce motion** turns off the drawer's sliding tab underline and the toasts' slide-in and fade-out. Until you set it, it follows your desktop: the XDG portal's reduced-motion preference, or KDE's animation speed set to *Instant*. Once you've flipped it, **Follow desktop** hands the choice back. It's saved as `reduceMotion` (absent means follow the desktop) and applies when you press **Save**. The small check and switch transitions inside gpui-component's checkbox and switch can't be turned off yet.
 
 ## Workspace roots
 
