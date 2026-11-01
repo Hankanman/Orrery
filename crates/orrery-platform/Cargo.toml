@@ -34,6 +34,14 @@ ashpd = { version = "0.13", default-features = false, features = ["async-io", "g
 # Rust with no features (its own wire-protocol connection, no libxcb), and
 # already in the tree via gpui, so it adds no new crates.
 x11rb = { version = "0.13", default-features = false }
+# Wayland window activation with a token handed over by the desktop (a
+# notification click): xdg_activation_v1 on the app window's own wl_surface,
+# through gpui's libwayland connection. All three are already in the tree via
+# gpui with these exact features (libwayland, dlopen'd), so no new crates.
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
 [dev-dependencies]
 tempfile = "3"           # watcher target-computation tests

@@ -70,6 +70,27 @@ impl OrreryApp {
         cx.notify();
     }
 
+    /// Open the command palette with `query` already typed (GNOME Shell's
+    /// "more results" click), its searches started as if it had been typed.
+    pub fn open_palette_with(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(window, cx);
+        let Some(Overlay::Palette(d)) = &self.overlay else {
+            return;
+        };
+        let input = d.query.clone();
+        let query = query.to_string();
+        input.update(cx, |st, cx| st.set_value(query, window, cx));
+        // Don't rely on `set_value` emitting `Change`: refresh the list and
+        // start the searches here (a duplicate trigger is dropped by the
+        // searches' generation check).
+        if let Some(Overlay::Palette(d)) = &mut self.overlay {
+            d.rev += 1;
+        }
+        self.trigger_code_search(cx);
+        self.trigger_semantic_search(cx);
+        cx.notify();
+    }
+
     /// The current palette result list (actions + repos + code hits). Cached
     /// on the palette and rebuilt only when its inputs change — the query or
     /// search results (`rev`), the rows, or whether a selection exists — so

@@ -62,6 +62,14 @@ pub struct SettingsState {
     pub add_root: Entity<InputState>,
     /// Scan depth as a NumberInput (integer 1–8).
     pub scan_depth: Entity<InputState>,
+    /// Trusted self-hosted GitLab domains (comma-separated).
+    pub gitlab_hosts: Entity<InputState>,
+    /// Trusted self-hosted Gitea / Forgejo domains (comma-separated).
+    pub gitea_hosts: Entity<InputState>,
+    /// Days before one of your PRs counts as stale (0 = never).
+    pub stale_pr_days: Entity<InputState>,
+    /// Days a review request may wait before it counts as stale (0 = never).
+    pub stale_review_days: Entity<InputState>,
     /// Flash a "Saved" confirmation after a successful save.
     pub saved: bool,
     /// Result line for the AI Test / Clear-cache actions.
@@ -79,6 +87,17 @@ impl SettingsState {
                 InputState::new(window, cx)
                     .placeholder(ph)
                     .default_value(val)
+            })
+        };
+        // A whole-number-of-days input (0 = off).
+        let days = |window: &mut Window, cx: &mut gpui::App, val: u32| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(val.to_string())
+                    .validate(|s, _| s.chars().all(|c| c.is_ascii_digit()))
+                    .min(0.)
+                    .max(365.)
+                    .step(1.)
             })
         };
         SettingsState {
@@ -107,6 +126,15 @@ impl SettingsState {
                     .max(8.)
                     .step(1.)
             }),
+            gitlab_hosts: field(
+                window,
+                cx,
+                "gitlab.example.com",
+                &cfg.gitlab_hosts.join(", "),
+            ),
+            gitea_hosts: field(window, cx, "git.example.com", &cfg.gitea_hosts.join(", ")),
+            stale_pr_days: days(window, cx, cfg.stale_pr_days),
+            stale_review_days: days(window, cx, cfg.stale_review_days),
             draft: cfg.clone(),
             saved: false,
             ai_note: SharedString::default(),
@@ -131,6 +159,9 @@ pub fn render(
     let mut sections: Vec<gpui::AnyElement> = Vec::new();
     if show("account") {
         sections.push(account_section(authed, device, t, app).into_any_element());
+    }
+    if show("hosts") {
+        sections.push(hosts_section(s, t).into_any_element());
     }
     if show("roots") {
         sections.push(roots_section(s, t, app).into_any_element());
@@ -258,6 +289,49 @@ fn account_section(
             })));
     }
     col
+}
+
+/// Code hosts beyond GitHub: the trusted self-hosted allowlists, and where
+/// each host's token comes from. A token only ever goes to gitlab.com /
+/// codeberg.org or a domain listed here, never to a host read off a remote.
+fn hosts_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
+    let gitea_token = std::env::var_os("ORRERY_GITEA_TOKEN").is_some_and(|v| !v.is_empty());
+    section(t, "Code hosts")
+        .child(note_line(
+            "GitLab: gitlab.com is always trusted. Token from ORRERY_GITLAB_TOKEN, \
+             or the glab CLI once you've run \"glab auth login\"."
+                .into(),
+            t.fg3,
+            t,
+        ))
+        .child(labeled(
+            "Self-hosted GitLab domains (comma-separated)",
+            s.gitlab_hosts.clone(),
+            t,
+        ))
+        .child(note_line(
+            "Gitea / Forgejo: codeberg.org is always trusted. Token from \
+             ORRERY_GITEA_TOKEN (an access token with read scopes, created under \
+             Settings → Applications on your instance)."
+                .into(),
+            t.fg3,
+            t,
+        ))
+        .child(if gitea_token {
+            status_row("circle-check", "ORRERY_GITEA_TOKEN is set", t.clean, t)
+        } else {
+            status_row(
+                "circle-alert",
+                "ORRERY_GITEA_TOKEN is not set — Gitea items stay out of the Inbox",
+                t.fg3,
+                t,
+            )
+        })
+        .child(labeled(
+            "Self-hosted Gitea / Forgejo domains (comma-separated)",
+            s.gitea_hosts.clone(),
+            t,
+        ))
 }
 
 // ── sections ────────────────────────────────────────────────────────────────
@@ -700,6 +774,23 @@ fn notifications_section(
                     s.draft.notify_agent_finished = !s.draft.notify_agent_finished;
                 }
             },
+        ))
+        // Stale badges in the Inbox.
+        .child(number_row(
+            "Your PR is stale after (days)",
+            &s.stale_pr_days,
+            t,
+        ))
+        .child(number_row(
+            "Review request is stale after (days)",
+            &s.stale_review_days,
+            t,
+        ))
+        .child(note_line(
+            "Stale items get a badge in the Inbox. 0 turns a kind off; drafts are never stale."
+                .into(),
+            t.fg3,
+            t,
         ))
 }
 

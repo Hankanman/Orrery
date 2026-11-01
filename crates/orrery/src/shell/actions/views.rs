@@ -15,11 +15,11 @@ impl OrreryApp {
         let seq = self.passes.inbox_seq;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let items =
-                crate::task::try_run(async { orrery_core::inbox::github_inbox().await }).await;
+            // Every connected host (GitHub, GitLab, Gitea); one host failing
+            // never hides another's items.
+            let items = crate::task::try_run(async { orrery_core::inbox::all_inbox().await }).await;
             let notes =
-                crate::task::try_run(async { orrery_core::inbox::github_notifications().await })
-                    .await;
+                crate::task::try_run(async { orrery_core::inbox::all_notifications().await }).await;
             let _ = this.update(cx, |this, cx| {
                 if this.passes.inbox_seq != seq {
                     return;
@@ -155,7 +155,7 @@ impl OrreryApp {
                         .unwrap_or(0)
                 })
                 .await;
-            let res = crate::task::try_run(async { orrery_core::inbox::github_feed().await }).await;
+            let res = crate::task::try_run(async { orrery_core::inbox::all_feed().await }).await;
             let _ = this.update(cx, |this, cx| {
                 if this.passes.feed_seq != seq {
                     return; // a refresh superseded this load

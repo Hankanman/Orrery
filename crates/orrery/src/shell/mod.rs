@@ -324,6 +324,7 @@ impl OrreryApp {
             View::Inbox => crate::views::inbox::render(
                 &self.inbox,
                 self.view_filter.as_deref(),
+                &orrery_core::inbox::StaleThresholds::from_config(&self.config),
                 &self.lists.inbox,
                 &self.theme,
                 &cx.entity(),
