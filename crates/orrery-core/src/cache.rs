@@ -145,6 +145,14 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS dirty_since (id TEXT PRIMARY KEY, since INTEGER NOT NULL);",
     )?;
+    // Durable (not a cache): the user's project tags per repo.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS repo_tags (
+             repo_id TEXT NOT NULL,
+             tag TEXT NOT NULL,
+             PRIMARY KEY (repo_id, tag)
+         );",
+    )?;
     migrate(conn)
 }
 
@@ -685,6 +693,90 @@ pub fn set_seen(id: &str, sha: &str, unix: i64) -> Result<(), String> {
     try_with_conn(|c| set_seen_on(c, id, sha, unix))
 }
 
+// ── Project tags ───────────────────────────────────────────────────────────
+// User-chosen labels ("work", "client-x") that group repos across roots. One
+// row per (repo, tag); tags are stored normalised (see `normalise_tag`).
+
+/// Longest tag kept, in characters. Tags render as chips on cards and in the
+/// sidebar, so a paragraph pasted into the field is cut short.
+pub const MAX_TAG_CHARS: usize = 32;
+
+/// Normalise a user-typed tag: trimmed, lowercased, inner whitespace runs
+/// collapsed to one `-`, control characters dropped, and cut to
+/// [`MAX_TAG_CHARS`]. `None` when nothing is left.
+pub fn normalise_tag(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut gap = false;
+    for ch in raw.trim().chars() {
+        if ch.is_whitespace() {
+            gap = true;
+            continue;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        if gap && !out.is_empty() {
+            out.push('-');
+        }
+        gap = false;
+        out.extend(ch.to_lowercase());
+    }
+    let out: String = out.chars().take(MAX_TAG_CHARS).collect();
+    (!out.is_empty()).then_some(out)
+}
+
+fn all_tags_on(conn: &Connection) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let Ok(mut stmt) = conn.prepare("SELECT repo_id, tag FROM repo_tags ORDER BY repo_id, tag")
+    else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+    if let Ok(iter) = rows {
+        for (id, tag) in iter.flatten() {
+            out.entry(id).or_default().push(tag);
+        }
+    }
+    out
+}
+
+/// Add `tag` (normalised) to a repo, returning the stored form; `Ok(None)`
+/// when the tag normalises to nothing. Adding an existing tag is a no-op.
+fn add_tag_on(conn: &Connection, repo_id: &str, tag: &str) -> rusqlite::Result<Option<String>> {
+    let Some(tag) = normalise_tag(tag) else {
+        return Ok(None);
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO repo_tags (repo_id, tag) VALUES (?1, ?2)",
+        rusqlite::params![repo_id, tag],
+    )?;
+    Ok(Some(tag))
+}
+
+fn remove_tag_on(conn: &Connection, repo_id: &str, tag: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM repo_tags WHERE repo_id = ?1 AND tag = ?2",
+        rusqlite::params![repo_id, tag],
+    )?;
+    Ok(())
+}
+
+/// Every repo's tags, keyed by repo id, each list sorted.
+pub fn all_tags() -> HashMap<String, Vec<String>> {
+    with_conn(HashMap::new(), all_tags_on)
+}
+
+/// Tag a repo; returns the normalised tag that was stored (`None` if the
+/// input was blank).
+pub fn add_tag(repo_id: &str, tag: &str) -> Result<Option<String>, String> {
+    try_with_conn(|c| add_tag_on(c, repo_id, tag))
+}
+
+/// Remove one tag from a repo.
+pub fn remove_tag(repo_id: &str, tag: &str) -> Result<(), String> {
+    try_with_conn(|c| remove_tag_on(c, repo_id, tag))
+}
+
 // ── Dispatched agent worktrees (#185) ──────────────────────────────────────
 // The worktree-path ↔ origin-repo pairing for agents dispatched onto a fresh
 // worktree, so the Agents view (and later outcome handling) can find them —
@@ -1119,6 +1211,43 @@ mod tests {
         // An empty seen sha reads back as None (no cursor yet).
         set_seen_on(&conn, "/b", "", 0).unwrap();
         assert_eq!(seen_sha_on(&conn, "/b"), None);
+    }
+
+    #[test]
+    fn normalise_tag_trims_lowercases_and_caps() {
+        assert_eq!(normalise_tag("  Work "), Some("work".into()));
+        assert_eq!(normalise_tag("Client  X"), Some("client-x".into()));
+        assert_eq!(normalise_tag("a\tb\nc"), Some("a-b-c".into()));
+        assert_eq!(normalise_tag("x\u{7}y"), Some("xy".into()));
+        assert_eq!(normalise_tag("   "), None);
+        assert_eq!(normalise_tag(""), None);
+        let long = "x".repeat(100);
+        assert_eq!(normalise_tag(&long).unwrap().len(), MAX_TAG_CHARS);
+    }
+
+    #[test]
+    fn tags_add_list_remove() {
+        let conn = mem();
+        assert!(all_tags_on(&conn).is_empty());
+        assert_eq!(
+            add_tag_on(&conn, "/a", " Work ").unwrap().as_deref(),
+            Some("work")
+        );
+        add_tag_on(&conn, "/a", "client-x").unwrap();
+        add_tag_on(&conn, "/b", "work").unwrap();
+        // Re-adding (in any case) is a no-op; a blank tag stores nothing.
+        add_tag_on(&conn, "/a", "WORK").unwrap();
+        assert_eq!(add_tag_on(&conn, "/a", "  ").unwrap(), None);
+        let all = all_tags_on(&conn);
+        assert_eq!(all["/a"], vec!["client-x".to_string(), "work".to_string()]);
+        assert_eq!(all["/b"], vec!["work".to_string()]);
+
+        remove_tag_on(&conn, "/a", "work").unwrap();
+        // Removing an absent tag is fine.
+        remove_tag_on(&conn, "/a", "nope").unwrap();
+        let all = all_tags_on(&conn);
+        assert_eq!(all["/a"], vec!["client-x".to_string()]);
+        assert_eq!(all["/b"], vec!["work".to_string()]);
     }
 
     #[test]

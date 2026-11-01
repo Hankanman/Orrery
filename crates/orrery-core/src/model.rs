@@ -175,6 +175,11 @@ pub struct AppConfig {
     /// Base URL of the Ollama server (supports a remote/non-default host).
     #[serde(default = "default_ollama_host")]
     pub ollama_host: String,
+    /// Turn off UI animation (tab underline slide, toast slide-in, …).
+    /// `None` follows the desktop's reduced-motion preference; `Some` is the
+    /// user's explicit choice from Settings → Appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce_motion: Option<bool>,
     /// Master switch for background attention notifications (#70).
     #[serde(default = "default_true")]
     pub notify_enabled: bool,

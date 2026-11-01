@@ -45,6 +45,10 @@ pub struct Appearance {
     pub window_fg: Option<Rgb>,
     /// Desktop "view"/content background (lists, panes).
     pub base_bg: Option<Rgb>,
+    /// The desktop asks apps to reduce motion: the portal's `reduced-motion`
+    /// key, else KDE's animation speed slider at "instant"
+    /// (`AnimationDurationFactor=0`). `None` when neither says.
+    pub reduced_motion: Option<bool>,
 }
 
 // The freedesktop Settings portal. `ReadOne` returns the setting value as a
@@ -102,6 +106,8 @@ struct KdeColors {
     window_bg: Option<Rgb>,
     window_fg: Option<Rgb>,
     base_bg: Option<Rgb>,
+    /// `[KDE] AnimationDurationFactor`: 0 means animations are off.
+    animations_off: Option<bool>,
 }
 
 fn parse_rgb_triplet(s: &str) -> Option<Rgb> {
@@ -146,6 +152,9 @@ fn parse_kdeglobals(content: &str) -> KdeColors {
             ("Colors:Window", "BackgroundNormal") => out.window_bg = parse_rgb_triplet(value),
             ("Colors:Window", "ForegroundNormal") => out.window_fg = parse_rgb_triplet(value),
             ("Colors:View", "BackgroundNormal") => out.base_bg = parse_rgb_triplet(value),
+            ("KDE", "AnimationDurationFactor") => {
+                out.animations_off = value.parse::<f64>().ok().map(|f| f <= 0.0)
+            }
             _ => {}
         }
     }
@@ -168,6 +177,15 @@ async fn read_appearance(proxy: &SettingsProxy<'_>) -> Appearance {
         Err(_) => None,
     };
 
+    // 0 = no preference, 1 = reduce. Older portals don't have the key.
+    let portal_motion = match proxy.read_one(APPEARANCE_NS, "reduced-motion").await {
+        Ok(v) => match &*v {
+            Value::U32(n) => Some(*n == 1),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+
     let kde = read_kdeglobals();
 
     Appearance {
@@ -178,6 +196,18 @@ async fn read_appearance(proxy: &SettingsProxy<'_>) -> Appearance {
         window_bg: kde.window_bg,
         window_fg: kde.window_fg,
         base_bg: kde.base_bg,
+        reduced_motion: reduced_motion(portal_motion, kde.animations_off),
+    }
+}
+
+/// Combine the portal's reduced-motion answer with KDE's animation slider. A
+/// portal "reduce" wins; otherwise KDE's "instant" animations count as a
+/// request too, since the portal may predate the key or say "no preference".
+fn reduced_motion(portal: Option<bool>, kde_off: Option<bool>) -> Option<bool> {
+    match (portal, kde_off) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (None, None) => None,
     }
 }
 
@@ -192,6 +222,7 @@ fn kdeglobals_appearance() -> Appearance {
         window_bg: kde.window_bg,
         window_fg: kde.window_fg,
         base_bg: kde.base_bg,
+        reduced_motion: reduced_motion(None, kde.animations_off),
     }
 }
 
@@ -279,7 +310,25 @@ pub fn watch(on_change: impl Fn(Appearance) + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_kdeglobals, parse_rgb_triplet};
+    use super::{parse_kdeglobals, parse_rgb_triplet, reduced_motion};
+
+    #[test]
+    fn reduced_motion_from_portal_or_kde_slider() {
+        assert_eq!(reduced_motion(None, None), None);
+        assert_eq!(reduced_motion(Some(true), Some(false)), Some(true));
+        assert_eq!(reduced_motion(Some(false), Some(true)), Some(true));
+        assert_eq!(reduced_motion(Some(false), None), Some(false));
+        assert_eq!(reduced_motion(None, Some(false)), Some(false));
+        let off = parse_kdeglobals("[KDE]\nAnimationDurationFactor=0\n");
+        assert_eq!(off.animations_off, Some(true));
+        let slow = parse_kdeglobals("[KDE]\nAnimationDurationFactor=0.5\n");
+        assert_eq!(slow.animations_off, Some(false));
+        // The key outside [KDE] is ignored.
+        assert_eq!(
+            parse_kdeglobals("AnimationDurationFactor=0").animations_off,
+            None
+        );
+    }
 
     /// App startup calls this from a plain (non-tokio) thread; it must return
     /// a value — portal, kdeglobals or defaults — rather than panic.
