@@ -34,6 +34,22 @@ pub struct Row {
     pub activity: model::Activity,
     /// Last-commit time (Unix secs) — sort key for the "Activity" sort.
     pub last_commit_unix: i64,
+    /// Linked worktrees of this checkout found by the scan, grouped here
+    /// rather than shown as cards of their own (see [`to_rows`]).
+    pub worktrees: Vec<WorktreeRow>,
+}
+
+/// A linked worktree, flattened for the card's "N worktrees" affordance and
+/// the drawer's worktree list.
+#[derive(Clone)]
+pub struct WorktreeRow {
+    /// Absolute path (the worktree's own `Repo::id`).
+    pub id: SharedString,
+    /// The checked-out branch, or "detached".
+    pub branch: SharedString,
+    pub dirty: u32,
+    pub ahead: u32,
+    pub behind: u32,
 }
 
 impl Row {
@@ -247,10 +263,27 @@ pub(crate) fn unwrap_soft_breaks(src: &str) -> String {
     out
 }
 
+/// Flatten a scan snapshot into card rows. Linked worktrees (`worktree_of`
+/// set) don't get a card: each is grouped under its main checkout's row. A
+/// worktree whose main checkout isn't in the snapshot (it lives outside every
+/// root) stays out of the grid, as it did before worktrees were scanned.
 pub fn to_rows(repos: Vec<model::Repo>) -> Vec<Row> {
-    repos
+    let mut linked: std::collections::HashMap<String, Vec<WorktreeRow>> =
+        std::collections::HashMap::new();
+    let mut mains = Vec::with_capacity(repos.len());
+    for r in repos {
+        match r.worktree_of.clone() {
+            Some(parent) => linked.entry(parent).or_default().push(worktree_row(r)),
+            None => mains.push(r),
+        }
+    }
+    for list in linked.values_mut() {
+        list.sort_by(|a, b| a.branch.cmp(&b.branch).then_with(|| a.id.cmp(&b.id)));
+    }
+    mains
         .into_iter()
         .map(|r| Row {
+            worktrees: linked.remove(&r.id).unwrap_or_default(),
             id: r.id.into(),
             url: match (r.remote_host.as_deref(), r.slug.as_deref()) {
                 (Some(host), Some(slug)) => format!("https://{host}/{slug}"),
@@ -286,6 +319,27 @@ pub fn to_rows(repos: Vec<model::Repo>) -> Vec<Row> {
             last_commit_unix: r.last_commit_unix,
         })
         .collect()
+}
+
+fn worktree_row(r: model::Repo) -> WorktreeRow {
+    WorktreeRow {
+        id: r.id.into(),
+        branch: oneline(r.worktree_branch.unwrap_or_else(|| "detached".into())).into(),
+        dirty: r.git.dirty,
+        ahead: r.git.ahead,
+        behind: r.git.behind,
+    }
+}
+
+/// The scan's ignore globs, plus `.claude` even when an older saved config
+/// predates it in the defaults, so agent-tool worktrees (Orrery's own
+/// `.claude/worktrees/…` included) never surface as fleet members.
+fn scan_ignore(cfg: &model::AppConfig) -> Vec<String> {
+    let mut ignore = cfg.ignore.clone();
+    if !ignore.iter().any(|g| g == ".claude") {
+        ignore.push(".claude".into());
+    }
+    ignore
 }
 
 /// A loaded fleet: render-ready rows, the distinct-root count, and the raw
@@ -360,10 +414,12 @@ pub fn rescan(changes: &ChangeSet) -> Snapshot {
     let now = now_unix();
     let cfg = config::load();
     let favorites = cache::favorites();
-    let mut repos = scan::scan_with_hosts(
+    // Linked worktrees come back as fleet members marked `worktree_of`;
+    // `to_rows` groups them under their main checkout's card.
+    let mut repos = scan::scan_with_worktrees(
         &cfg.roots,
         cfg.scan_depth,
-        &cfg.ignore,
+        &scan_ignore(&cfg),
         &favorites,
         &orrery_core::forge::TrustedHosts::from_config(&cfg),
         now,
@@ -396,7 +452,14 @@ pub fn rescan_repos(mut repos: Vec<model::Repo>, changes: &ChangeSet) -> Snapsho
         }
         let fav = favorites.contains(&r.id);
         match scan::scan_repo_with_hosts(Path::new(&r.id), &r.root, fav, &hosts, now) {
-            Some(fresh) => {
+            Some(mut fresh) => {
+                // A rebuilt linked worktree stays grouped under its main
+                // checkout; its branch is re-read from the fresh git state.
+                if let Some(parent) = &r.worktree_of {
+                    fresh.worktree_of = Some(parent.clone());
+                    fresh.worktree_branch =
+                        (fresh.git.branch != "HEAD").then(|| fresh.git.branch.clone());
+                }
                 rebuilt_at.push(i);
                 rebuilt.push(fresh);
             }
@@ -431,7 +494,80 @@ fn invalidate_languages(changes: &ChangeSet) {
 
 #[cfg(test)]
 mod tests {
-    use super::unwrap_soft_breaks;
+    use super::{scan_ignore, to_rows, unwrap_soft_breaks};
+    use orrery_core::model::{Activity, AppConfig, GitStatus, Repo};
+
+    fn repo(id: &str, worktree_of: Option<&str>, branch: &str) -> Repo {
+        Repo {
+            id: id.into(),
+            display_name: id.rsplit('/').next().unwrap_or(id).into(),
+            slug: Some("o/r".into()),
+            path: id.into(),
+            description: None,
+            language: None,
+            git: GitStatus {
+                branch: branch.into(),
+                ahead: 0,
+                behind: 0,
+                dirty: 2,
+            },
+            last_commit_unix: 0,
+            activity: Activity::Active,
+            root: "/dev".into(),
+            host: None,
+            remote_host: None,
+            stars: 0,
+            topics: Vec::new(),
+            open_issues: 0,
+            latest_release: None,
+            private: false,
+            favorite: false,
+            ai_summary: None,
+            worktree_of: worktree_of.map(String::from),
+            worktree_branch: (branch != "HEAD" && worktree_of.is_some()).then(|| branch.into()),
+        }
+    }
+
+    #[test]
+    fn worktrees_group_under_their_main_checkout() {
+        let rows = to_rows(vec![
+            repo("/dev/app-wt-b", Some("/dev/app"), "zeta"),
+            repo("/dev/app", None, "main"),
+            repo("/dev/app-wt-a", Some("/dev/app"), "HEAD"),
+            repo("/dev/lib", None, "main"),
+            // Its main checkout isn't in the fleet: no loose card.
+            repo("/elsewhere/wt", Some("/outside/main"), "x"),
+        ]);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, vec!["/dev/app", "/dev/lib"]);
+        let wts: Vec<(&str, &str, u32)> = rows[0]
+            .worktrees
+            .iter()
+            .map(|w| (w.id.as_ref(), w.branch.as_ref(), w.dirty))
+            .collect();
+        assert_eq!(
+            wts,
+            vec![
+                ("/dev/app-wt-a", "detached", 2),
+                ("/dev/app-wt-b", "zeta", 2)
+            ]
+        );
+        assert!(rows[1].worktrees.is_empty());
+    }
+
+    #[test]
+    fn scan_always_ignores_claude_worktrees() {
+        let cfg = AppConfig {
+            ignore: vec!["node_modules".into()],
+            ..AppConfig::default()
+        };
+        assert_eq!(scan_ignore(&cfg), vec!["node_modules", ".claude"]);
+        let cfg = AppConfig {
+            ignore: vec![".claude".into()],
+            ..AppConfig::default()
+        };
+        assert_eq!(scan_ignore(&cfg), vec![".claude"]);
+    }
 
     #[test]
     fn folds_hard_wrapped_paragraph() {

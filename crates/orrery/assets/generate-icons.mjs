@@ -41,6 +41,8 @@ const LUCIDE_ICONS = [
   "list", "code",
   // inbox: stale filter
   "hourglass",
+  // fleet hygiene: advisories badge, worktree group toggle, at-risk actions
+  "shield-alert", "chevron-down", "chevron-right", "upload", "archive",
 ];
 
 // Language marks: multicolor devicon "-original" SVGs, rendered in full color
