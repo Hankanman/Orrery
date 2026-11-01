@@ -405,7 +405,7 @@ fn row_view(
         .on_click(move |_ev, window, cx| {
             let fh = app.read(cx).focus.clone();
             let item = item.clone();
-            app.update(cx, |this, cx| this.run_palette_item(item, cx));
+            app.update(cx, |this, cx| this.run_palette_item(item, window, cx));
             window.focus(&fh, cx);
         });
     if !secondary.is_empty() {

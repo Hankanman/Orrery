@@ -139,7 +139,7 @@ impl OrreryApp {
             _ => return,
         };
         if let Some(item) = items.get(selected).cloned() {
-            self.run_palette_item(item, cx);
+            self.run_palette_item(item, window, cx);
             window.focus(&self.focus, cx);
         }
     }
@@ -309,7 +309,12 @@ impl OrreryApp {
     }
 
     /// Close the palette and act on `item`.
-    pub fn run_palette_item(&mut self, item: crate::palette::PaletteItem, cx: &mut Context<Self>) {
+    pub fn run_palette_item(
+        &mut self,
+        item: crate::palette::PaletteItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::palette::{PaletteAction, PaletteItem};
         // Resolve data living in the (about-to-close) palette first.
         let code_abs = match (&item, &self.overlay) {
@@ -321,7 +326,12 @@ impl OrreryApp {
         self.close_overlay();
         match item {
             PaletteItem::Action(PaletteAction::Rescan) => self.rescan(cx),
-            PaletteItem::Action(PaletteAction::Settings) => self.view = View::Settings,
+            // Same path as the sidebar: switch, then set up the editing
+            // session on first open (otherwise Settings renders empty).
+            PaletteItem::Action(PaletteAction::Settings) => {
+                self.view = View::Settings;
+                self.maybe_load_view(View::Settings, window, cx);
+            }
             // Fleet verbs (#184) — the same run plumbing as the fleet bar
             // (`fleet.rs`); one bulk run at a time is enforced there.
             PaletteItem::Action(PaletteAction::FetchAll) => {
