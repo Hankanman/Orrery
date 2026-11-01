@@ -304,7 +304,8 @@ fn item_row(it: &InboxRow, stale: Option<&SharedString>, t: &Theme) -> impl Into
         row = row.child(tag("draft", t.fg3, t));
     }
     if let Some(label) = stale {
-        row = row.child(tag(label, t.behind, t));
+        // Amber "needs attention", not the danger red used for failures.
+        row = row.child(tag(label, t.dirty, t));
     }
     row.child(
         div()
