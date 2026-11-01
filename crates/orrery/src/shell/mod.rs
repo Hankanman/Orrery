@@ -24,6 +24,7 @@ mod attention;
 mod confirm;
 mod grid;
 mod header;
+pub(crate) mod hygiene;
 mod overlay;
 mod passes;
 mod sidebar;
@@ -192,6 +193,9 @@ pub struct OrreryApp {
     pub view_filter: Option<SharedString>,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
+    /// Fleet hygiene: at-risk work, security advisories, disk usage (see
+    /// `hygiene.rs`).
+    pub hygiene: hygiene::HygieneState,
 }
 
 /// Status of the external integrations Orrery talks to — GitHub (auth) and the
@@ -302,6 +306,7 @@ impl OrreryApp {
             scanned_at: snap.scanned_at,
             view_filter: None,
             focus: cx.focus_handle(),
+            hygiene: hygiene::HygieneState::seeded(),
         }
     }
 
@@ -337,6 +342,7 @@ impl OrreryApp {
             View::Inbox => crate::views::inbox::render(
                 &self.inbox,
                 self.view_filter.as_deref(),
+                &orrery_core::inbox::StaleThresholds::from_config(&self.config),
                 &self.lists.inbox,
                 &self.theme,
                 &cx.entity(),
@@ -362,9 +368,14 @@ impl OrreryApp {
             )
             .into_any_element(),
             View::Janitor => crate::views::cleanup::render(
-                &self.cleanup,
+                crate::views::cleanup::CleanupView {
+                    state: &self.cleanup,
+                    ui: &self.cleanup_ui,
+                    hygiene: &self.hygiene,
+                    repos: &self.repos,
+                    ide_cmd: &self.config.ide_command,
+                },
                 self.view_filter.as_deref(),
-                self.cleanup_ui.confirm.armed(),
                 t,
                 &cx.entity(),
             )
@@ -498,7 +509,7 @@ fn placeholder(view: View, t: &Theme) -> impl IntoElement {
         View::Explore => ("Explore", "Discover & search across hosts"),
         View::Agents => ("Agents", "Running terminal coding-agent sessions"),
         View::Tools => ("Dev Tools", "Utilities & quick actions"),
-        View::Janitor => ("Cleanup", "Prunable branches & worktrees"),
+        View::Janitor => ("Cleanup", "Disk usage, at-risk work & prunable branches"),
         View::Settings => ("Settings", "Roots, AI, launchers, appearance"),
         View::Grid => ("Mission Control", ""),
     };

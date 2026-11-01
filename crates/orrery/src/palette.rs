@@ -451,6 +451,7 @@ mod tests {
             favorite: false,
             activity: orrery_core::model::Activity::Active,
             last_commit_unix: 0,
+            worktrees: Vec::new(),
         }
     }
 

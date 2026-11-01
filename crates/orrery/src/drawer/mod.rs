@@ -203,6 +203,12 @@ pub struct DrawerData {
     /// up from the app's `ci_states` when the drawer opens — the Overview's
     /// CI line. `None` for non-GitHub repos or before the first pass.
     pub ci: Option<orrery_core::cache::CiEntry>,
+    /// The repo's cached security-advisory report (Dependabot or a local
+    /// audit), looked up when the drawer opens — the Overview's badge.
+    pub advisory: Option<orrery_core::advisories::AdvisoryReport>,
+    /// The Overview's worktree list is expanded (the card's "N worktrees"
+    /// affordance opens the drawer with it expanded).
+    pub worktrees_open: bool,
     /// A commit landed in this drawer session — keeps Push offered even while
     /// the grid row's ahead count is stale (no upstream / pre-rescan).
     pub committed: bool,

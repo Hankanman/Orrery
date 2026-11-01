@@ -97,6 +97,16 @@ impl OrreryApp {
     /// Open the repo detail drawer for `repo` (id) on Overview, and kick off its
     /// async git load.
     pub fn open_drawer(&mut self, repo: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        // A linked worktree has no card or drawer of its own: open its main
+        // checkout's, with the worktree list expanded.
+        if let Some(parent) = self
+            .repos
+            .iter()
+            .find(|r| r.id.as_str() == repo.as_ref())
+            .and_then(|r| r.worktree_of.clone())
+        {
+            return self.open_worktrees(parent.into(), window, cx);
+        }
         self.overlay = Some(Overlay::Drawer {
             repo: repo.clone(),
             tab: DrawerTab::Overview,
@@ -116,6 +126,11 @@ impl OrreryApp {
                     .get(&(host.to_string(), slug.to_string()))
                     .cloned()
             });
+        self.drawer.advisory = self
+            .repos
+            .iter()
+            .find(|r| r.id.as_str() == repo.as_ref())
+            .and_then(|r| self.hygiene.advisory_for(r).cloned());
         // The new-worktree field lives in Overview, shown immediately on open.
         self.drawer.worktree_input = Some(cx.new(|cx| {
             gpui_component::input::InputState::new(window, cx).placeholder("new-worktree-name")
@@ -162,6 +177,24 @@ impl OrreryApp {
         let repo = self.drawer.repo.clone();
         self.add_tag(repo, &raw, cx);
         input.update(cx, |s, cx| s.set_value("", window, cx));
+    }
+
+    /// Open `repo`'s drawer with its worktree list expanded (the card's
+    /// "N worktrees" affordance).
+    pub fn open_worktrees(
+        &mut self,
+        repo: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_drawer(repo, window, cx);
+        self.drawer.worktrees_open = true;
+    }
+
+    /// Expand / collapse the drawer Overview's worktree list.
+    pub fn toggle_drawer_worktrees(&mut self, cx: &mut Context<Self>) {
+        self.drawer.worktrees_open = !self.drawer.worktrees_open;
+        cx.notify();
     }
 
     /// Drawer Changes tab: generate a commit message for the staged diff (gated

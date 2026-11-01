@@ -97,7 +97,9 @@ impl RepoFilter {
             RepoFilter::Ahead => r.ahead > 0,
             RepoFilter::Starred => r.favorite,
             RepoFilter::Stale => r.activity == Activity::Stale,
-            RepoFilter::Attention => attention.contains_key(&r.id),
+            // Repos that need action now (Urgent / Attention), matching the
+            // toolbar count; Info-only state (behind, hygiene) is left out.
+            RepoFilter::Attention => attention.get(&r.id).is_some_and(|s| *s != Severity::Info),
         }
     }
 }
@@ -348,9 +350,9 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// How many repos currently have at least one attention item.
+    /// How many repos need action now — the same count as the nav badge.
     fn attention_count(&self) -> usize {
-        self.attention_by_repo.len()
+        self.needs_you().0
     }
 
     /// Show/hide the contribution graph.
@@ -571,6 +573,7 @@ impl OrreryApp {
             selected: selecting && self.selected.contains(id),
             selecting,
             show_ai: self.services.ai_ready,
+            advisory: self.hygiene.badge(id),
         }
     }
 
@@ -912,6 +915,7 @@ mod tests {
             favorite: false,
             activity: orrery_core::model::Activity::Active,
             last_commit_unix: 0,
+            worktrees: Vec::new(),
         }
     }
 

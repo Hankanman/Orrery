@@ -60,6 +60,19 @@ impl OrreryApp {
             .parse::<usize>()
             .unwrap_or(draft.scan_depth)
             .clamp(1, 8);
+        draft.gitlab_hosts = parse_hosts(&s.gitlab_hosts.read(cx).value());
+        draft.gitea_hosts = parse_hosts(&s.gitea_hosts.read(cx).value());
+        let days = |input: &gpui::Entity<gpui_component::input::InputState>, old: u32| {
+            input
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(old)
+                .min(365)
+        };
+        draft.stale_pr_days = days(&s.stale_pr_days, draft.stale_pr_days);
+        draft.stale_review_days = days(&s.stale_review_days, draft.stale_review_days);
 
         self.config = draft.clone();
         let to_save = draft.clone();
@@ -78,5 +91,39 @@ impl OrreryApp {
             let _ = this.update(cx, |this, cx| this.rescan(cx));
         })
         .detach();
+    }
+}
+
+/// A comma-separated list of host domains, normalised: a pasted scheme,
+/// path or trailing slash is dropped and the domain lower-cased, so
+/// `https://Git.Acme.io/` is stored as `git.acme.io`. Duplicates and
+/// blanks are skipped.
+fn parse_hosts(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split([',', ' ', '\n']) {
+        let part = part.trim();
+        let part = part
+            .strip_prefix("https://")
+            .or_else(|| part.strip_prefix("http://"))
+            .unwrap_or(part);
+        let domain = part.split('/').next().unwrap_or("").to_ascii_lowercase();
+        if !domain.is_empty() && !out.contains(&domain) {
+            out.push(domain);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hosts;
+
+    #[test]
+    fn hosts_are_normalised_domains() {
+        assert_eq!(
+            parse_hosts(" https://Git.Acme.io/ , gitlab.corp.net,git.acme.io,, http://x.io/a/b"),
+            vec!["git.acme.io", "gitlab.corp.net", "x.io"]
+        );
+        assert!(parse_hosts("  ").is_empty());
     }
 }

@@ -184,9 +184,12 @@ fn main() {
                     // Focus the app root so key bindings (Esc) dispatch to it.
                     let focus = view.read(cx).focus.clone();
                     window.focus(&focus, cx);
-                    // This launch's own `orrery open` / `orrery://` request.
+                    // This launch's own `orrery open` / `orrery://` request,
+                    // down the same request path a handed-off one takes (the
+                    // handler was registered by `OrreryApp::new`; it's acted
+                    // on once the window is up).
                     if let Some(req) = request.clone() {
-                        view.update(cx, |this, cx| this.apply_request(req, window, cx));
+                        orrery_platform::request::dispatch(req);
                     }
                     // gpui-component's Root provides the theme + popover/modal/
                     // notification layers its components need.

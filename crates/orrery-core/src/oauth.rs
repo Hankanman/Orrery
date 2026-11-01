@@ -15,7 +15,11 @@ const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 // `repo` (not just `public_repo`) so enrichment can read private repos — needed
 // for the public/private filter and the lock badge to work on private repos.
-const SCOPE: &str = "read:user repo";
+// `security_events` because GitHub's Dependabot-alerts endpoint needs it for
+// classic OAuth tokens: `repo` alone answers 403 (see `advisories`). A token
+// minted before this scope was added keeps working; its advisories show as
+// unavailable until the user re-connects GitHub.
+const SCOPE: &str = "read:user repo security_events";
 
 /// Built-in OAuth app client id for the device flow, so sign-in works out of the
 /// box with no configuration. The device flow has no client secret, so a client
@@ -294,6 +298,14 @@ pub fn sign_out() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_flow_requests_the_dependabot_alerts_scope() {
+        let scopes: Vec<&str> = SCOPE.split(' ').collect();
+        for needed in ["read:user", "repo", "security_events"] {
+            assert!(scopes.contains(&needed), "missing scope {needed}");
+        }
+    }
 
     fn s(v: &str) -> Option<String> {
         Some(v.to_string())

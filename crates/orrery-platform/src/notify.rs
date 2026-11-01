@@ -318,10 +318,10 @@ fn resolve<'a>(actions: &'a [NotifyAction], key: &str) -> Option<&'a NotifyActio
 fn run(action: NotifyAction, token: Option<String>) {
     match action {
         NotifyAction::OpenUrl(url) => {
-            // Through `launch::open`, which only opens http(s) URLs and local
-            // paths. It can't pass the activation token on, so on Wayland
-            // the browser may flash rather than take focus.
-            if let Err(e) = launch::open(&url) {
+            // Through `launch::open_with_token`, which only opens http(s)
+            // URLs and local paths, and hands the click's activation token
+            // to the browser so it can take focus on Wayland.
+            if let Err(e) = launch::open_with_token(&url, token.as_deref()) {
                 eprintln!("[orrery notify] failed to open {url}: {e}");
             }
         }

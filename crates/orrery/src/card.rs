@@ -9,11 +9,13 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use gpui_component::checkbox::Checkbox;
+use gpui_component::tooltip::Tooltip;
 use orrery_core::launch;
 
 use crate::data::Row;
 use crate::icon::{brand, langicon, lucide};
 use crate::shell::OrreryApp;
+use crate::shell::hygiene::{self, AdvisoryBadge, Tier};
 use crate::theme::{Theme, devicon_stem, lang_color};
 use crate::widgets::{self, Tone};
 
@@ -67,6 +69,101 @@ pub struct CardState {
     /// AI is ready — gates the (cached) AI summary line, per the `aiReady`
     /// contract: with AI off, every AI affordance is hidden.
     pub show_ai: bool,
+    /// The security-advisory badge, when the repo has open advisories or
+    /// its source can't answer (see `shell::hygiene`).
+    pub advisory: Option<AdvisoryBadge>,
+}
+
+/// The "N worktrees" affordance: linked worktrees are grouped under their
+/// main checkout's card, and this opens the drawer with them listed.
+fn worktree_chip(
+    id: SharedString,
+    row: &Row,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let n = row.worktrees.len();
+    let dirty = row.worktrees.iter().filter(|w| w.dirty > 0).count();
+    let color = if dirty > 0 { t.dirty } else { t.fg2 };
+    let (app, repo) = (app.clone(), row.id.clone());
+    let hov = t.border_strong;
+    let tip = if dirty > 0 {
+        format!(
+            "{n} linked worktree{}, {dirty} dirty",
+            if n == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("{n} linked worktree{}", if n == 1 { "" } else { "s" })
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(px(4.))
+        .px(px(5.))
+        .rounded(px(t.r_xs))
+        .border_1()
+        .border_color(rgb(t.border))
+        .text_color(rgb(color))
+        .cursor_pointer()
+        .hover(move |s| s.border_color(rgb(hov)))
+        .child(lucide("folder-tree", 12., color))
+        .child(SharedString::from(format!(
+            "{n} worktree{}",
+            if n == 1 { "" } else { "s" }
+        )))
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .on_click(move |_ev, window, cx| {
+            // Don't also run the card's open-drawer click.
+            cx.stop_propagation();
+            let repo = repo.clone();
+            app.update(cx, |this, cx| this.open_worktrees(repo, window, cx));
+        })
+}
+
+/// The security-advisory badge: the highest tier's count ("3 high") in its
+/// colour, or a muted shield when the source can't answer. The tooltip (the
+/// breakdown, or why it's unavailable) is looked up when shown.
+fn advisory_badge(
+    id: SharedString,
+    row_id: SharedString,
+    badge: AdvisoryBadge,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let (label, color) = match badge {
+        AdvisoryBadge::Open(c) => {
+            let (label, tier) = hygiene::badge_label(&c);
+            let color = match tier {
+                Tier::Severe => t.behind,
+                Tier::Moderate => t.dirty,
+                Tier::Mild => t.fg2,
+            };
+            (Some(label), color)
+        }
+        AdvisoryBadge::Unavailable => (None, t.fg3),
+    };
+    let app = app.clone();
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(px(4.))
+        .text_color(rgb(color))
+        .child(lucide("shield-alert", 13., color))
+        .children(label.map(SharedString::from))
+        .tooltip(move |window, cx| {
+            let text = app
+                .read(cx)
+                .hygiene
+                .advisory_tooltip(&row_id)
+                .unwrap_or_default();
+            Tooltip::new(text).build(window, cx)
+        })
 }
 
 /// The fleet multi-select checkbox (gpui-component [`Checkbox`]): checked
@@ -256,26 +353,39 @@ pub fn card(
         .child(row.description.clone());
 
     // ── git status row ────────────────────────────────────────────────────
+    // One line, never wrapping (the card has a fixed height in the grid's
+    // uniform list): the branch name truncates to make room.
     let mut status = div()
         .flex()
         .flex_row()
-        .flex_wrap()
         .items_center()
         .gap(px(13.))
         .mt(px(12.))
+        .overflow_hidden()
         .font_family(MONO)
         .text_size(px(t.text_data_sm));
     // Urgent attention (failing CI / review request) leads the status row.
     if state.urgent {
         status = status.child(urgent_dot(t));
     }
-    status = status.child(seg("git-branch", row.branch.clone(), t.fg2));
+    status = status.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.))
+            .min_w(px(0.))
+            .text_color(rgb(t.fg2))
+            .child(lucide("git-branch", 14., t.fg2))
+            .child(div().min_w(px(0.)).truncate().child(row.branch.clone())),
+    );
     if row.ahead > 0 || row.behind > 0 {
         let color = if row.behind > 0 { t.behind } else { t.clean };
         status = status.child(
             div()
                 .flex()
                 .flex_row()
+                .flex_none()
                 .items_center()
                 .gap(px(4.))
                 .text_color(rgb(color))
@@ -286,10 +396,35 @@ pub fn card(
         );
     }
     if row.dirty > 0 {
-        status = status.child(seg(
-            "circle-dot",
-            SharedString::from(row.dirty.to_string()),
-            t.dirty,
+        status = status.child(
+            widgets::seg(
+                "circle-dot",
+                SharedString::from(row.dirty.to_string()),
+                14.,
+                t.dirty,
+            )
+            .flex_none(),
+        );
+    }
+    // Fleet hygiene, right-aligned: the worktree group and advisories.
+    if !row.worktrees.is_empty() || state.advisory.is_some() {
+        status = status.child(div().flex_1());
+    }
+    if !row.worktrees.is_empty() {
+        status = status.child(worktree_chip(
+            SharedString::from(format!("wt-{idx}")),
+            row,
+            t,
+            app,
+        ));
+    }
+    if let Some(badge) = state.advisory {
+        status = status.child(advisory_badge(
+            SharedString::from(format!("adv-{idx}")),
+            row.id.clone(),
+            badge,
+            t,
+            app,
         ));
     }
 
@@ -562,6 +697,23 @@ pub(crate) fn list_item(
             "circle-dot",
             SharedString::from(row.dirty.to_string()),
             t.dirty,
+        ));
+    }
+    if !row.worktrees.is_empty() {
+        status = status.child(worktree_chip(
+            SharedString::from(format!("lwt-{idx}")),
+            row,
+            t,
+            app,
+        ));
+    }
+    if let Some(badge) = state.advisory {
+        status = status.child(advisory_badge(
+            SharedString::from(format!("ladv-{idx}")),
+            row.id.clone(),
+            badge,
+            t,
+            app,
         ));
     }
     if !row.host.is_empty() {

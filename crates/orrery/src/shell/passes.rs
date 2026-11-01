@@ -215,6 +215,7 @@ impl OrreryApp {
         self.refresh_ci(cx);
         self.load_activity(cx);
         self.scan_agents(false, cx);
+        self.assess_at_risk(cx);
         cx.notify();
     }
 
@@ -309,6 +310,9 @@ impl OrreryApp {
     /// the only way an auth problem becomes visible instead of CI silently
     /// going stale.
     pub fn refresh_ci(&mut self, cx: &mut Context<Self>) {
+        // Security advisories ride the same cadence (rescan + attention
+        // poll); their own TTL (6h) makes most ticks a no-op.
+        self.refresh_advisories(cx);
         if !self.passes.ci.begin() {
             return;
         }

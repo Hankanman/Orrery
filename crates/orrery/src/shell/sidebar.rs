@@ -6,7 +6,7 @@ use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
-use orrery_core::attention::{AttentionKind, Severity};
+use orrery_core::attention::AttentionKind;
 
 use super::{OrreryApp, View};
 use crate::icon::lucide;
@@ -143,23 +143,11 @@ fn scanned_label(scanned_at: Option<i64>, now: i64, scanning: bool) -> String {
 }
 
 impl OrreryApp {
-    /// Mission Control's nav badge: (count, any-urgent) over the items that
-    /// need action — Urgent + Attention severities. Info items are ambient
-    /// state and don't badge.
+    /// Mission Control's nav badge: (count, any-urgent) of repos that need
+    /// action now (Urgent + Attention; Info is ambient and doesn't badge).
+    /// The same number as the toolbar's Attention button.
     fn grid_badge(&self) -> (usize, bool) {
-        let mut n = 0;
-        let mut urgent = false;
-        for item in &self.attention_items {
-            match item.severity {
-                Severity::Urgent => {
-                    n += 1;
-                    urgent = true;
-                }
-                Severity::Attention => n += 1,
-                Severity::Info => {}
-            }
-        }
-        (n, urgent)
+        self.needs_you()
     }
 
     /// The Inbox nav badge: (count, any-urgent) over the inbox-derived
@@ -395,7 +383,13 @@ impl OrreryApp {
             InboxState::Ready(d) => d.items.len() + d.notifications.len(),
             _ => 0,
         };
-        self.category_panel(
+        let thresholds = orrery_core::inbox::StaleThresholds::from_config(&self.config);
+        let now = crate::data::now_unix();
+        let stale = match &self.inbox {
+            InboxState::Ready(d) => orrery_core::inbox::stale_items(&d.raw, now, &thresholds).len(),
+            _ => 0,
+        };
+        let categories = self.category_panel(
             t,
             cx,
             "FILTER",
@@ -425,8 +419,68 @@ impl OrreryApp {
                     "Notifications".into(),
                     Some(notifications),
                 ),
+                (
+                    Some("stale".into()),
+                    "hourglass",
+                    "Stale".into(),
+                    Some(stale),
+                ),
             ],
-        )
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(categories)
+            .children(self.inbox_hosts(t, cx))
+            .into_any_element()
+    }
+
+    /// Inbox: a HOSTS filter, one row per host the inbox has items from —
+    /// only when there's more than one, since a single host filters nothing.
+    fn inbox_hosts(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        use crate::views::inbox::{InboxState, host_filter_key};
+        let InboxState::Ready(d) = &self.inbox else {
+            return None;
+        };
+        // (brand, label, count) in a fixed order.
+        let hosts: Vec<(&'static str, &'static str, usize)> = [
+            ("github", "GitHub"),
+            ("gitlab", "GitLab"),
+            ("gitea", "Gitea"),
+            ("codeberg", "Codeberg"),
+        ]
+        .into_iter()
+        .map(|(brand, label)| {
+            let n = d.items.iter().filter(|i| i.host == brand).count()
+                + d.notifications.iter().filter(|n| n.host == brand).count();
+            (brand, label, n)
+        })
+        .filter(|(_, _, n)| *n > 0)
+        .collect();
+        if hosts.len() < 2 {
+            return None;
+        }
+        let mut sec = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(section_header("HOSTS", t));
+        for (brand, label, count) in hosts {
+            let key = host_filter_key(brand);
+            let active = self.view_filter.as_ref() == Some(&key);
+            let icon_fg = if active { t.accent_bright } else { t.fg2 };
+            sec = sec.child(sidebar_filter_item(
+                SharedString::from(format!("inbox-host-{brand}")),
+                crate::icon::brand(brand, 14., icon_fg).into_any_element(),
+                label.into(),
+                Some(count),
+                active,
+                t,
+                cx.listener(move |this, _e, _w, cx| this.set_view_filter(Some(key.clone()), cx)),
+            ));
+        }
+        Some(sec.into_any_element())
     }
 
     /// Dev Tools: filter the utility belt by category (composes with the search
@@ -478,6 +532,7 @@ impl OrreryApp {
                     "GitHub account".into(),
                     None,
                 ),
+                (Some("hosts".into()), "globe", "Code hosts".into(), None),
                 (
                     Some("roots".into()),
                     "folder",
@@ -491,6 +546,12 @@ impl OrreryApp {
                     Some("notifications".into()),
                     "bell",
                     "Notifications".into(),
+                    None,
+                ),
+                (
+                    Some("security".into()),
+                    "shield-alert",
+                    "Security".into(),
                     None,
                 ),
             ],
@@ -512,12 +573,32 @@ impl OrreryApp {
                 }
             }
         }
+        // Fleet hygiene sections: repos with artefacts, repos with at-risk work.
+        let disk = self.hygiene.disk.as_ref().map_or(0, |d| {
+            self.repos
+                .iter()
+                .filter(|r| d.get(&r.id).is_some_and(|u| !u.dirs.is_empty()))
+                .count()
+        });
+        let at_risk = self.hygiene.at_risk.len();
         self.category_panel(
             t,
             cx,
             "FILTER",
             vec![
-                (None, "scissors", "All".into(), Some(merged + gone)),
+                (None, "scissors", "All".into(), None),
+                (
+                    Some("disk".into()),
+                    "hard-drive",
+                    "Disk usage".into(),
+                    Some(disk),
+                ),
+                (
+                    Some("at-risk".into()),
+                    "circle-alert",
+                    "At-risk work".into(),
+                    Some(at_risk),
+                ),
                 (
                     Some("merged".into()),
                     "git-merge",

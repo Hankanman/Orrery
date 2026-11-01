@@ -33,11 +33,16 @@ fn prune_failure(
 }
 
 impl OrreryApp {
-    /// Scan all repos for prunable branches (sync git, off-thread).
+    /// Load the Cleanup view: prunable branches (sync git, off-thread), the
+    /// disk-usage sizes (cached first, stale repos re-measured) and a fresh
+    /// at-risk assessment.
     pub fn load_cleanup(&mut self, cx: &mut Context<Self>) {
         use crate::views::cleanup::CleanupState;
+        self.load_disk_usage(false, cx);
+        self.assess_at_risk(cx);
         self.cleanup = CleanupState::Loading;
         self.cleanup_ui.confirm.disarm();
+        self.cleanup_ui.purge_confirm.disarm();
         cx.notify();
         let rows = self.rows.clone();
         cx.spawn(async move |this, cx| {

@@ -69,15 +69,39 @@ pub fn launch(template: &str, path: &str) -> Result<(), String> {
 /// `smb:`, custom app schemes), so only http(s) URLs and existing absolute
 /// local paths are opened; everything else is refused.
 pub fn open(target: &str) -> Result<(), String> {
+    open_with_token(target, None)
+}
+
+/// [`open`], handing on an XDG activation token (from a notification click,
+/// say). The token goes to the xdg-open child as `XDG_ACTIVATION_TOKEN` (and
+/// `DESKTOP_STARTUP_ID` for X11 startup notification), so on Wayland the
+/// opened browser may take focus instead of only flashing. Same validation as
+/// [`open`]: only http(s) URLs and existing absolute local paths.
+pub fn open_with_token(target: &str, token: Option<&str>) -> Result<(), String> {
     let target = openable(target)?;
-    Command::new("xdg-open")
-        .arg(&target)
-        .stdin(Stdio::null())
+    let mut cmd = Command::new("xdg-open");
+    cmd.arg(&target);
+    for (key, value) in token_env(token) {
+        cmd.env(key, value);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("failed to open `{target}`: {e}"))
+}
+
+/// The environment that carries an activation token to a launched child.
+/// Empty (or whitespace) tokens are ignored.
+fn token_env(token: Option<&str>) -> Vec<(&'static str, String)> {
+    match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => vec![
+            ("XDG_ACTIVATION_TOKEN", t.to_string()),
+            ("DESKTOP_STARTUP_ID", t.to_string()),
+        ],
+        None => Vec::new(),
+    }
 }
 
 /// Validate an [`open`] target: an absolute http(s) URL with a host (returned
@@ -109,7 +133,29 @@ fn local(target: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch_tokens, openable};
+    use super::{dispatch_tokens, open_with_token, openable, token_env};
+
+    #[test]
+    fn open_with_token_still_validates() {
+        // Refused before anything is spawned, token or not.
+        for bad in ["file:///etc/passwd", "smb://evil.example/share", "", "x"] {
+            assert!(open_with_token(bad, Some("tok")).is_err(), "{bad:?}");
+            assert!(open_with_token(bad, None).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn token_env_sets_both_vars_or_none() {
+        assert_eq!(
+            token_env(Some("abc")),
+            vec![
+                ("XDG_ACTIVATION_TOKEN", "abc".to_string()),
+                ("DESKTOP_STARTUP_ID", "abc".to_string()),
+            ]
+        );
+        assert!(token_env(None).is_empty());
+        assert!(token_env(Some("  ")).is_empty());
+    }
 
     #[test]
     fn opens_http_urls_and_existing_paths() {

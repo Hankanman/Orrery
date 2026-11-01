@@ -39,6 +39,10 @@ const LUCIDE_ICONS = [
   "binary", "hash", "braces", "type", "user", "rocket", "bell",
   // layout toggle + compact list launcher
   "list", "code",
+  // inbox: stale filter
+  "hourglass",
+  // fleet hygiene: advisories badge, worktree group toggle, at-risk actions
+  "shield-alert", "chevron-down", "chevron-right", "upload", "archive",
 ];
 
 // Language marks: multicolor devicon "-original" SVGs, rendered in full color
@@ -74,8 +78,10 @@ for (const name of LUCIDE_ICONS) {
   writeFileSync(join(OUT, "lucide", `${name}.svg`), svg);
 }
 
-// Host brand marks (monochrome single-path → tint fine).
-for (const b of ["github", "gitlab"]) {
+// Host brand marks (monochrome single-path → tint fine). Gitea covers
+// self-hosted Gitea/Forgejo; Codeberg gets its own mark.
+const BRANDS = ["github", "gitlab", "gitea", "codeberg"];
+for (const b of BRANDS) {
   copyFileSync(join(SIMPLE, `${b}.svg`), join(OUT, "brand", `${b}.svg`));
 }
 
@@ -91,4 +97,4 @@ for (const [stem, dir] of Object.entries(DEVICON)) {
   }
 }
 
-console.log(`generated ${LUCIDE_ICONS.length} lucide + 2 brand + ${devCount} devicon SVGs into ${OUT}`);
+console.log(`generated ${LUCIDE_ICONS.length} lucide + ${BRANDS.length} brand + ${devCount} devicon SVGs into ${OUT}`);
