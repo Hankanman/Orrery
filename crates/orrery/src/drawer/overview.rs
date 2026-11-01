@@ -137,12 +137,16 @@ pub(super) fn overview(
             });
         }
     }
+    // Security advisories (Dependabot / local audit), when a report exists.
+    if let Some(report) = &data.advisory {
+        facts = facts.child(advisory_seg(report, t));
+    }
     col = col.child(facts);
 
     // Async git data.
     col = col.child(branches_section(data, t, app));
     col = col.child(commits_section(data, t));
-    col = col.child(worktrees_section(data, t, app));
+    col = col.child(worktrees_section(row, data, t, app));
     col.child(dispatch_section(data, t, app))
 }
 
@@ -219,13 +223,146 @@ fn dispatch_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> im
     s
 }
 
-fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
-    let mut s = section(t, "Worktrees", data.worktrees.as_ref().map(|w| w.len()));
+/// The Overview's advisory fact: the breakdown in the badge colour, or a
+/// muted "advisories unavailable" with the reason (and the re-connect hint
+/// for a token without the Dependabot scope) on hover.
+fn advisory_seg(report: &orrery_core::advisories::AdvisoryReport, t: &Theme) -> impl IntoElement {
+    use crate::shell::hygiene::{self, AdvisoryBadge, Tier};
+    let text = hygiene::describe(report);
+    let (label, color) = match hygiene::badge_of(report) {
+        Some(AdvisoryBadge::Open(c)) => {
+            let (label, tier) = hygiene::badge_label(&c);
+            let color = match tier {
+                Tier::Severe => t.behind,
+                Tier::Moderate => t.dirty,
+                Tier::Mild => t.fg2,
+            };
+            (format!("{label} advisories"), color)
+        }
+        Some(AdvisoryBadge::Unavailable) => ("advisories unavailable".to_string(), t.fg3),
+        None => ("no known advisories".to_string(), t.clean),
+    };
+    div()
+        .id("advisory-fact")
+        .child(seg("shield-alert", SharedString::from(label), color))
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+        })
+}
+
+/// A small square icon button (a worktree row's IDE / folder launchers).
+fn icon_btn(
+    id: String,
+    icon: &str,
+    t: &Theme,
+    on: impl Fn(&mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(id))
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(22.))
+        .h(px(22.))
+        .rounded(px(t.r_xs))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(t.surface_hover)))
+        .child(lucide(icon, 12., t.fg2))
+        .on_click(move |_ev, _win, cx| on(cx))
+}
+
+/// A worktree Orrery leaves to its own tool: agent worktrees under a
+/// `.claude` directory, and Orrery's dispatch worktrees (the Agents view
+/// tracks those). Hidden from the drawer list, as from the scan.
+fn tool_managed(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    if p.components().any(|c| c.as_os_str() == ".claude") {
+        return true;
+    }
+    orrery_core::dispatch::worktree_dest("/r", "w")
+        .and_then(|d| d.parent().map(|p| p.to_path_buf()))
+        .is_some_and(|dir| p.starts_with(dir))
+}
+
+fn worktrees_section(
+    row: &Row,
+    data: &DrawerData,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+) -> impl IntoElement {
+    let open = data.worktrees_open;
+    let (shown, hidden): (Vec<&WorktreeRow>, usize) = match &data.worktrees {
+        Some(list) => {
+            let shown: Vec<&WorktreeRow> = list.iter().filter(|w| !tool_managed(&w.path)).collect();
+            let hidden = list.len() - shown.len();
+            (shown, hidden)
+        }
+        None => (Vec::new(), 0),
+    };
+    let count = if data.worktrees.is_some() {
+        shown.len()
+    } else {
+        row.worktrees.len()
+    };
+    // The scanned state (branch, dirty, ahead/behind) of a listed worktree.
+    let scanned = |path: &str| {
+        let path = path.trim_end_matches('/');
+        row.worktrees
+            .iter()
+            .find(|w| w.id.trim_end_matches('/') == path)
+    };
+    let dirty = row.worktrees.iter().filter(|w| w.dirty > 0).count();
+
+    // Clickable header: chevron + "WORKTREES · n", and a dirty summary when
+    // collapsed.
+    let header = {
+        let app = app.clone();
+        let mut h = div()
+            .id("wt-toggle")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.))
+            .mb(px(3.))
+            .cursor_pointer()
+            .child(lucide(
+                if open {
+                    "chevron-down"
+                } else {
+                    "chevron-right"
+                },
+                13.,
+                t.fg3,
+            ))
+            .child(widgets::section_header(
+                "Worktrees",
+                widgets::Header::Caps { count: Some(count) },
+                t,
+            ))
+            .on_click(move |_ev, _win, cx| {
+                app.update(cx, |this, cx| this.toggle_drawer_worktrees(cx));
+            });
+        if !open && dirty > 0 {
+            h = h.child(
+                div()
+                    .ml(px(6.))
+                    .font_family(MONO)
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.dirty))
+                    .child(SharedString::from(format!("{dirty} dirty"))),
+            );
+        }
+        h
+    };
+    let mut s = div().flex().flex_col().gap(px(3.)).child(header);
+    if !open {
+        return s;
+    }
     match &data.worktrees {
         None => s = s.child(placeholder("Loading…", t)),
-        Some(list) if list.is_empty() => s = s.child(placeholder("None.", t)),
-        Some(list) => {
-            for w in list {
+        Some(_) if shown.is_empty() && hidden == 0 => s = s.child(placeholder("None.", t)),
+        Some(_) => {
+            for w in shown {
                 let remove = {
                     let (app, name) = (app.clone(), w.name.to_string());
                     div()
@@ -244,27 +381,98 @@ fn worktrees_section(data: &DrawerData, t: &Theme, app: &Entity<OrreryApp>) -> i
                             app.update(cx, |this, cx| this.drawer_remove_worktree(name, cx));
                         })
                 };
+                // Branch + state from the scan when it has seen this
+                // worktree; the git worktree name until the next rescan.
+                let info = scanned(&w.path);
+                let branch = info.map(|i| i.branch.clone()).unwrap_or(w.name.clone());
+                let mut state = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .flex_none();
+                if let Some(i) = info {
+                    if i.ahead > 0 || i.behind > 0 {
+                        let color = if i.behind > 0 { t.behind } else { t.clean };
+                        state = state.child(
+                            div()
+                                .text_color(rgb(color))
+                                .child(SharedString::from(format!("↑{} ↓{}", i.ahead, i.behind))),
+                        );
+                    }
+                    state = state.child(if i.dirty > 0 {
+                        seg(
+                            "circle-dot",
+                            SharedString::from(format!("{} dirty", i.dirty)),
+                            t.dirty,
+                        )
+                        .into_any_element()
+                    } else {
+                        div()
+                            .text_color(rgb(t.clean))
+                            .child("clean")
+                            .into_any_element()
+                    });
+                }
+                let path = w.path.clone();
+                let ide = {
+                    let (app, path) = (app.clone(), path.clone());
+                    icon_btn(format!("wt-ide-{}", w.name), "code", t, move |cx| {
+                        let cmd = app.read(cx).config.ide_command.clone();
+                        let _ = launch::launch(&cmd, &path);
+                    })
+                };
+                let folder = icon_btn(format!("wt-dir-{}", w.name), "folder-open", t, {
+                    let path = path.clone();
+                    move |_cx| {
+                        let _ = launch::open(&path);
+                    }
+                });
                 s = s.child(
                     div()
                         .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(7.))
+                        .flex_col()
+                        .gap(px(2.))
                         .py(px(4.))
                         .font_family(MONO)
                         .text_size(px(t.text_data_sm))
-                        .child(lucide("folder-tree", 13., t.fg2))
-                        .child(div().text_color(rgb(t.fg1)).child(w.name.clone()))
                         .child(
                             div()
-                                .flex_1()
-                                .min_w(px(0.))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(7.))
+                                .child(lucide("folder-tree", 13., t.fg2))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_color(rgb(t.fg1))
+                                        .child(branch),
+                                )
+                                .child(state)
+                                .child(ide)
+                                .child(folder)
+                                .child(remove),
+                        )
+                        .child(
+                            div()
+                                .pl(px(20.))
                                 .truncate()
                                 .text_color(rgb(t.fg3))
-                                .child(w.path.clone()),
-                        )
-                        .child(remove),
+                                .child(path),
+                        ),
                 );
+            }
+            if hidden > 0 {
+                s = s.child(placeholder(
+                    format!(
+                        "+{hidden} tool-managed worktree{} (.claude, agent dispatch) not shown",
+                        if hidden == 1 { "" } else { "s" }
+                    ),
+                    t,
+                ));
             }
         }
     }

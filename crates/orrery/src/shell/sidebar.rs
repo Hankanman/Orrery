@@ -492,6 +492,12 @@ impl OrreryApp {
                     "Notifications".into(),
                     None,
                 ),
+                (
+                    Some("security".into()),
+                    "shield-alert",
+                    "Security".into(),
+                    None,
+                ),
             ],
         )
     }
@@ -511,12 +517,32 @@ impl OrreryApp {
                 }
             }
         }
+        // Fleet hygiene sections: repos with artefacts, repos with at-risk work.
+        let disk = self.hygiene.disk.as_ref().map_or(0, |d| {
+            self.repos
+                .iter()
+                .filter(|r| d.get(&r.id).is_some_and(|u| !u.dirs.is_empty()))
+                .count()
+        });
+        let at_risk = self.hygiene.at_risk.len();
         self.category_panel(
             t,
             cx,
             "FILTER",
             vec![
-                (None, "scissors", "All".into(), Some(merged + gone)),
+                (None, "scissors", "All".into(), None),
+                (
+                    Some("disk".into()),
+                    "hard-drive",
+                    "Disk usage".into(),
+                    Some(disk),
+                ),
+                (
+                    Some("at-risk".into()),
+                    "circle-alert",
+                    "At-risk work".into(),
+                    Some(at_risk),
+                ),
                 (
                     Some("merged".into()),
                     "git-merge",

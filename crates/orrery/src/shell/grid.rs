@@ -531,6 +531,7 @@ impl OrreryApp {
             selected: selecting && self.selected.contains(id),
             selecting,
             show_ai: self.services.ai_ready,
+            advisory: self.hygiene.badge(id),
         }
     }
 
@@ -815,6 +816,7 @@ mod tests {
             favorite: false,
             activity: orrery_core::model::Activity::Active,
             last_commit_unix: 0,
+            worktrees: Vec::new(),
         };
         let rows = [
             row("/b", "Rust"),

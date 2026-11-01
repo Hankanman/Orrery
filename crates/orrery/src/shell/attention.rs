@@ -109,18 +109,33 @@ impl OrreryApp {
             _ => Vec::new(),
         };
         let ci = orrery_core::ci::facts(&self.ci_states, &self.repos);
-        self.attention_items = attention::compute(&self.repos, inbox, &ci, &prunable, &agents);
+        // Fleet hygiene: at-risk work and open security advisories.
+        let advisories = orrery_core::advisories::facts(&self.hygiene.advisories, &self.repos);
+        let hygiene = attention::Hygiene {
+            at_risk: &self.hygiene.at_risk,
+            advisories: &advisories,
+        };
+        self.attention_items =
+            attention::compute_with(&self.repos, inbox, &ci, &prunable, &agents, hygiene);
         self.derived.attention_gen += 1; // the Attention filter reads it
         // Items are severity-sorted (Urgent first), so a repo's first
-        // occurrence is its highest severity.
+        // occurrence is its highest severity. A linked worktree has no card
+        // of its own, so its items count against its main checkout's card.
+        let parents: std::collections::HashMap<&str, &str> = self
+            .repos
+            .iter()
+            .filter_map(|r| Some((r.id.as_str(), r.worktree_of.as_deref()?)))
+            .collect();
         self.attention_by_repo.clear();
         for item in &self.attention_items {
             if let Some(id) = &item.repo.id {
+                let card = parents.get(id.as_str()).copied().unwrap_or(id.as_str());
                 self.attention_by_repo
-                    .entry(SharedString::from(id.clone()))
+                    .entry(SharedString::from(card.to_string()))
                     .or_insert(item.severity);
             }
         }
+        self.rebuild_advisory_badges();
         self.push_tray_attention();
         self.notify_fresh_urgent();
     }
