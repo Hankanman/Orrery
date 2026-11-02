@@ -2,7 +2,7 @@
 # carries the UI (theme, cards, shell, views).
 [package]
 name = "orrery"
-version = "2026.10.1"
+version = "1.0.0"
 edition = "2024"
 publish = false
 description = "every repo in orbit — a Linux-native command center for your git repos"

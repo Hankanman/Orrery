@@ -1,7 +1,7 @@
 # Maintainer: Seb Burrell <sebburrell@outlook.com>
 pkgname=orrery-git
 _pkgname=orrery
-pkgver=2026.7.1.r0.g0000000
+pkgver=1.0.0.r0.g0000000
 pkgrel=1
 pkgdesc="every repo in orbit — a Linux-native command center for your git repos"
 arch=('x86_64')
